@@ -25,7 +25,10 @@ impl App {
         if self.is_action(KeyAction::ForceQuit, &key) {
             // First Ctrl+C asks for confirmation (if enabled); a second Ctrl+C
             // while the dialog is up forces the quit.
-            if self.mode == AppMode::ConfirmQuit || !self.config.appearance.confirm_quit {
+            // An install in flight always asks: quitting abandons it.
+            if self.mode == AppMode::ConfirmQuit
+                || !(self.config.appearance.confirm_quit || self.update_installing())
+            {
                 self.should_quit = true;
             } else {
                 self.pre_quit_mode = Some(self.mode);
@@ -168,6 +171,7 @@ impl App {
 
         match key.code {
             _ if self.is_action(KeyAction::Quit, &key) => self.request_quit(),
+            _ if self.is_action(KeyAction::Update, &key) => self.press_update_key(),
             _ if self.is_action(KeyAction::MoveHostUp, &key) => self.move_host_manual(-1)?,
             _ if self.is_action(KeyAction::MoveHostDown, &key) => self.move_host_manual(1)?,
             _ if self.is_action(KeyAction::MoveGroupUp, &key) => self.move_selection_by_group(-1),
@@ -1093,9 +1097,9 @@ impl App {
     }
 
     /// Begin quitting: show the confirmation dialog, or quit immediately when
-    /// confirmation is disabled in config.
+    /// confirmation is disabled in config and no update is installing.
     pub(crate) fn request_quit(&mut self) {
-        if !self.config.appearance.confirm_quit {
+        if !(self.config.appearance.confirm_quit || self.update_installing()) {
             self.should_quit = true;
             return;
         }
@@ -1316,6 +1320,7 @@ impl App {
                 SettingToggle::SessionLogging => self.config.session_logging.enabled,
                 SettingToggle::CommandHistory => self.config.command_history.enabled,
                 SettingToggle::Ping => self.config.ping.enabled,
+                SettingToggle::UpdateCheck => self.config.updates.check,
             }),
         }
     }
@@ -1356,6 +1361,7 @@ impl App {
                 self.config.command_history.enabled = !self.config.command_history.enabled;
             }
             SettingToggle::Ping => self.config.ping.enabled = !self.config.ping.enabled,
+            SettingToggle::UpdateCheck => self.config.updates.check = !self.config.updates.check,
         }
         true
     }

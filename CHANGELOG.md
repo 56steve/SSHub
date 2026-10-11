@@ -4,6 +4,29 @@ All notable changes to SSHub are documented in this file.
 
 ## [Unreleased]
 
+## [0.17.7] - 2026-10-11
+
+### Added
+
+- **Update notice** (issue #149) - on start the TUI asks GitHub for the
+  latest release; a newer one shows next to the version in the tab bar, in a
+  `Shift+U update` footer hint and in a toast. `Shift+U` on the hosts tab
+  installs it through the channel SSHub came from: `npm install -g
+  sshub-tui@<version>`, `cargo install sshub --version <version>`, or for a
+  release tarball a download that is run once with `--version` before it
+  replaces the binary in place. Source builds and `npx` runs get a hint
+  instead, and a failed install shows the command and its error. With no
+  update known, `Shift+U` checks on demand. While an update installs, quitting
+  asks first even with quit confirmation off. The check needs `curl`; `Check
+  for updates` in Settings (`Ctrl+H`), or `[updates] check = false` in
+  `config.toml`, turns it off.
+
+### Fixed
+
+- **Error popup title** - the popup for a failed snippet command or update
+  said "Connection failed"; it now says "Error" and lets the message name what
+  failed.
+
 ## [0.17.6] - 2026-10-11
 
 ### Fixed
