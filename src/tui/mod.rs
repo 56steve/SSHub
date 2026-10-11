@@ -771,6 +771,7 @@ fn render_inner(frame: &mut Frame, app: &App, composition: &FrameComposition) {
             .as_ref()
             .filter(|p| !p.compat)
             .map(|p| p.name.as_str()),
+        app.update_badge().as_deref(),
         theme,
     );
 
@@ -967,7 +968,9 @@ fn render_notice_popup(frame: &mut Frame, app: &App) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(Span::styled(" Connection failed ", error))
+                    // Each message opens with its own headline (connect,
+                    // SFTP, snippet, update), so the title stays generic.
+                    .title(Span::styled(" Error ", error))
                     .border_style(error),
             ),
         popup_area,
@@ -1273,6 +1276,18 @@ fn footer_keybinds(
         if let Some(i) = binds.iter().position(|(_, l)| *l == label) {
             pinned.push(binds.remove(i));
         }
+    }
+    // A known update is pinned too: it is rare and the key does nothing visible
+    // otherwise. Hosts tab only, which is where the key works.
+    let update_key = app
+        .config
+        .keybinds
+        .primary(crate::config::KeyAction::Update);
+    if app.active_tab == 0
+        && matches!(app.update.status, crate::app::UpdateStatus::Available(_))
+        && !update_key.is_empty()
+    {
+        pinned.insert(0, (update_key.to_string(), "update"));
     }
     let pinned_len = pinned.len();
     let mut binds: Vec<_> = binds
@@ -1963,16 +1978,18 @@ fn render_form_popup(frame: &mut Frame, app: &App, kind: FormKind) {
 
 fn render_confirm_quit_popup(frame: &mut Frame, app: &App) {
     let active = app.tunnel_manager.active_count();
-    let message = if active > 0 {
-        format!("Quit sshub?\n{active} active tunnel(s) will be closed.")
-    } else {
-        "Quit sshub?".to_string()
-    };
+    let mut message = "Quit sshub?".to_string();
+    if active > 0 {
+        message.push_str(&format!("\n{active} active tunnel(s) will be closed."));
+    }
+    if app.update_installing() {
+        message.push_str("\nAn update is still installing;\nquitting now may leave it broken.");
+    }
     let hint = "y: quit \u{2502} n: stay \u{2502} Esc: cancel";
 
     let area = frame.area();
     let popup_width = 44u16.min(area.width);
-    let popup_height = if active > 0 { 6u16 } else { 5u16 }.min(area.height);
+    let popup_height = (message.lines().count() as u16 + 4).min(area.height);
     let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -2399,6 +2416,7 @@ mod tests {
                             1,
                             "~/.config/sshub",
                             Some(&name),
+                            None,
                             app.theme(),
                         )
                     })
@@ -2425,6 +2443,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn tab_bar_update_badge_survives_a_profile_at_120_columns() {
+        // The badge makes the version label too wide to share the row with the
+        // scope path; the scope gives way, the version and the badge stay.
+        let app = test_app_with_hosts();
+        let mut terminal = Terminal::new(TestBackend::new(120, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                widgets::tab_bar::render_tab_bar(
+                    frame,
+                    Rect::new(0, 0, 120, 1),
+                    1,
+                    "~/.config/sshub",
+                    Some("alpha"),
+                    Some("updating to v99.0.0…"),
+                    app.theme(),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row: String = (0..120).map(|x| buffer[(x, 0)].symbol()).collect();
+        assert!(
+            row.contains("profile: alpha") && row.contains("audit"),
+            "{row}"
+        );
+        assert!(row.contains("updating to v99.0.0…"), "{row}");
+        assert!(
+            row.contains(concat!("v", env!("CARGO_PKG_VERSION"))),
+            "{row}"
+        );
     }
     #[test]
     fn profile_footer_and_settings_show_current_workspace_and_remapped_key() {
@@ -2831,6 +2881,7 @@ mod tests {
                         .as_ref()
                         .filter(|p| !p.compat)
                         .map(|p| p.name.as_str()),
+                    app.update_badge().as_deref(),
                     theme,
                 );
                 let rule2 = row_in(area, areas.tab_bar.y + areas.tab_bar.height);
