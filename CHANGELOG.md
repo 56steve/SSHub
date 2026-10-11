@@ -4,6 +4,24 @@ All notable changes to SSHub are documented in this file.
 
 ## [Unreleased]
 
+## [0.17.6] - 2026-10-11
+
+### Fixed
+
+- **Line drawing in embedded sessions** (issue #147, reported by
+  [@Frysuni](https://github.com/Frysuni)) - ncurses apps such as nvtop draw
+  boxes and graph borders by switching to the DEC Special Graphics character
+  set and printing letters (`ESC ( 0`, then `lqqk`). The embedded terminal
+  ignored the switch, so borders showed up as rows of `q`, `x`, `l` and `k`.
+  It now follows the switch, both `ESC ( 0` / `ESC ( B` and SO/SI with the
+  set in G1, draws the set as its Unicode glyphs (`┌─┐│`), and keeps it
+  across cursor save and restore.
+- **Typing after ticking Remember** (PR #146) - in the SSH authentication
+  modal, keys typed or pasted while the Remember box had focus were
+  dropped, so ticking Remember first and then typing sent a password or
+  passphrase missing those characters. They now go to the input; Space on
+  the box only ticks and unticks it.
+
 ## [0.17.5] - 2026-10-07
 
 ### Added
