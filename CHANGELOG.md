@@ -4,6 +4,8 @@ All notable changes to SSHub are documented in this file.
 
 ## [Unreleased]
 
+## [0.17.7] - 2026-10-11
+
 ### Added
 
 - **Update notice** (issue #149) - on start the TUI asks GitHub for the
