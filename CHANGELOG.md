@@ -4,6 +4,8 @@ All notable changes to SSHub are documented in this file.
 
 ## [Unreleased]
 
+## [0.17.6] - 2026-10-11
+
 ### Fixed
 
 - **Line drawing in embedded sessions** (issue #147, reported by
