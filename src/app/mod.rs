@@ -528,6 +528,8 @@ pub struct App {
     /// Saved workspaces, loaded when the workspace picker opens.
     pub workspaces: Vec<crate::store::Workspace>,
     last_click: Option<(std::time::Instant, u16, u16)>,
+    /// Id of the tunnel the last dashboard click picked, for its double click.
+    tunnel_click_pick: Option<i64>,
     resolver: Box<dyn HostResolver>,
     metadata: Arc<dyn MetadataStore>,
     store: Arc<LauncherStore>,
@@ -1125,6 +1127,7 @@ impl App {
             panes: None,
             workspaces: Vec::new(),
             last_click: None,
+            tunnel_click_pick: None,
             resolver: deps.resolver,
             metadata: deps.metadata,
             store: deps.store,

@@ -39,29 +39,20 @@ pub fn render_tunnels(frame: &mut Frame, area: Rect, app: &App) {
         theme.style(StyleRole::TunnelsSummary),
     );
 
-    let mut body_y = summary_y + 2;
-    if let Some(tunnel) = app.tunnels.get(app.tunnel_selected) {
-        let status = app.tunnel_manager.status(tunnel.id);
-        if matches!(status, "gave_up" | "error" | "reconnecting") {
-            if let Some(detail) = app.tunnel_manager.error_detail(tunnel.id) {
-                if !detail.is_empty() {
-                    // Still retrying is a notice, not a failure: the tunnel is
-                    // working its way back on its own.
-                    let style = if status == "reconnecting" {
-                        theme.style(StyleRole::TunnelsNotice)
-                    } else {
-                        theme.style(StyleRole::TunnelsError)
-                    };
-                    buf.set_string(
-                        inner_x,
-                        body_y,
-                        crate::tui::text::ellipsize(&format!("error: {detail}"), inner_w as usize),
-                        style,
-                    );
-                    body_y += 2;
-                }
-            }
-        }
+    if let Some((status, detail)) = selected_detail(app) {
+        // Still retrying is a notice, not a failure: the tunnel is
+        // working its way back on its own.
+        let style = if status == "reconnecting" {
+            theme.style(StyleRole::TunnelsNotice)
+        } else {
+            theme.style(StyleRole::TunnelsError)
+        };
+        buf.set_string(
+            inner_x,
+            summary_y + 2,
+            crate::tui::text::ellipsize(&format!("error: {detail}"), inner_w as usize),
+            style,
+        );
     }
 
     if let Some(ref notice) = app.tunnel_notice {
@@ -72,7 +63,8 @@ pub fn render_tunnels(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     // Optional error detail + spacer, then table header
-    let header_y = body_y;
+    let data_y = data_top(area, app);
+    let header_y = data_y - 2;
     if header_y >= area.y + area.height {
         return;
     }
@@ -95,7 +87,6 @@ pub fn render_tunnels(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     // Row 4+: Data rows
-    let data_y = header_y + 2;
     let max_rows = (area.y + area.height).saturating_sub(data_y) as usize;
 
     let visible_rows = max_rows.min(app.tunnels.len());
@@ -148,6 +139,25 @@ pub fn render_tunnels(frame: &mut Frame, area: Rect, app: &App) {
         let y = data_y + 2.min(max_rows.saturating_sub(1) as u16);
         buf.set_string(x, y, msg, theme.style(StyleRole::TunnelsEmpty));
     }
+}
+
+/// The selected tunnel's status and failure detail, when the tab shows that
+/// detail on its own line above the table.
+fn selected_detail(app: &App) -> Option<(&str, &str)> {
+    let tunnel = app.tunnels.get(app.tunnel_selected)?;
+    let status = app.tunnel_manager.status(tunnel.id);
+    if !matches!(status, "gave_up" | "error" | "reconnecting") {
+        return None;
+    }
+    let detail = app.tunnel_manager.error_detail(tunnel.id)?;
+    (!detail.is_empty()).then_some((status, detail))
+}
+
+/// First data row: summary strip and spacer, the selected tunnel's detail and
+/// a spacer when it has one, then the column header and its separator. Mouse
+/// hit-testing reads this too, so a click lands on the row drawn under it.
+pub fn data_top(area: Rect, app: &App) -> u16 {
+    area.y + if selected_detail(app).is_some() { 6 } else { 4 }
 }
 
 /// How one tunnel status presents itself: glyph, state role and short word.

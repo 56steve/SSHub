@@ -330,6 +330,87 @@ fn a_click_on_the_hosts_tab_focuses_the_panel_under_it() {
     assert_eq!(app.focused_panel, PanelId::Recent);
 }
 
+/// The audit rows sit under the header's rule, and a click picks the row drawn
+/// under the pointer — with and without the selected event's note line, which
+/// pushes the whole table down two rows.
+#[test]
+fn on_the_audit_tab_a_click_picks_the_row_drawn_there() {
+    let mut app = test_app(vec![]);
+    app.active_tab = 4;
+    let event = |host: &str, note: Option<&str>| crate::store::AuthEvent {
+        id: 1,
+        host_name: host.into(),
+        username: None,
+        via: None,
+        status: "ok".into(),
+        note: note.map(str::to_string),
+        log_path: None,
+        created_at: 0,
+    };
+    app.auth_events_cache = vec![
+        event("alpha-host", Some("why it happened")),
+        event("bravo-host", Some("why it happened")),
+        event("charlie-host", None),
+    ];
+
+    // Selected alpha has a note: the table starts below it.
+    let buf = draw(&mut app, 120, 40);
+    let (x, y) = find_text(&buf, "alpha-host");
+    assert_eq!(buf[(x, y - 1)].symbol(), "\u{2500}", "the rule, not a row");
+    let (x, y) = find_text(&buf, "charlie-host");
+    click(&mut app, x, y);
+    assert_eq!(app.audit_selected, 2);
+
+    // Selected charlie has none: the table moves up, and so do the clicks.
+    let buf = draw(&mut app, 120, 40);
+    let (x, y) = find_text(&buf, "bravo-host");
+    click(&mut app, x, y);
+    assert_eq!(app.audit_selected, 1);
+}
+
+/// A failing tunnel's detail line pushes the table down; a click must follow
+/// it, and a double click must act on the tunnel its first click picked even
+/// though that pick moved the table before the second click.
+#[test]
+fn on_the_tunnels_tab_a_click_picks_the_row_drawn_under_the_detail_line() {
+    let mut app = test_app(vec![]);
+    app.active_tab = 2;
+    app.tunnels = ["alpha-db", "bravo-db", "charlie-db"]
+        .iter()
+        .enumerate()
+        .map(|(i, label)| crate::store::Tunnel {
+            id: i as i64 + 1,
+            host_id: None,
+            tunnel_type: crate::store::TunnelType::Local,
+            local_port: 8080 + i as u16,
+            remote_host: "db.internal".into(),
+            remote_port: 5432,
+            label: Some((*label).into()),
+            auto_connect: false,
+            created_at: 0,
+            updated_at: 0,
+        })
+        .collect();
+    let cfg = crate::config::TunnelReconnectConfig::default();
+    app.tunnel_manager.on_auto_start_failed(1, "boom", &cfg);
+    assert_eq!(app.tunnel_manager.status(1), "reconnecting");
+
+    let buf = draw(&mut app, 120, 40);
+    find_text(&buf, "error: boom");
+    let (x, y) = find_text(&buf, "charlie-db");
+    click(&mut app, x, y);
+    assert_eq!(app.tunnel_selected, 2);
+
+    // Picking alpha shows its detail line between the two clicks.
+    let buf = draw(&mut app, 120, 40);
+    let (x, y) = find_text(&buf, "alpha-db");
+    click(&mut app, x, y);
+    draw(&mut app, 120, 40);
+    click(&mut app, x, y);
+    assert_eq!(app.tunnel_selected, 0);
+    assert_eq!(app.tunnel_notice.as_deref(), Some("Stopped tunnel :8080"));
+}
+
 #[test]
 fn the_sftp_browser_answers_a_click_a_double_click_and_the_wheel() {
     use crate::sftp::model::{FileEntry, Focus, SftpState};
