@@ -4,6 +4,8 @@ All notable changes to SSHub are documented in this file.
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-10-13
+
 ### Fixed
 
 - **Audit and tunnels tabs take clicks where the rows are** - the audit table
