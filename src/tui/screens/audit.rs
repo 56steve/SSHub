@@ -48,29 +48,26 @@ pub fn render_audit(frame: &mut Frame, area: Rect, app: &App) {
         theme,
     );
 
-    let mut body_y = filter_y + 2;
     if let Some(event) = app.auth_events_cache.get(app.audit_selected) {
         let note = audit_note(event);
         if !note.is_empty() {
             buf.set_string(
                 inner_x,
-                body_y,
+                filter_y + 2,
                 crate::tui::text::ellipsize(&format!("note: {note}"), inner_w as usize),
                 note_detail_style(&event.status, theme),
             );
-            body_y += 2;
         }
     }
 
-    // Table header (after optional note detail + spacer)
-    let header_y = body_y;
+    // Table header and its rule, directly above the data rows.
+    let data_y = data_top(area, app);
+    let header_y = data_y - 2;
     if header_y >= area.y + area.height {
         return;
     }
     render_table_header(buf, inner_x, header_y, inner_w, theme);
 
-    // Row 3+: Data rows
-    let data_y = header_y + 1;
     let max_rows = (area.y + area.height).saturating_sub(data_y) as usize;
     let events = &app.auth_events_cache;
 
@@ -88,7 +85,7 @@ pub fn render_audit(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     // Empty state
-    if events.is_empty() {
+    if events.is_empty() && max_rows > 0 {
         let msg = "No audit events";
         let x = inner_x + (inner_w.saturating_sub(msg.len() as u16)) / 2;
         let y = data_y + 2.min(max_rows.saturating_sub(1) as u16);
@@ -122,6 +119,17 @@ pub fn render_audit(frame: &mut Frame, area: Rect, app: &App) {
             },
         );
     }
+}
+
+/// First data row: filter strip and spacer, then the selected event's note and
+/// a spacer when it has one, then the column header and its rule. Mouse
+/// hit-testing reads this too, so a click lands on the row drawn under it.
+pub fn data_top(area: Rect, app: &App) -> u16 {
+    let has_note = app
+        .auth_events_cache
+        .get(app.audit_selected)
+        .is_some_and(|event| !audit_note(event).is_empty());
+    area.y + if has_note { 6 } else { 4 }
 }
 
 fn render_filter_strip(
@@ -695,12 +703,10 @@ mod tests {
             legacy::AMBER,
             "a retry dot was theme::amber()"
         );
+        assert_eq!(fg_at_text(&buf, "\u{2500}"), legacy::DIM);
 
-        // The rule is only visible where no row covers it, so read it from a
-        // tab with nothing to list.
         let empty = audit_app(resolved_default(), vec![]);
         let buf = audit(&empty);
-        assert_eq!(fg_at_text(&buf, "\u{2500}"), legacy::DIM);
         assert_eq!(fg_at_text(&buf, "No audit events"), legacy::DIM);
     }
 }

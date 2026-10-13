@@ -4,6 +4,16 @@ All notable changes to SSHub are documented in this file.
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-10-13
+
+### Fixed
+
+- **Audit and tunnels tabs take clicks where the rows are** - the audit table
+  drew its first row over the rule under the column headers, and while the
+  selected event's note line was shown a click picked the row two below the
+  pointer. The tunnels tab did the same under the detail line of a failing or
+  reconnecting tunnel, so a double click could toggle the wrong tunnel.
+
 ## [0.18.1] - 2026-10-13
 
 ### Fixed

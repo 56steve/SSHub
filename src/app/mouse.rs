@@ -207,6 +207,7 @@ impl App {
             })
             .unwrap_or(false);
         self.last_click = Some((now, x, y));
+        let tunnel_pick = self.tunnel_click_pick.take();
 
         // Tab bar clicks
         if y == areas.tab_bar.y {
@@ -244,8 +245,18 @@ impl App {
             }
             1 => self.sftp_click(x, y, areas.body, is_double)?,
             2 => {
+                // A double click acts on the tunnel its first click picked:
+                // picking one can show or hide its detail line, which moves
+                // the table under the pointer between the two clicks.
+                let picked = tunnel_pick
+                    .filter(|_| is_double)
+                    .and_then(|id| self.tunnels.iter().position(|t| t.id == id));
+                if let Some(idx) = picked {
+                    self.tunnel_selected = idx;
+                    return self.toggle_tunnel();
+                }
                 // Tunnels table — account for scroll offset
-                let data_y = areas.body.y + 4;
+                let data_y = crate::tui::screens::tunnels::data_top(areas.body, self);
                 if y >= data_y {
                     let visible_row = (y - data_y) as usize;
                     let max_rows =
@@ -258,9 +269,7 @@ impl App {
                     let idx = scroll + visible_row;
                     if idx < self.tunnels.len() {
                         self.tunnel_selected = idx;
-                        if is_double {
-                            self.toggle_tunnel()?;
-                        }
+                        self.tunnel_click_pick = Some(self.tunnels[idx].id);
                     }
                 }
             }
@@ -300,7 +309,7 @@ impl App {
             }
             4 => {
                 // Audit table (mirror the renderer's scroll math)
-                let data_y = areas.body.y + 3;
+                let data_y = crate::tui::screens::audit::data_top(areas.body, self);
                 if y >= data_y {
                     let max_rows =
                         (areas.body.y + areas.body.height).saturating_sub(data_y) as usize;
