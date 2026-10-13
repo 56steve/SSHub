@@ -4,6 +4,18 @@ All notable changes to SSHub are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Shift+U` update of an npm install** - the update ran whichever `npm` came
+  first on PATH, and npm installs into the global prefix of the `node` running
+  it (unless an npmrc sets one). An nvm copy started from a desktop launcher,
+  which only sees the system Node, therefore updated the system prefix
+  instead of itself: a permission error at best. The update now installs into
+  the prefix the running copy lives in, with that prefix's own `npm` and
+  `node` when it has them. When Node crashes before npm can report (a broken
+  or too new npm), the error popup shows Node's error message instead of the
+  crash location.
+
 ## [0.18.0] - 2026-10-13
 
 ### Added
