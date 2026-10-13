@@ -4,6 +4,8 @@ All notable changes to SSHub are documented in this file.
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-10-13
+
 ### Fixed
 
 - **`Shift+U` update of an npm install** - the update ran whichever `npm` came
