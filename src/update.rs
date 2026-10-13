@@ -88,13 +88,44 @@ fn install(tag: &str) -> Result<()> {
         cmd
     };
     match install_channel().as_deref() {
-        Some("npm") => run(global("npm").args(["install", "-g", &format!("sshub-tui@{version}")])),
+        Some("npm") => {
+            let mut npm = global("npm");
+            npm.args(["install", "-g"]);
+            // The npm on PATH, and the prefix it installs into (npm takes it
+            // from the `node` that runs it), may belong to another Node than
+            // the one holding this copy: a desktop launcher starting the nvm
+            // copy with only the system Node on PATH updates the system prefix
+            // or fails on its permissions. Install into this copy's prefix,
+            // with that prefix's own npm and node when it has them.
+            if let Some(prefix) = npm_prefix(&exe) {
+                // An unset PATH adds nothing (an empty entry would mean the
+                // current directory); a prefix PATH cannot hold leaves it be.
+                let path = std::env::var_os("PATH");
+                let path = std::iter::once(prefix.join("bin"))
+                    .chain(path.iter().flat_map(std::env::split_paths));
+                if let Ok(path) = std::env::join_paths(path) {
+                    npm.env("PATH", path);
+                }
+                npm.arg("--prefix").arg(prefix);
+            }
+            run(npm.arg(format!("sshub-tui@{version}")))
+        }
         Some("cargo") => run(global("cargo").args(["install", "sshub", "--version", version])),
         None => replace_binary(tag),
         Some("source") => bail!("built from source: update the checkout and run `just install`"),
         Some(other) => bail!("installed via {other}: update it there"),
     }
     .map(drop)
+}
+
+/// The global npm prefix a copy at `exe` was installed under: npm puts a global
+/// package in `<prefix>/lib/node_modules/<name>`, and its dependencies (the
+/// platform package carrying this binary) below that.
+fn npm_prefix(exe: &std::path::Path) -> Option<&std::path::Path> {
+    exe.ancestors()
+        .find(|dir| dir.ends_with("lib/node_modules/sshub-tui"))?
+        .ancestors()
+        .nth(3)
 }
 
 /// How the running binary was installed: shown next to the version, so a
@@ -264,9 +295,12 @@ fn run(cmd: &mut Command) -> Result<String> {
 }
 
 /// The stderr line that says why a tool failed. cargo: the first `error…`
-/// line (later ones summarise it). npm: every line says `npm error`, and the
-/// cause follows the `code` / `syscall` / `path` / `errno` fields. curl and
-/// tar: the first line.
+/// line (later ones summarise it); Node's `Error: …` / `Error [ERR_…]: …` and
+/// npm's `ERROR: npm … is known not to run on Node.js …` start the same way,
+/// case aside. npm: every line says `npm error`, and the cause follows the
+/// `code` / `syscall` / `path` / `errno` fields. A Node crash with another
+/// error class: its `TypeError: …` (and the like) line under the source
+/// excerpt. curl and tar: the first line.
 fn failure_line(stderr: &str) -> &str {
     const NPM_FIELDS: [&str; 4] = ["code ", "syscall ", "path ", "errno "];
     let lines: Vec<&str> = stderr
@@ -276,11 +310,19 @@ fn failure_line(stderr: &str) -> &str {
         .collect();
     lines
         .iter()
-        .find(|l| l.starts_with("error"))
+        .find(|l| l.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("error")))
         .or_else(|| {
             lines.iter().find(|l| {
                 l.strip_prefix("npm error ")
                     .is_some_and(|rest| !NPM_FIELDS.iter().any(|f| rest.starts_with(f)))
+            })
+        })
+        .or_else(|| {
+            lines.iter().find(|l| {
+                l.split_once(": ").is_some_and(|(name, _)| {
+                    let name = name.split_once(" [").map_or(name, |(class, _)| class);
+                    name.ends_with("Error") && name.chars().all(|c| c.is_ascii_alphanumeric())
+                })
             })
         })
         .or(lines.first())
@@ -349,6 +391,44 @@ mod tests {
             failure_line(curl),
             "curl: (6) Could not resolve host: api.github.com"
         );
+        // npm 12.1.0 with a dependency missing from its install: Node crashes
+        // before npm prints a single `npm error` line.
+        let node_crash = "/usr/lib/node_modules/npm/lib/cli/validate-engines.js:25\n\
+            \x20   throw err\n    ^\n\n\
+            Error: Cannot find module 'semver/functions/satisfies'\n\
+            Require stack:\n- /usr/lib/node_modules/npm/lib/cli/entry.js\n\
+            \x20   at Module._resolveFilename (node:internal/modules/cjs/loader:1564:15) {\n\
+            \x20 code: 'MODULE_NOT_FOUND',\n}\n\nNode.js v24.20.0\n";
+        assert_eq!(
+            failure_line(node_crash),
+            "Error: Cannot find module 'semver/functions/satisfies'"
+        );
+        // npm under a Node it cannot parse, and Node errors carrying a code
+        // (Node 24; paths shortened).
+        let npm_too_old_node = "ERROR: npm v12.1.0 is known not to run on Node.js v14.21.3.  \
+            This version of npm supports the following node versions: `^22.22.2`.\n\n\
+            ERROR:\n/n/lib/cli.js:3\n\n\nSyntaxError: Unexpected end of input\n";
+        assert_eq!(
+            failure_line(npm_too_old_node),
+            "ERROR: npm v12.1.0 is known not to run on Node.js v14.21.3.  \
+            This version of npm supports the following node versions: `^22.22.2`."
+        );
+        let err_code = "node:internal/modules/cjs/loader:664\n      throw e;\n      ^\n\n\
+            Error [ERR_PACKAGE_PATH_NOT_EXPORTED]: Package subpath './dist/x.js' is not defined by \"exports\"\n\
+            \x20   at exportsNotFound (node:internal/modules/esm/resolve:313:10)\n";
+        assert_eq!(
+            failure_line(err_code),
+            "Error [ERR_PACKAGE_PATH_NOT_EXPORTED]: Package subpath './dist/x.js' is not defined by \"exports\""
+        );
+        let type_error =
+            "node:fs:440\n    return binding.readFileUtf8(path, stringToFlags(options.flag));\n\
+            \x20                  ^\n\n\
+            TypeError [ERR_INVALID_ARG_TYPE]: The \"path\" argument must be of type string\n\
+            \x20   at Object.readFileSync (node:fs:440:20) {\n  code: 'ERR_INVALID_ARG_TYPE'\n}\n";
+        assert_eq!(
+            failure_line(type_error),
+            "TypeError [ERR_INVALID_ARG_TYPE]: The \"path\" argument must be of type string"
+        );
         assert_eq!(failure_line(""), "no output");
     }
 
@@ -385,6 +465,29 @@ mod tests {
         assert!(live.exists(), "a fresh one may be another sshub's download");
         assert!(other.exists() && file.exists());
         assert!(link.symlink_metadata().is_ok(), "a symlink is not followed");
+    }
+
+    #[test]
+    fn npm_prefix_is_where_npm_installs_globally() {
+        // npm, not this file, says where its global packages go. The platform
+        // package nests in sshub-tui's own node_modules, as on a real install
+        // (`<root>/sshub-tui/node_modules/sshub-linux-x64/bin/sshub`).
+        let ask = |what: &str| {
+            Command::new("npm")
+                .args([what, "-g"])
+                .current_dir(std::env::temp_dir())
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        };
+        let (Some(root), Some(prefix)) = (ask("root"), ask("prefix")) else {
+            eprintln!("skipping: no working npm");
+            return;
+        };
+        let exe = Path::new(&root).join("sshub-tui/node_modules/sshub-linux-x64/bin/sshub");
+        assert_eq!(npm_prefix(&exe), Some(Path::new(&prefix)));
+        assert_eq!(npm_prefix(Path::new("/home/u/.cargo/bin/sshub")), None);
     }
 
     #[test]
