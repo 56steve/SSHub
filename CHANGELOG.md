@@ -38,6 +38,17 @@ All notable changes to SSHub are documented in this file.
   never copied), and the form's hint line names it. `Shift` still hands the
   mouse to the terminal.
 
+### Changed
+
+- **New README GIFs and screenshots** - the recordings were two months old
+  and showed no themes at all. They are re-recorded on the current UI, with
+  three new GIFs (the theme picker previewing each built-in theme, broadcast,
+  and snippets with inline suggestions in a session) and two new screenshots
+  (theme picker, known hosts manager). `demo/record.py` now builds the
+  checkout's own binary in the real cargo target dir, so it works with a
+  shared `CARGO_TARGET_DIR`, and gives every scenario its own database and the
+  default key bindings.
+
 ### Fixed
 
 - **Shrinking the terminal cut off the prompt** - a shorter window dropped
@@ -63,6 +74,18 @@ All notable changes to SSHub are documented in this file.
   filters them, and `--via connect` no longer counts them as connects.
 - **Shell completions** offer the `transfer` subcommand of `host`, `group`,
   `identity` and `tunnel`.
+- **Help text caught up with the keys and commands** - the in-app help (`?`)
+  said `e` on a group header only picks its default identity (it opens the
+  whole group form, connection defaults included), listed `z` without
+  `Alt+Enter`, the ghost-text accept without `Ctrl+F`, and nothing for
+  broadcast (`b`, `x`) or the connecting screen (`Esc` cancels, `Ctrl+O` shows
+  the ssh log). It also says the auth modal's Remember box starts clear.
+  `sshub --help` and `sshub host|group|identity|tunnel --help` now list the
+  `transfer` commands, `sshub group --help` the connection-default flags, and
+  `sshub --help` the `SSHUB_VERSION_LABEL` and `SSHUB_INSTALL_CHANNEL`
+  variables. `sshub host --help` showed `--tag` for `host add` (it takes
+  `--tags a,b`) and a positional name for `host duplicate` (it takes `--name`,
+  with an optional `--new-name`).
 
 ### Removed
 

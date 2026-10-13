@@ -1,15 +1,15 @@
-//! Populate `demo/home/.local/share/sshub/launcher.db` for VHS recordings.
+//! Populate `demo/home/.local/share/sshub/launcher.db` for the demo recordings.
 //! Run via `demo/seed-demo.sh`.
 //!
 //! Hosts are created directly (not imported from ssh_config) so they can have
-//! playful display names. Their addresses are real, pingable public anycast
-//! resolvers (Google / Cloudflare / Quad9 / OpenDNS / Level3) so the demo shows
-//! hosts as *online* — the actual connect is simulated by `demo/bin/ssh`.
+//! playful display names. Their addresses are public anycast resolvers (Google /
+//! Cloudflare / Quad9 / OpenDNS / Level3); in the demos `demo/bin/ping` answers
+//! for them and `demo/bin/ssh` simulates the connect, so nothing leaves the box.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use sshub::store::{HostUpdate, LauncherStore, NewHost, NewHostGroup, NewIdentity};
+use sshub::store::{HostUpdate, LauncherStore, NewHost, NewHostGroup, NewIdentity, NewSnippet};
 
 /// One seeded demo host: display name, address, user, port, group, tags,
 /// favorite, proxy_jump, os_icon.
@@ -155,23 +155,24 @@ fn main() -> Result<()> {
     // A real, locally-reachable SFTP target for the SFTP-browser demo. Unlike
     // the public-resolver hosts above (whose sessions are faked by
     // demo/bin/ssh), the SFTP browser speaks native libssh2 and needs an actual
-    // server — demo/sftp-server.sh spins up a rootless sshd on 127.0.0.1:2222
-    // and exports these two env vars. Absent them (e.g. `cargo run` outside the
-    // demo harness) we simply skip this host.
-    if let (Ok(key), Ok(user)) = (
-        std::env::var("SSHUB_DEMO_SFTP_KEY"),
-        std::env::var("SSHUB_DEMO_SFTP_USER"),
-    ) {
+    // server: demo/sftp-server.sh spins up a rootless sshd on 127.0.0.1:2222
+    // and generates the key in SSHUB_DEMO_SFTP_KEY. Absent it (e.g. `cargo run`
+    // outside the demo harness) we simply skip this host. The rootless sshd
+    // only admits the user running it, and with no username stored SSHub's SFTP
+    // logs in as `$USER`, so nobody's login name is seeded into a recording.
+    // SSHUB_DEMO_SFTP_USER pins one anyway.
+    if let Ok(key) = std::env::var("SSHUB_DEMO_SFTP_KEY") {
+        let user = std::env::var("SSHUB_DEMO_SFTP_USER").ok();
         let identity = store.create_identity(&NewIdentity {
             name: "demo sftp key".to_string(),
-            username: Some(user.clone()),
+            username: user.clone(),
             private_key: Some(PathBuf::from(&key)),
             ..Default::default()
         })?;
         store.create_host(&NewHost {
             name: "localhost (SFTP demo)".to_string(),
             address: "127.0.0.1".to_string(),
-            username: Some(user),
+            username: user,
             port: Some(
                 std::env::var("SSHUB_SFTP_DEMO_PORT")
                     .ok()
@@ -186,7 +187,24 @@ fn main() -> Result<()> {
         count += 1;
     }
 
-    eprintln!("seeded {count} hosts");
+    // Snippets for the session demo (Ctrl+N picker, inline suggestions). Only
+    // commands demo/bin/ssh fakes: anything else runs on the recording machine.
+    let snippets: &[(&str, &str, &str)] = &[
+        ("Disk usage", "df -h", "Free space on every mount"),
+        ("Memory", "free -m", "RAM and swap in MiB"),
+        ("OS release", "cat /etc/os-release", "Which distro is this"),
+        ("Uptime", "uptime", "Load average and days since boot"),
+    ];
+    for (name, command, description) in snippets {
+        store.create_snippet(&NewSnippet {
+            name: (*name).to_string(),
+            command: (*command).to_string(),
+            description: Some((*description).to_string()),
+            tags: vec!["demo".to_string()],
+        })?;
+    }
+
+    eprintln!("seeded {count} hosts, {} snippets", snippets.len());
     Ok(())
 }
 
