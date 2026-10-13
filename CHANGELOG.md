@@ -4,6 +4,8 @@ All notable changes to SSHub are documented in this file.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-13
+
 ### Added
 
 - **Split view** (issue #73) - the session view divides into 2 to 4 panes,
