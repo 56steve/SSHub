@@ -4,6 +4,23 @@ All notable changes to SSHub are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Mouse on the dashboard, in forms, dialogs and pickers** (issue #116) -
+  outside a session or a zoomed panel the mouse could only click tabs and rows,
+  and since SSHub holds the mouse the terminal's own selection was gone too. A
+  drag now selects whatever is on screen and copies it on release, on every
+  dashboard tab as well as over a form. A click focuses the field under the
+  pointer with the cursor where you clicked (prompts included), highlights a
+  picker, palette or tag-filter row without choosing it, and on the hosts tab
+  focuses the panel under it. The SFTP tab answers the mouse too: a click
+  picks a host or a pane's entry, a double-click connects or opens the folder,
+  and the wheel scrolls the pane under the pointer. `Ctrl+Y` (the copy-secret
+  bind) copies the focused field's exact value in any form, the search bar or
+  the palette, not just a stored secret (the key generator's passphrase is
+  never copied), and the form's hint line names it. `Shift` still hands the
+  mouse to the terminal.
+
 ### Fixed
 
 - **SFTP search keeps capital letters** - typing `S` or `L` into the SFTP
