@@ -18,7 +18,7 @@ local builds opt out with `--no-default-features` for speed and disk. See
 
 Pinned implementation flow: [docs/implementation-flow.md](docs/implementation-flow.md) (issue → claim → branch → verify → adversarial review → PR → merge).
 
-- **GitHub comments from agents** must always end with `_Written by {Model} ({Platform}) on behalf of the maintainer._` — see [implementation-flow § GitHub comments](docs/implementation-flow.md#github-comments-ai-agents).
+- **GitHub comments from agents** must always end with `_Written by {Model} ({Platform}) on behalf of {Who}._`, where `{Who}` is the person running the agent (`@handle`; `the maintainer` only for the maintainer's own agents) — see [implementation-flow § GitHub comments](docs/implementation-flow.md#github-comments-ai-agents).
 - **Lint before push.** Always run `cargo fmt`, `cargo fmt --check`, and `cargo clippy --all-targets` locally before every push — CI runs the same checks; do not skip them.
 - **CI before Done.** After opening or updating a PR, wait until GitHub Actions is green on that PR (`gh pr checks`). Local green is not Done; fix CI failures before marking the task complete.
 - **Respect the community.** Every contribution from outside the maintainer is credited by handle, always — see [implementation-flow § Respect the community](docs/implementation-flow.md#respect-the-community).

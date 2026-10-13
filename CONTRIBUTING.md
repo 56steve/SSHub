@@ -99,7 +99,7 @@ review PRs together.
 Any comment on an **issue or pull request** written by a coding agent **must** end with:
 
 ```text
-_Written by {Model} ({Platform}) on behalf of the maintainer._
+_Written by {Model} ({Platform}) on behalf of {Who}._
 ```
 
 Example:
@@ -107,11 +107,13 @@ Example:
 ```text
 Taking this — working on `feature/foo`.
 
-_Written by Composer (Cursor) on behalf of the maintainer._
+_Written by Composer (Cursor) on behalf of @octocat._
 ```
 
 - Use a real **model** name (`Claude Opus 4.8`, `Claude Fable 5`, `Composer`, …).
 - Use a real **platform** (`Cursor`, `Claude Code`, `Codex`, …).
+- **Who** is the person the agent works for: your own GitHub handle when you
+  contribute. Only the maintainer's agents sign `on behalf of the maintainer`.
 - Signature on its own line at the **end** of the comment — always, including short claims.
 - Human comments do not need a signature.
 

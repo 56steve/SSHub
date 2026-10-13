@@ -24,17 +24,17 @@ flowchart LR
 |------|--------|
 | Pick or open an issue | New features should appear on the [roadmap (#14)](https://github.com/Petyok/SSHub/issues/14). Open an issue if none exists; maintainer triages it into the roadmap. |
 | Claim before coding | Assign yourself or comment that you are taking it. Unclaimed roadmap items are assumed free ([CONTRIBUTING.md](../CONTRIBUTING.md)). |
-| GitHub comments (AI) | **Required:** every issue/PR comment ends with `_Written by {Model} ({Platform}) on behalf of the maintainer._` (see [§ GitHub comments](#github-comments-ai-agents)). |
+| GitHub comments (AI) | **Required:** every issue/PR comment ends with `_Written by {Model} ({Platform}) on behalf of {Who}._` (see [§ GitHub comments](#github-comments-ai-agents)). |
 | Link PR to issue | PR body must include `Closes #N` so the issue and roadmap checkbox update on merge. |
 
 ### GitHub comments (AI agents)
 
 If **you** (a coding agent) post on GitHub — issue claims, status updates, PR reviews, triage — you **must** sign the comment. No anonymous agent comments. No inline-only model mentions.
 
-**Always** end the comment with this exact form (model and platform filled in):
+**Always** end the comment with this form (model, platform and who filled in):
 
 ```text
-_Written by {Model} ({Platform}) on behalf of the maintainer._
+_Written by {Model} ({Platform}) on behalf of {Who}._
 ```
 
 Examples:
@@ -42,7 +42,7 @@ Examples:
 ```text
 Taking this — working on `feature/session-logging`.
 
-_Written by Composer (Cursor) on behalf of the maintainer._
+_Written by Composer (Cursor) on behalf of @octocat._
 ```
 
 ```text
@@ -51,6 +51,7 @@ _Written by Claude Opus 4.8 (Claude Code) on behalf of the maintainer._
 
 - **Model** must be specific — `Claude Opus 4.8`, `Claude Fable 5`, `Composer`, `GPT-5.4`, not “AI” or “Claude” alone.
 - **Platform** is the tool or runtime — `Cursor`, `Claude Code`, `Codex`, etc.
+- **Who** is the person the agent works for: your GitHub handle (`@octocat`) when you contribute, `the maintainer` only for the maintainer's own agents. A contributor's agent does not speak for the project, so it never signs `on behalf of the maintainer`.
 - Put the signature on its **own line** at the **end** of every agent comment, including one-line claims.
 
 Reference: issue [#4](https://github.com/Petyok/SSHub/issues/4).
