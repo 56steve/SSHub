@@ -48,7 +48,7 @@ The storage format does not change: ProxyJump stays the same comma-separated str
 | Keybinds | `src/keybinds.rs`: `KeyAction`, defaults near line 404, labels near line 207, `binds()`/`set` arms | Every new action must be rebindable and appear in the keybind editor and `?` help. Mind the legacy-migration tests there. |
 | Footer hints | `src/tui/mod.rs` `footer_keybinds` (~line 1178), `src/tui/widgets/footer.rs` | Add a `match` arm for the map tab and its sub-states (blast, filter, lens). |
 | Group inheritance | `src/store/group_defaults.rs`: `ResolvedConnection::for_group_chain`, `LauncherStore::group_ancestor_chain`, `resolve_connection` | ProxyJump inherits nearest-group-first. Reuse this; do not reimplement it. |
-| ssh_config hosts | `src/ssh/resolver.rs` (parses `proxyjump` at ~line 257), `src/ssh/import.rs`, `src/ssh/host.rs` (`-J` argv at ~line 51) | The resolver **does not record ProxyCommand** today. Add a `has_proxy_command: bool` (presence only, value never stored or run). |
+| ssh_config hosts | `src/ssh/resolver.rs` (parses `proxyjump` at ~line 257), `src/ssh/import.rs`, `src/ssh/host.rs` (`-J` argv at ~line 51) | `has_proxy_command: bool` already exists on `SshHost` (presence only, value never stored or run; see the `parse_ssh_g_output_records_proxycommand_presence_only` test). |
 | Host form | `src/app/host_form.rs`, `src/tui/screens/host_form.rs`, `HostFormField::ProxyJump` in `src/app/types.rs` (~line 1775) | The field is a `String` today; keep that as the stored value and put the list editor on top of it. |
 | Group form | `src/tui/screens/group_form.rs`, `default_proxy_jump` in `src/app/types.rs` (~line 1351) | Optional slice 6: same hop editor for the group default. |
 | Connect | `src/app/connect.rs` | Enter on the map must go through the normal connect path for the selected host. Do not build a new argv. |
@@ -153,7 +153,7 @@ Every glyph is one cell. Use `unicode-width` to assert this in a test, and keep 
 
 ## 6. Keys
 
-All are new `KeyAction`s scoped to the map tab unless marked as reuse. Defaults are free in `src/keybinds.rs` today. Re-check with the keybind conflict tests.
+All are new `KeyAction`s scoped to the map tab unless marked as reuse. Defaults are free in `src/keybinds.rs` today. There are no keybind conflict tests in the repo (`src/keybinds.rs` tests cover migration, hints and defaults only); add a per-handler duplicate check or verify by hand. See section 14 for which "reuse" entries below are overridden.
 
 | Key | Action |
 |---|---|
@@ -208,7 +208,7 @@ Mouse: click selects a hop or glyph, double-click connects, the wheel scrolls. Y
 - It runs on a worker thread with an mpsc channel back to the event loop, like ping. `Esc` kills the child.
 - Map stderr/exit to short reasons: `auth failed` (Permission denied), `timeout`, `refused`, `host key changed` (REMOTE HOST IDENTIFICATION HAS CHANGED, include the `known_hosts:N` line when present), `unknown host`, `proxy cmd failed`.
 - UI: per-hop state on the ribbon cards (map) or the card row in the form; the selected glyph shows `»` while running. The result line offers existing actions: `H` known hosts, `P` push key, `l` ssh log.
-- **Oracle tests:** the repo has no sshd harness for tests yet (`docs/oracle-tests.md` lists `session/`, `app/` as having none). Exercise at least ok, auth-failed and timeout against a real `sshd`: `demo/sftp-server.sh` shows how one is started locally. If CI cannot run sshd, gate those tests behind an env var and say so in the PR. Never test the reason mapping against hand-written stderr alone.
+- **Oracle tests:** a tempdir `sshd` harness exists: `tempdir_sshd()` in the `session/mod.rs` test module (key auth on a free 127.0.0.1 port, skips when sshd is absent). Move it to a shared test util and reuse it (`docs/oracle-tests.md` still lists `session/`, `app/` as having no oracle). Exercise at least ok, auth-failed and timeout against a real `sshd`. If CI cannot run sshd, gate those tests behind an env var and say so in the PR. Never test the reason mapping against hand-written stderr alone.
 
 ---
 
@@ -238,7 +238,7 @@ Each slice: `cargo fmt`, `cargo fmt --check`, `cargo clippy --all-targets`, `jus
 - [ ] Shared hop drawn per chain with `◇`; blast radius counts across all occurrences; db-us-2 case correct.
 - [ ] Cycle: shown, not connectable, Enter opens the editor; the picker refuses to create one.
 - [ ] Raw hop and ProxyCommand drawn as specified; ProxyCommand is never parsed or executed by the map.
-- [ ] Arrow keys only; every new action rebindable, in the footer and `?` help, no conflicts in keybind tests.
+- [ ] Arrow keys only; every new action rebindable, in the footer and `?` help, no duplicate bindings within the map handler (there is no keybind conflict test today, see section 14).
 - [ ] All colours via theme roles; role snapshot updated; looks right in every built-in theme.
 - [ ] 212-jump-host fixture renders within one frame budget (50 ms loop) and stays navigable.
 - [ ] 100×30, outline (<80×24) and too-small (<40×12) modes work.
@@ -250,3 +250,16 @@ Each slice: `cargo fmt`, `cargo fmt --check`, `cargo clippy --all-targets`, `jus
 - Edges are real jumps only: own ProxyJump, group-inherited, ssh_config (via `ssh -G`). Unknown raw hops are dimmed placeholder nodes, ProxyCommand is an opaque "proxy cmd" badge, cycles are errors.
 - Test connect uses BatchMode and the stored-secret askpass path like the existing connect paths.
 - No em or en dashes in new copy. Mockup text that contains them (for example "none — reached directly") is reference for layout only; use a comma, colon or hyphen in the shipped strings.
+
+## 14. Review amendments
+
+Decisions from the adversarial review against the code. They override sections 4 to 10 where they differ.
+
+1. **Hop resolution.** ssh only sees the `-J` string. A SQLite-only hop is expanded to `user@addr:port` in the shared `-J` builder (the one place argv is built), so it connects without a `~/.ssh/config` alias. Per-hop identity, certificate and group defaults are not carried to a hop. Chain rule: the first hop's own ssh_config chain is prepended by ssh itself (map it via `ssh -G <hop>`); every later hop is pinned by the command-line `-J`, so its own chain is ignored. SQLite or group chains of a hop are never recursed into. Hop cards show the address actually used. Tokens may be `ssh://user@host:port` or `[::1]:22`; strip `user@` and `:port` before matching a saved host.
+2. **Chain source.** `SshConfig` and `Legacy` hosts take the chain from cached `ssh -G` output, resolved on a worker thread (cache keyed by `ssh_config_hash`; the map shows the stale data meanwhile). `Launcher` hosts take the stored or group-inherited value via `resolve_connection`. The token `none` means an empty chain (not a hop named "none"), and the hop editor offers a "direct (override group)" option that stores `none`. Known limit: wildcard `Host` blocks in `~/.ssh/config` can still add a ProxyJump or ProxyCommand to a Launcher host that SQLite does not show.
+3. **Hop token validation.** Reject any token whose user or host starts with `-`. Parse raw hops with the existing `parse_adhoc_target` (`src/app/adhoc.rs`), not a new validator. Every hop target goes through `safe_ssh_target`. Only aliases listed by `list_hosts` are passed to `ssh -G`. Test with `-oProxyCommand=...` as a hop name.
+4. **ProxyCommand.** `Hop::ProxyCommand` carries no text; the map shows the fixed label `‹proxy cmd›` and never the command (mockups corrected). A host with both ProxyJump and ProxyCommand keeps its hops and the badge. Test connect skips any step whose host has `has_proxy_command` and shows it as `–`; the map never parses or spawns a ProxyCommand itself.
+5. **Health.** `ping.rs` is a local ICMP probe (`ping -c 1 -W 1`). The map never infers "hop is down" or "unreachable: hop is down" from it. Glyphs say "ICMP from here"; a hop is shown down only after a failed test connect of that hop. Hosts without a ping reading are `unknown`.
+6. **Keys and handlers.** Tab 6 has its own handler (`5 => handle_key_map` in `handle_key_dashboard_tab`) with no fall-through to `handle_key_normal`, a `TabMap` branch in `try_tab_switch`, and `TABS` grows to six. The map has its own filter state and mode (no reuse of `AppMode::Search` or `TagFilter`, whose Enter connects the hosts selection) and its own grammar (`group:`, `tag:`, `via:`, `!term`) on top of the nucleo matcher. Navigation uses new arrow-only `MapUp/Down/Left/Right` actions, not `move_up/down` (which carry `j/k/l`). New map actions replace the "reuse" entries for `y` (copy `ssh -J`, not `yank_log`), `Space`, `Shift+Z` (map fold, not group fold) and `x` (a `MapToggleTunnel` start/stop; `tunnel_kill` only stops). Tunnel start/stop is refactored to take a tunnel id instead of `tunnel_selected`. `z` and `Alt+Enter` zoom are handled inside the map handler. `b` needs a new `BroadcastTarget::Hosts(Vec<id>)` and a setup entry that skips the menu.
+7. **Test connect.** Reuse `SshCommandRunner` (BatchMode chosen by stored secret, timeout, cancel). Add the reason `host key unknown` (first connection, "Host key verification failed"). Do not pass `StrictHostKeyChecking=accept-new`: a diagnostic must not write `known_hosts`. Kill the whole process group on Esc (`spawn_group` and `kill_group` from `src/cli/exec.rs`), so the `ssh -W` helper dies too. Askpass never answers a jump hop's prompt (#141), so a password-only hop reports `auth failed`. Oracle tests share `tempdir_sshd`.
+8. **Cycles and blast radius.** Cycle detection uses a visited set per resolution path, seeded with the target host, so a hop shared by two parents is not a cycle. Hosts in a cycle have no chain but count as dependents of every hop in the loop, in blast radius and Σ.
