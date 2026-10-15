@@ -1175,6 +1175,68 @@ fn compute_header_stats(app: &App) -> [usize; 4] {
 }
 
 /// The footer's pairs, plus how many trailing ones must never be dropped.
+/// Footer hints of the map tab, by what owns the keyboard.
+fn map_footer(app: &App) -> Vec<(String, &'static str)> {
+    use crate::app::network_map::Lens;
+    let kb = &app.config.keybinds;
+    let key = |a: crate::config::KeyAction| kb.primary(a).to_string();
+    let Some(v) = app.map_view.as_ref() else {
+        return vec![("?".into(), "help"), ("q".into(), "quit")];
+    };
+    if v.picker.is_some() {
+        return vec![
+            ("\u{2191}\u{2193}".into(), "tag"),
+            ("\u{21b5}".into(), "toggle"),
+            ("Esc".into(), "close"),
+        ];
+    }
+    if v.editing {
+        return vec![
+            ("type".into(), "filter"),
+            ("\u{21b5}".into(), "keep"),
+            ("Esc".into(), "clear"),
+        ];
+    }
+    match v.lens {
+        Lens::Blast(_) => vec![
+            (
+                format!(
+                    "{}/{}",
+                    key(crate::config::KeyAction::MapNextDependent),
+                    key(crate::config::KeyAction::MapPrevDependent)
+                ),
+                "next/prev dependent",
+            ),
+            (key(crate::config::KeyAction::Broadcast), "broadcast"),
+            (key(crate::config::KeyAction::MapBlast), "exit blast"),
+            ("Esc".into(), "clear lens"),
+            ("?".into(), "help"),
+        ],
+        Lens::Tunnel => vec![
+            ("\u{2191}\u{2193}\u{2190}\u{2192}".into(), "move"),
+            (
+                key(crate::config::KeyAction::MapToggleTunnel),
+                "start/stop tunnel",
+            ),
+            (key(crate::config::KeyAction::MapTunnelLens), "exit lens"),
+            ("Esc".into(), "clear lens"),
+            ("?".into(), "help"),
+        ],
+        Lens::None => vec![
+            ("\u{2191}\u{2193}".into(), "row"),
+            ("\u{2190}\u{2192}".into(), "along the path"),
+            ("\u{21b5}".into(), "connect"),
+            (key(crate::config::KeyAction::Search), "filter"),
+            (key(crate::config::KeyAction::TagFilter), "tags"),
+            (key(crate::config::KeyAction::MapBlast), "blast"),
+            (key(crate::config::KeyAction::MapTunnelLens), "tunnels"),
+            ("e".into(), "edit"),
+            ("?".into(), "help"),
+            ("q".into(), "quit"),
+        ],
+    }
+}
+
 fn footer_keybinds(
     app: &App,
     footer_width: u16,
@@ -1241,14 +1303,7 @@ fn footer_keybinds(
             ("?".into(), "help"),
             ("q".into(), "quit"),
         ],
-        5 => vec![
-            ("\u{2191}\u{2193}".into(), "row"),
-            ("\u{2190}\u{2192}".into(), "along the path"),
-            ("\u{21b5}".into(), "connect"),
-            ("e".into(), "edit"),
-            ("?".into(), "help"),
-            ("q".into(), "quit"),
-        ],
+        5 => map_footer(app),
         3 => vec![
             ("\u{2191}\u{2193}\u{2190}\u{2192}".into(), "move"),
             ("[ ]".into(), "columns"),

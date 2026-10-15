@@ -267,8 +267,9 @@ impl App {
     /// in `AppMode::Normal`, unlike overlay inputs, which have their own mode
     /// and never see the global binds.
     fn dashboard_text_input_active(&self) -> bool {
-        self.active_tab == 1
-            && (self.sftp_picker_searching || self.sftp.as_ref().is_some_and(|s| s.searching))
+        (self.active_tab == 1
+            && (self.sftp_picker_searching || self.sftp.as_ref().is_some_and(|s| s.searching)))
+            || (self.active_tab == 5 && self.map_view.as_ref().is_some_and(|v| v.editing))
     }
 
     pub(crate) fn handle_key_normal(&mut self, key: KeyEvent) -> Result<()> {

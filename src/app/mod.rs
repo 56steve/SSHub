@@ -18,7 +18,7 @@ mod keys;
 mod local_shell;
 mod log_browser;
 mod mouse;
-pub(crate) mod network_map;
+pub mod network_map;
 pub(crate) mod panes;
 mod profile_manager;
 pub(crate) mod profile_transfer;

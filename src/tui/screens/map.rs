@@ -13,7 +13,7 @@ use ratatui::layout::Rect;
 use ratatui::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::network_map::{MapSel, MapView};
+use crate::app::network_map::{HostTunnel, Lens, MapSel, MapView, Tint, TunnelState};
 use crate::app::App;
 use crate::map::{Chain, Hop, HopKey, HopKind, JumpSource, Map, Row, PROXY_CMD_LABEL};
 use crate::theme::catalog::{ColorRole, StyleRole};
@@ -67,6 +67,68 @@ impl Styles {
             unknown: fg(ColorRole::StatusUnknown),
             selected: theme.style(StyleRole::SelectionActive),
         }
+    }
+}
+
+/// Everything a frame of the map reads.
+struct Ctx<'a> {
+    app: &'a App,
+    view: &'a MapView,
+    st: &'a Styles,
+    /// Tunnels by host index (tunnel lens, facts).
+    tunnels: HashMap<usize, Vec<HostTunnel>>,
+}
+
+impl Ctx<'_> {
+    /// The glyph and style of one host under the filter, lens and row tint.
+    fn glyph(&self, host: usize, tint: Tint) -> (char, Style) {
+        let st = self.st;
+        let base = host_status(self.app, st, host);
+        let dim = ('\u{b7}', st.dim);
+        if self
+            .view
+            .matched
+            .as_ref()
+            .is_some_and(|m| !m.contains(&host))
+        {
+            return dim;
+        }
+        match &self.view.lens {
+            Lens::Blast(b) => {
+                return if b.hosts.contains(&host) {
+                    (base.glyph, st.warn)
+                } else {
+                    (base.glyph, st.dim)
+                };
+            }
+            Lens::Tunnel => {
+                return match self.tunnels.get(&host) {
+                    Some(t) => ('\u{21c4}', tunnel_style(st, t[0].state)),
+                    None => dim,
+                };
+            }
+            Lens::None => {}
+        }
+        if tint == Tint::Dim {
+            return (base.glyph, st.dim);
+        }
+        (base.glyph, base.style)
+    }
+}
+
+fn tunnel_style(st: &Styles, state: TunnelState) -> Style {
+    match state {
+        TunnelState::Running => st.ok,
+        TunnelState::Reconnecting => st.warn,
+        TunnelState::Stopped => st.muted,
+    }
+}
+
+fn tunnel_letter(kind: crate::store::TunnelType) -> char {
+    match kind {
+        crate::store::TunnelType::Local => 'L',
+        crate::store::TunnelType::Remote => 'R',
+        crate::store::TunnelType::Dynamic => 'D',
     }
 }
 
@@ -206,11 +268,20 @@ pub fn render_map(frame: &mut Frame, area: Rect, app: &App) {
     let ribbon_area = Rect::new(area.x, area.y + map_h, area.width, ribbon_h);
     let bottom_area = Rect::new(area.x, area.y + map_h + ribbon_h, area.width, bottom_h);
 
+    let ctx = Ctx {
+        app,
+        view,
+        st: &st,
+        tunnels: app.map_tunnels(),
+    };
     let buf = frame.buffer_mut();
     let sel = view.selection();
-    let title = "map \u{2500} hops as a tree \u{b7} hosts as glyphs behind their last hop";
-    let inner = panel(buf, map_area, title, st.accent, st.bright);
-    draw_map(buf, inner, app, view, &st);
+    let title = map_title(&ctx);
+    let inner = panel(buf, map_area, &title, st.accent, st.bright);
+    draw_map(buf, inner, &ctx);
+    if let Some(p) = &view.picker {
+        draw_tag_picker(buf, inner, p, &st);
+    }
 
     if ribbon_h > 0 {
         let ribbon_title = format!("path ribbon \u{2500} {}", sel_title(view, sel));
@@ -234,7 +305,7 @@ pub fn render_map(frame: &mut Frame, area: Rect, app: &App) {
         draw_legend(buf, inner, &st);
         let facts_title = format!("node \u{2500} {}", sel_title(view, sel));
         let inner = panel(buf, facts, &facts_title, st.dim, st.bright);
-        draw_facts(buf, inner, view, sel, &st);
+        draw_facts(buf, inner, &ctx, sel);
     }
 }
 
@@ -280,6 +351,81 @@ fn sel_title(view: &MapView, sel: Option<MapSel>) -> String {
     }
 }
 
+/// The map panel title: the active lens, then the filter.
+fn map_title(ctx: &Ctx) -> String {
+    let view = ctx.view;
+    let mut title = match &view.lens {
+        Lens::Blast(b) => format!(
+            "map \u{2500} blast radius \u{b7} {} hosts depend on {}",
+            b.hosts.len(),
+            view.map.key_label(&b.key)
+        ),
+        Lens::Tunnel => {
+            "map \u{2500} tunnel lens \u{b7} \u{21c4} on hops and hosts that carry a tunnel".into()
+        }
+        Lens::None => {
+            "map \u{2500} hops as a tree \u{b7} hosts as glyphs behind their last hop".into()
+        }
+    };
+    if view.editing || view.filter_active() {
+        let shown = view
+            .matched
+            .as_ref()
+            .map_or(view.map.hosts.len(), HashSet::len);
+        title.push_str(&format!(
+            " \u{b7} / {}{} \u{b7} {shown} of {} hosts",
+            view.query,
+            if view.editing { "\u{258f}" } else { "" },
+            view.map.hosts.len()
+        ));
+    }
+    title
+}
+
+/// `#` tag picker, centred over the map.
+fn draw_tag_picker(
+    buf: &mut Buffer,
+    inner: Rect,
+    p: &crate::app::network_map::TagPicker,
+    st: &Styles,
+) {
+    let rows = p
+        .items
+        .len()
+        .min(inner.height.saturating_sub(4) as usize)
+        .max(1);
+    let w = 36.min(inner.width.saturating_sub(2));
+    let area = Rect::new(
+        inner.x + (inner.width - w) / 2,
+        inner.y + 1,
+        w,
+        rows as u16 + 2,
+    );
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            buf.set_string(x, y, " ", st.text);
+        }
+    }
+    let body = panel(buf, area, "tag filter", st.accent, st.bright);
+    let first = p.selected.saturating_sub(rows - 1);
+    for (i, tag) in p.items.iter().skip(first).take(rows).enumerate() {
+        let style = if first + i == p.selected {
+            st.selected
+        } else {
+            st.text
+        };
+        let text = format!(" #{tag}");
+        put(
+            buf,
+            body.x,
+            body.y + i as u16,
+            &format!("{text:<w$}", w = body.width as usize),
+            style,
+            body.x + body.width,
+        );
+    }
+}
+
 // ---------------------------------------------------------------- the tree
 
 /// What one hop node shows.
@@ -290,14 +436,8 @@ struct NodeLook {
     dashed: bool,
 }
 
-fn node_look(
-    app: &App,
-    view: &MapView,
-    st: &Styles,
-    cols: &Cols,
-    node: usize,
-    shared: &HashSet<HopKey>,
-) -> NodeLook {
+fn node_look(ctx: &Ctx, cols: &Cols, node: usize, shared: &HashSet<HopKey>) -> NodeLook {
+    let (app, view, st) = (ctx.app, ctx.view, ctx.st);
     let n = &view.map.nodes[node];
     let room = cols.step.saturating_sub(5) as usize;
     match &n.key {
@@ -313,6 +453,11 @@ fn node_look(
             }
             if shared.contains(&n.key) {
                 text.push_str(" \u{25c7}");
+            }
+            if matches!(view.lens, Lens::Tunnel) {
+                for t in ctx.tunnels.get(h).into_iter().flatten() {
+                    text.push_str(&format!(" \u{21c4}{}", tunnel_letter(t.kind)));
+                }
             }
             NodeLook {
                 text,
@@ -352,12 +497,12 @@ fn draw_strip(
     mut x: u16,
     y: u16,
     max_x: u16,
-    app: &App,
-    view: &MapView,
-    st: &Styles,
+    ctx: &Ctx,
+    tint: Tint,
     groups: &[(String, Vec<usize>)],
     selected: Option<usize>,
 ) -> u16 {
+    let st = ctx.st;
     for (gi, (group, hosts)) in groups.iter().enumerate() {
         if gi > 0 {
             x += 3;
@@ -373,24 +518,24 @@ fn draw_strip(
             .map_or(0, |p| (p + 1).saturating_sub(MAX_GLYPHS));
         let shown = hosts.iter().skip(start).take(MAX_GLYPHS);
         for &h in shown {
-            let s = host_status(app, st, h);
+            let (glyph, gstyle) = ctx.glyph(h, tint);
             let style = if selected == Some(h) {
                 st.selected
             } else {
-                s.style
+                gstyle
             };
-            x = put(buf, x, y, &s.glyph.to_string(), style, max_x);
+            x = put(buf, x, y, &glyph.to_string(), style, max_x);
         }
         let hidden = hosts.len().saturating_sub(MAX_GLYPHS);
         if hidden > 0 {
             x = put(buf, x, y, &format!("+{hidden}"), st.muted, max_x);
         }
     }
-    let _ = view;
     x
 }
 
-fn draw_map(buf: &mut Buffer, inner: Rect, app: &App, view: &MapView, st: &Styles) {
+fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
+    let (view, st) = (ctx.view, ctx.st);
     if inner.height < 4 {
         return;
     }
@@ -496,9 +641,15 @@ fn draw_map(buf: &mut Buffer, inner: Rect, app: &App, view: &MapView, st: &Style
         match row {
             Row::Node(n) => {
                 let node = &map.nodes[n];
-                let look = node_look(app, view, st, &cols, n, &shared);
-                let on_path = path_nodes.contains(&n);
-                let edge_style = if on_path { st.accent } else { st.dim };
+                let look = node_look(ctx, &cols, n, &shared);
+                let tint = view.tint(i);
+                let on_path = path_nodes.contains(&n) && tint == Tint::Normal;
+                let edge_style = match tint {
+                    Tint::Dim => st.dim,
+                    Tint::Warn => st.warn,
+                    Tint::Normal if on_path => st.accent,
+                    Tint::Normal => st.dim,
+                };
                 let fill = if look.dashed { "\u{2504}" } else { "\u{2500}" };
                 let col = if node.depth == 0 {
                     cols.hop1
@@ -544,7 +695,12 @@ fn draw_map(buf: &mut Buffer, inner: Rect, app: &App, view: &MapView, st: &Style
                 if node.depth >= 2 {
                     text = format!("\u{2039}+{}\u{203a} {text}", node.depth - 1);
                 }
-                let mut style = if on_path { st.accent } else { look.style };
+                let mut style = match tint {
+                    Tint::Dim => st.dim,
+                    Tint::Warn => st.warn,
+                    Tint::Normal if on_path => st.accent,
+                    Tint::Normal => look.style,
+                };
                 let hop_selected = row_selected && matches!(sel, Some(MapSel::Hop(h)) if h == n);
                 if hop_selected {
                     style = st.selected;
@@ -576,9 +732,8 @@ fn draw_map(buf: &mut Buffer, inner: Rect, app: &App, view: &MapView, st: &Style
                     cx(cols.cargo),
                     y,
                     sigma_x,
-                    app,
-                    view,
-                    st,
+                    ctx,
+                    tint,
                     &node.cargo,
                     sel_host.filter(|_| row_selected),
                 );
@@ -593,7 +748,12 @@ fn draw_map(buf: &mut Buffer, inner: Rect, app: &App, view: &MapView, st: &Style
                     );
                 }
                 let sigma = format!("{:>4}", node.sigma);
-                put(buf, sigma_x, y, &sigma, st.bright, right);
+                let sigma_style = match tint {
+                    Tint::Dim => st.dim,
+                    Tint::Warn => st.warn,
+                    Tint::Normal => st.bright,
+                };
+                put(buf, sigma_x, y, &sigma, sigma_style, right);
                 // Child trunks: a vertical line from this row to its last child.
                 if !node.children.is_empty() {
                     draw_child_trunk(buf, inner, &cols, view, &ys, offset, visible, i, n, st);
@@ -601,6 +761,7 @@ fn draw_map(buf: &mut Buffer, inner: Rect, app: &App, view: &MapView, st: &Style
             }
             Row::Cycle(ci) => {
                 let c = &map.cycles[ci];
+                let tint = view.tint(i);
                 let last = last_top == Some(i);
                 let first = top.first() == Some(&i);
                 if first {
@@ -636,6 +797,8 @@ fn draw_map(buf: &mut Buffer, inner: Rect, app: &App, view: &MapView, st: &Style
                     crate::tui::text::ellipsize(&path, (cols.cargo - cols.hop1) as usize - 1);
                 let style = if row_selected && matches!(sel, Some(MapSel::Cycle(_))) {
                     st.selected
+                } else if tint == Tint::Dim {
+                    st.dim
                 } else {
                     st.err
                 };
@@ -656,9 +819,8 @@ fn draw_map(buf: &mut Buffer, inner: Rect, app: &App, view: &MapView, st: &Style
                     cx(cols.cargo),
                     y,
                     sigma_x,
-                    app,
-                    view,
-                    st,
+                    ctx,
+                    tint,
                     &groups,
                     sel_host.filter(|_| row_selected),
                 );
@@ -1219,7 +1381,8 @@ fn draw_legend(buf: &mut Buffer, inner: Rect, st: &Styles) {
     );
 }
 
-fn draw_facts(buf: &mut Buffer, inner: Rect, view: &MapView, sel: Option<MapSel>, st: &Styles) {
+fn draw_facts(buf: &mut Buffer, inner: Rect, ctx: &Ctx, sel: Option<MapSel>) {
+    let (view, st) = (ctx.view, ctx.st);
     let right = inner.x + inner.width;
     let map = &view.map;
     let mut rows: Vec<(&str, String)> = Vec::new();
@@ -1232,6 +1395,41 @@ fn draw_facts(buf: &mut Buffer, inner: Rect, view: &MapView, sel: Option<MapSel>
         ));
         rows.push(("jump", jump_note(map, h)));
     };
+    if let Lens::Blast(b) = &view.lens {
+        let sessions = b
+            .hosts
+            .iter()
+            .filter(|&&h| host_status(ctx.app, st, h).glyph == '\u{25b6}')
+            .count();
+        let tunnels: usize = b
+            .hosts
+            .iter()
+            .filter_map(|h| ctx.tunnels.get(h))
+            .map(Vec::len)
+            .sum();
+        rows.push((
+            "radius",
+            format!(
+                "{} hosts depend on {}",
+                b.hosts.len(),
+                map.key_label(&b.key)
+            ),
+        ));
+        rows.push((
+            "riding",
+            format!("{sessions} sessions open \u{b7} {tunnels} tunnels on dependents"),
+        ));
+        rows.push((
+            "keys",
+            "n/N next and previous dependent   b broadcast   B or Esc off".into(),
+        ));
+        for (i, (k, v)) in rows.iter().take(inner.height as usize).enumerate() {
+            let y = inner.y + i as u16;
+            let x = put(buf, inner.x + 1, y, &format!("{k:<8}"), st.muted, right);
+            put(buf, x + 1, y, v, st.text, right);
+        }
+        return;
+    }
     match sel {
         Some(MapSel::Hop(n)) => {
             let node = &map.nodes[n];
@@ -1246,10 +1444,14 @@ fn draw_facts(buf: &mut Buffer, inner: Rect, view: &MapView, sel: Option<MapSel>
                 }
             }
             rows.push(("command", ssh_command(map, n_target(map, n))));
+            if let HopKey::Saved(h) = node.key {
+                tunnel_rows(ctx, h, &mut rows);
+            }
         }
         Some(MapSel::Host(h)) => {
             host_rows(h, &mut rows);
             rows.push(("command", ssh_command(map, Some(h))));
+            tunnel_rows(ctx, h, &mut rows);
         }
         Some(MapSel::Cycle(i)) => {
             let names: Vec<&str> = map.cycles[i]
@@ -1272,6 +1474,20 @@ fn draw_facts(buf: &mut Buffer, inner: Rect, view: &MapView, sel: Option<MapSel>
         let y = inner.y + i as u16;
         let x = put(buf, inner.x + 1, y, &format!("{k:<8}"), st.muted, right);
         put(buf, x + 1, y, v, st.text, right);
+    }
+}
+
+fn tunnel_rows(ctx: &Ctx, h: usize, rows: &mut Vec<(&'static str, String)>) {
+    for t in ctx.tunnels.get(&h).into_iter().flatten() {
+        let state = match t.state {
+            TunnelState::Running => "running",
+            TunnelState::Reconnecting => "reconnecting",
+            TunnelState::Stopped => "stopped",
+        };
+        rows.push((
+            "tunnels",
+            format!("\u{21c4}{} {} {state}", tunnel_letter(t.kind), t.summary),
+        ));
     }
 }
 
