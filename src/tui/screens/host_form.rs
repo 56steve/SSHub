@@ -385,6 +385,7 @@ mod tests {
             username: Some("deploy".into()),
             port: 2222,
             proxy_jump: Some("bastion".into()),
+            jump_argv: Some("bastion".into()),
             transport: crate::session_transport::SessionTransport::Mosh,
             forward_agent: true,
         }

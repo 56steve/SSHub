@@ -69,7 +69,7 @@ pub fn build_tunnel_argv(
         args.push("-p".into());
         args.push(port.to_string());
     }
-    if let Some(jump) = resolved.proxy_jump.as_ref() {
+    if let Some(jump) = resolved.jump_argv.as_ref() {
         if !jump.is_empty() {
             args.push("-J".into());
             args.push(jump.clone());

@@ -47,6 +47,10 @@ pub struct ResolvedConnection {
     pub username: Option<String>,
     pub port: u16,
     pub proxy_jump: Option<String>,
+    /// [`Self::proxy_jump`] as handed to `ssh -J`: a hop naming a launcher-only
+    /// host (one `ssh` cannot look up in `~/.ssh/config`) is expanded to
+    /// `user@address:port`. Display, export and the form keep `proxy_jump`.
+    pub jump_argv: Option<String>,
     pub transport: SessionTransport,
     pub forward_agent: bool,
 }
@@ -60,6 +64,7 @@ impl ResolvedConnection {
             username: None,
             port: DEFAULT_PORT,
             proxy_jump: None,
+            jump_argv: None,
             transport: SessionTransport::Ssh,
             forward_agent: false,
         }
@@ -89,6 +94,7 @@ impl ResolvedConnection {
             identity: None,
             username,
             port: port.unwrap_or(DEFAULT_PORT),
+            jump_argv: proxy_jump.clone(),
             proxy_jump,
             transport: transport.unwrap_or_default(),
             forward_agent: forward_agent.unwrap_or(false),
@@ -105,6 +111,7 @@ impl ResolvedConnection {
             username: host.username.clone(),
             port: host.port.unwrap_or(DEFAULT_PORT),
             proxy_jump: host.proxy_jump.clone(),
+            jump_argv: host.proxy_jump.clone(),
             transport: host.transport.unwrap_or_default(),
             forward_agent: host.forward_agent.unwrap_or(false),
         }
@@ -209,6 +216,16 @@ impl LauncherStore {
 
     /// Resolve the effective connection values for `host`.
     pub fn resolve_connection(&self, host: &ManagedHost) -> Result<ResolvedConnection> {
+        self.resolve_connection_visiting(host, &mut vec![host.name.clone()])
+    }
+
+    /// `visiting` holds the hosts whose jump chains are being expanded, so a
+    /// hop loop stops expanding instead of recursing.
+    fn resolve_connection_visiting(
+        &self,
+        host: &ManagedHost,
+        visiting: &mut Vec<String>,
+    ) -> Result<ResolvedConnection> {
         let chain = self.ordered_default_groups(host)?;
         let mut out = ResolvedConnection::for_group_chain(&chain);
 
@@ -233,7 +250,95 @@ impl LauncherStore {
         if let Some(f) = host.forward_agent {
             out.forward_agent = f;
         }
+        out.jump_argv = match out.proxy_jump.as_deref() {
+            Some(jump) => Some(self.expand_jump(jump, visiting)?),
+            None => None,
+        };
         Ok(out)
+    }
+
+    /// Rewrite hops of `jump` that name a launcher-only host as
+    /// `user@address[:port]`, the form `ssh -J` takes without a config entry.
+    /// Matches the network map's chain rule: the first hop also brings its own
+    /// jump chain; later hops are pinned by this list. ssh_config rows and
+    /// unknown tokens stay as written, since `ssh` resolves those itself. Hop
+    /// identities cannot ride in `-J`: ssh uses its defaults for every hop.
+    ///
+    /// Every token must parse as `[user@]host[:port]` (leading `-`, whitespace
+    /// and control characters are refused): the string reaches `ssh -J`
+    /// verbatim and imports write it, so it is untrusted.
+    fn expand_jump(&self, jump: &str, visiting: &mut Vec<String>) -> Result<String> {
+        if crate::map::is_jump_none(jump) {
+            return Ok(jump.trim().to_string());
+        }
+        let mut out: Vec<String> = Vec::new();
+        for (i, token) in jump
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .enumerate()
+        {
+            let Some(raw) = crate::map::parse_raw_hop(token) else {
+                anyhow::bail!("jump hop {token:?} is not a valid [user@]host[:port]");
+            };
+            let found = match self.get_host_by_name(token)? {
+                Some(h) => Some(h),
+                None if !raw.ipv6 => self.get_host_by_name(&raw.host)?,
+                None => None,
+            };
+            let hop = match found {
+                Some(h) if h.source == crate::store::HostSource::Launcher => h,
+                _ => {
+                    out.push(token.to_string());
+                    continue;
+                }
+            };
+            if visiting.contains(&hop.name) {
+                out.push(token.to_string());
+                continue;
+            }
+            visiting.push(hop.name.clone());
+            let r = self.resolve_connection_visiting(&hop, visiting)?;
+            visiting.pop();
+            if i == 0 {
+                if let Some(own) = r
+                    .jump_argv
+                    .as_deref()
+                    .filter(|j| !crate::map::is_jump_none(j))
+                {
+                    out.push(own.to_string());
+                }
+            }
+            let user = raw
+                .user
+                .clone()
+                .or(r.username)
+                .or_else(|| r.identity.and_then(|i| i.username));
+            let port = raw.port.unwrap_or(r.port);
+            out.push(
+                crate::map::RawHop {
+                    user,
+                    ipv6: hop.address.contains(':'),
+                    host: hop.address.clone(),
+                    port: (port != DEFAULT_PORT || hop.address.contains(':')).then_some(port),
+                }
+                .label(),
+            );
+        }
+        Ok(out.join(","))
+    }
+
+    /// The group whose default ProxyJump `host` inherits, `None` when the host
+    /// sets its own or no group sets one. Same winner as
+    /// [`LauncherStore::resolve_connection`].
+    pub fn proxy_jump_group(&self, host: &ManagedHost) -> Result<Option<HostGroup>> {
+        if host.proxy_jump.is_some() {
+            return Ok(None);
+        }
+        Ok(self
+            .ordered_default_groups(host)?
+            .into_iter()
+            .find(|g| g.default_proxy_jump.is_some()))
     }
 
     /// Chain-only resolution across every group in `member_ids` (host fields
@@ -330,6 +435,7 @@ mod tests {
                 username: Some("deploy".into()),
                 port: 2222,
                 proxy_jump: Some("direct-bastion".into()),
+                jump_argv: Some("direct-bastion".into()),
                 transport: SessionTransport::Ssh,
                 forward_agent: false,
             }
@@ -355,6 +461,7 @@ mod tests {
                 username: Some("prod-login".into()),
                 port: 2200,
                 proxy_jump: Some("prod-bastion".into()),
+                jump_argv: Some("prod-bastion".into()),
                 transport: SessionTransport::Mosh,
                 forward_agent: true,
             }
@@ -404,6 +511,7 @@ mod tests {
                 port: 2201,
                 // nearest setter is the root
                 proxy_jump: Some("root-bastion".into()),
+                jump_argv: Some("root-bastion".into()),
                 // nearest setter is the parent
                 transport: SessionTransport::Ssh,
                 // nearest setter is the root

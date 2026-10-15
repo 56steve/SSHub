@@ -145,3 +145,49 @@ pub(crate) fn connect_argv_uses_group_inherited_values() {
         .collect::<Vec<_>>(),
     );
 }
+
+#[test]
+pub(crate) fn connect_argv_expands_launcher_only_jump_hops() {
+    // A hop naming a host that exists only in launcher.db is unknown to ssh
+    // (`ssh -J bastion-eu` looks the name up in DNS / ~/.ssh/config and fails),
+    // so connect must hand ssh `user@address:port`. The first hop also brings
+    // its own jump (bastion-eu -> jump-2 -> db-1); unknown tokens stay as typed.
+    let store = test_store();
+    let mut eu = NewHost::launcher("bastion-eu", "10.20.0.2");
+    eu.username = Some("ops".into());
+    store.create_host(&eu).unwrap();
+    let mut j2 = NewHost::launcher("jump-2", "10.20.9.2");
+    j2.username = Some("ops".into());
+    j2.port = Some(2200);
+    j2.proxy_jump = Some("bastion-eu".into());
+    store.create_host(&j2).unwrap();
+    let mut db = NewHost::launcher("db-1", "10.20.4.11");
+    db.proxy_jump = Some("jump-2,dns.example.com".into());
+    let managed = store.create_host(&db).unwrap();
+
+    let resolved = store.resolve_connection(&managed).unwrap();
+    let want = "ops@10.20.0.2,ops@10.20.9.2:2200,dns.example.com";
+    assert_eq!(resolved.jump_argv.as_deref(), Some(want));
+    // The stored / displayed / exported value is untouched.
+    assert_eq!(
+        resolved.proxy_jump.as_deref(),
+        Some("jump-2,dns.example.com")
+    );
+    let argv = resolved_session_argv(&managed, &resolved);
+    let at = argv.iter().position(|a| a == "-J").unwrap();
+    assert_eq!(argv[at + 1], want);
+
+    // Oracle: real ssh accepts the expanded jump list and reports it back.
+    if std::process::Command::new("ssh").arg("-V").output().is_ok() {
+        let out = std::process::Command::new("ssh")
+            .args(["-F", "/dev/null", "-G"])
+            .args(&argv[1..])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.lines().any(|l| l == format!("proxyjump {want}")),
+            "ssh -G did not report the jump: {text}"
+        );
+    }
+}

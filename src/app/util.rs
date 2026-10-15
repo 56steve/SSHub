@@ -403,7 +403,7 @@ pub fn resolved_to_ssh_host(
         .as_ref()
         .and_then(|i| i.certificate.as_ref())
         .map(|p| p.to_string_lossy().into_owned());
-    host.proxy_jump = resolved.proxy_jump.clone();
+    host.proxy_jump = resolved.jump_argv.clone();
     host.forward_agent = Some(resolved.forward_agent);
     host.remote_command = m.remote_command.clone();
     host
