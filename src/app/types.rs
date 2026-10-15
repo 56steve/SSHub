@@ -671,8 +671,18 @@ pub enum BroadcastPhase {
 /// A pickable broadcast target (menu row).
 #[derive(Debug, Clone)]
 pub enum BroadcastTarget {
-    Group { id: i64, label: String },
-    Tag { name: String },
+    Group {
+        id: i64,
+        label: String,
+    },
+    Tag {
+        name: String,
+    },
+    /// An explicit host set (managed ids), e.g. the map's blast radius.
+    Hosts {
+        ids: Vec<i64>,
+        label: String,
+    },
 }
 
 /// One resolved target host in the preview (managed hosts only; entries with no

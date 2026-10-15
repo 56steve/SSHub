@@ -90,7 +90,16 @@ impl App {
     }
 
     pub(crate) fn toggle_tunnel(&mut self) -> Result<()> {
-        let Some(tunnel) = self.tunnels.get(self.tunnel_selected).cloned() else {
+        let Some(id) = self.tunnels.get(self.tunnel_selected).map(|t| t.id) else {
+            return Ok(());
+        };
+        self.toggle_tunnel_by_id(id)
+    }
+
+    /// Start or stop tunnel `id`, whichever tab asked: the tunnels tab passes
+    /// its selection, the network map the tunnel of the host under its cursor.
+    pub(crate) fn toggle_tunnel_by_id(&mut self, id: i64) -> Result<()> {
+        let Some(tunnel) = self.tunnels.iter().find(|t| t.id == id).cloned() else {
             return Ok(());
         };
         let host = tunnel

@@ -647,6 +647,7 @@ pub fn render_pick_target(frame: &mut Frame, app: &App) {
                     format!("group: {label}")
                 }
                 crate::app::BroadcastTarget::Tag { name } => format!("#{name}"),
+                crate::app::BroadcastTarget::Hosts { label, .. } => label.clone(),
             };
             let style = theme.style(if is_sel {
                 StyleRole::PickerRowSelected

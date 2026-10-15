@@ -204,6 +204,44 @@ impl App {
         self.mode = AppMode::BroadcastPickTarget;
     }
 
+    /// Open the wizard on an explicit host set (managed ids), skipping the
+    /// target menu: straight to the command prompt. Esc steps back to a menu
+    /// holding just this set.
+    pub(crate) fn open_broadcast_for_hosts(&mut self, ids: Vec<i64>, label: String) {
+        if self
+            .broadcast
+            .as_ref()
+            .is_some_and(|b| !crate::broadcast::all_terminal(&b.results))
+        {
+            self.host_notice = Some("A broadcast run is already in progress.".into());
+            return;
+        }
+        if self.broadcast.is_some() {
+            self.slide_broadcast_out();
+        }
+        self.broadcast_setup = Some(BroadcastSetup {
+            options: vec![BroadcastTarget::Hosts { ids, label }],
+            menu_selected: 0,
+            target_label: String::new(),
+            command: String::new(),
+            cursor: 0,
+            candidates: Vec::new(),
+            preview_selected: 0,
+            edit_targets: false,
+        });
+        self.resolve_broadcast_candidates();
+        let any = self
+            .broadcast_setup
+            .as_ref()
+            .is_some_and(|s| !s.candidates.is_empty());
+        if any {
+            self.mode = AppMode::BroadcastCommand;
+        } else {
+            self.broadcast_setup = None;
+            self.host_notice = Some("No saved hosts to broadcast to.".into());
+        }
+    }
+
     /// Stage 1: the target-pick menu. Up/Down move the highlight (clamped),
     /// Enter resolves the highlighted target to candidates and advances to the
     /// command prompt, Esc closes the wizard.
@@ -250,6 +288,7 @@ impl App {
         let target_label = match &target {
             BroadcastTarget::Group { label, .. } => format!("group: {label}"),
             BroadcastTarget::Tag { name } => format!("#{name}"),
+            BroadcastTarget::Hosts { label, .. } => label.clone(),
         };
 
         let pw_store = self.password_store.as_ref();
@@ -262,6 +301,7 @@ impl App {
                 let matches = match &target {
                     BroadcastTarget::Group { id, .. } => entry.group_ids().contains(id),
                     BroadcastTarget::Tag { name } => entry.tags().iter().any(|t| t == name),
+                    BroadcastTarget::Hosts { ids, .. } => ids.contains(&host_id),
                 };
                 if !matches {
                     return None;
