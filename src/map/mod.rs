@@ -18,8 +18,10 @@
 //! label; its text is never stored or shown.
 
 mod build;
+mod filter;
 
 pub use build::collect_hosts;
+pub use filter::MapFilter;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
