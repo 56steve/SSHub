@@ -258,6 +258,7 @@ impl App {
             2 => self.handle_key_tunnels(key),
             3 => self.handle_key_keychain(key),
             4 => self.handle_key_audit(key),
+            5 => self.handle_key_map(key),
             _ => self.handle_key_normal(key),
         }
     }
@@ -613,6 +614,10 @@ impl App {
         if self.is_action(KeyAction::TabAudit, key) {
             self.active_tab = 4;
             self.refresh_audit_events();
+            return Ok(true);
+        }
+        if self.is_action(KeyAction::TabMap, key) {
+            self.switch_to_map_tab();
             return Ok(true);
         }
         Ok(false)

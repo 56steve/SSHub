@@ -12,6 +12,7 @@ pub mod keygen;
 pub mod keys;
 pub mod known_hosts;
 pub mod log_browser;
+pub mod map;
 pub mod palette;
 pub mod push_key_pickers;
 pub mod session_picker;

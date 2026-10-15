@@ -221,6 +221,7 @@ impl App {
                         self.active_tab = 4;
                         self.refresh_audit_events();
                     }
+                    5 => self.switch_to_map_tab(),
                     _ => {}
                 }
             }

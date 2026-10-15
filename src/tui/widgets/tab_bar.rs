@@ -56,12 +56,13 @@ fn resolve_version_label(var: Option<String>) -> Option<String> {
 }
 
 /// Tab definitions: (number label, display name).
-const TABS: [(&str, &str); 5] = [
+const TABS: [(&str, &str); 6] = [
     ("1", "hosts"),
     ("2", "sftp"),
     ("3", "tunnels"),
     ("4", "identities"),
     ("5", "audit"),
+    ("6", "map"),
 ];
 
 /// Render the tab bar into a 1-row `area`.
@@ -102,6 +103,7 @@ pub fn render_tab_bar(
     let dim = theme.style(StyleRole::TextDim);
     let muted = theme.style(StyleRole::TextMuted);
 
+    let compact = profile_name.is_some() && area.width < 132;
     for (i, (num, label)) in TABS.iter().enumerate() {
         let tab_num = i + 1;
         let is_active = tab_num == active_tab;
@@ -131,14 +133,16 @@ pub fn render_tab_bar(
             x += label.len() as u16;
         }
 
-        // Compact tab spacing leaves room for the profile and badges at 120 columns.
-        let gap = if profile_name.is_some() && area.width < 132 {
-            " "
-        } else {
-            "   "
-        };
+        // Compact tab spacing leaves room for the profile and badges at 120
+        // columns: every inactive tab already opens with a space, which is the
+        // only separation then.
+        let gap = if compact { "" } else { "   " };
         buf.set_string(x, y, gap, dim);
         x += gap.len() as u16;
+    }
+    if compact {
+        // One column between the last tab and the profile label.
+        x += 1;
     }
 
     if let Some(name) = profile_name {

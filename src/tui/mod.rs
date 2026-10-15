@@ -1241,6 +1241,14 @@ fn footer_keybinds(
             ("?".into(), "help"),
             ("q".into(), "quit"),
         ],
+        5 => vec![
+            ("\u{2191}\u{2193}".into(), "row"),
+            ("\u{2190}\u{2192}".into(), "along the path"),
+            ("\u{21b5}".into(), "connect"),
+            ("e".into(), "edit"),
+            ("?".into(), "help"),
+            ("q".into(), "quit"),
+        ],
         3 => vec![
             ("\u{2191}\u{2193}\u{2190}\u{2192}".into(), "move"),
             ("[ ]".into(), "columns"),
@@ -1706,6 +1714,7 @@ fn render_tab_body(
         2 => render_tunnels_body(frame, areas, app),
         3 => render_keys_body(frame, areas, app),
         4 => render_audit_body(frame, areas, app),
+        5 => screens::map::render_map(frame, areas.body, app),
         _ => render_hosts_body(frame, areas, app),
     }
 }
@@ -2399,8 +2408,8 @@ mod tests {
         };
         let mut state = crate::profile::ProfileState::default();
         for (name, narrow) in [
-            ("界".repeat(20), format!("{}…", "界".repeat(6))),
-            ("e\u{301}".repeat(20), format!("{}…", "e\u{301}".repeat(12))),
+            ("界".repeat(20), format!("{}…", "界".repeat(4))),
+            ("e\u{301}".repeat(20), format!("{}…", "e\u{301}".repeat(9))),
         ] {
             let record = crate::profile::create_profile(&roots, &mut state, &name).unwrap();
             app.profile = Some(crate::profile::profile_paths(
@@ -2412,7 +2421,7 @@ mod tests {
                 let buffer = render_to_buffer(&app, width, 24);
                 let area =
                     dashboard_layout::dashboard_layout_zoomed(buffer.area, app.ui_zoom).tab_bar;
-                let start = if width < 132 { 57 } else { 67 };
+                let start = if width < 132 { 60 } else { 77 };
                 let adjusted;
                 let expected_name = if width == 80 {
                     &narrow

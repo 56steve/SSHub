@@ -56,8 +56,8 @@ pub const HELP_ITEMS: &[HelpItem] = &[
         desc: "Move up / down",
     },
     HelpItem::Entry {
-        key: "1..5 / h i",
-        desc: "Switch tab (hosts, sftp, tunnels, identities, audit)",
+        key: "1..6 / h i",
+        desc: "Switch tab (hosts, sftp, tunnels, identities, audit, map)",
     },
     HelpItem::Entry {
         key: "Tab",
@@ -276,6 +276,24 @@ pub const HELP_ITEMS: &[HelpItem] = &[
     HelpItem::Entry {
         key: "r",
         desc: "Cycle range (all/24h/week/month)",
+    },
+    HelpItem::Blank,
+    HelpItem::Section("map (tab 6)"),
+    HelpItem::Entry {
+        key: "\u{2191}\u{2193}",
+        desc: "Previous / next row of the jump tree",
+    },
+    HelpItem::Entry {
+        key: "\u{2190}\u{2192}",
+        desc: "Walk along the row: hop by hop, then its host glyphs",
+    },
+    HelpItem::Entry {
+        key: "Enter",
+        desc: "Connect to the hop or host under the cursor",
+    },
+    HelpItem::Entry {
+        key: "e",
+        desc: "Edit the host under the cursor",
     },
     HelpItem::Blank,
     HelpItem::Section("search & tags"),

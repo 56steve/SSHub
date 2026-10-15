@@ -238,6 +238,17 @@ pub struct Node {
     pub sigma: usize,
 }
 
+/// One line of the map, top to bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Row {
+    /// A hop node (depth-first: a parent, then its children).
+    Node(usize),
+    /// A jump loop, by index in [`Map::cycles`].
+    Cycle(usize),
+    /// The hosts with no jump.
+    Direct,
+}
+
 /// A jump loop and the hosts stuck behind it.
 #[derive(Debug, Clone)]
 pub struct CycleRow {
@@ -374,6 +385,39 @@ impl Map {
         map.hosts = hosts;
         map.chains = chains;
         map
+    }
+
+    /// The map's rows in drawing order: every root subtree depth-first, then the
+    /// jump loops, then the direct-only bucket.
+    pub fn rows(&self) -> Vec<Row> {
+        fn walk(map: &Map, n: usize, out: &mut Vec<Row>) {
+            out.push(Row::Node(n));
+            for &c in &map.nodes[n].children {
+                walk(map, c, out);
+            }
+        }
+        let mut rows = Vec::new();
+        for &r in &self.roots {
+            walk(self, r, &mut rows);
+        }
+        rows.extend((0..self.cycles.len()).map(Row::Cycle));
+        if !self.direct.is_empty() {
+            rows.push(Row::Direct);
+        }
+        rows
+    }
+
+    /// Hosts drawn as glyphs on `row`, left to right.
+    pub fn row_hosts(&self, row: Row) -> Vec<usize> {
+        match row {
+            Row::Node(n) => self.nodes[n]
+                .cargo
+                .iter()
+                .flat_map(|(_, h)| h.iter().copied())
+                .collect(),
+            Row::Cycle(i) => self.cycles[i].hosts.clone(),
+            Row::Direct => self.direct.clone(),
+        }
     }
 
     /// Trie nodes from the root down to `node`.
