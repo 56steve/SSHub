@@ -9,6 +9,7 @@ pub mod import;
 pub mod keybinds;
 pub mod known_hosts;
 pub mod log_browser;
+pub mod map;
 pub mod metadata;
 pub(crate) mod osc52;
 pub mod osinfo;
