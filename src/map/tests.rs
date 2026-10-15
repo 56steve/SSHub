@@ -49,7 +49,7 @@ fn chain_of(map: &Map, name: &str) -> Vec<String> {
 fn fleet() -> Map {
     let mut hosts = vec![
         host("bastion-eu", "prod", None),
-        host("jump-2", "prod", Some("bastion-eu")),
+        ssh_config("jump-2", Some("bastion-eu"), false),
         host("web-1", "prod", Some("bastion-eu")),
         host("db-1", "prod/db", Some("jump-2")),
         host("db-2", "prod/db", Some("jump-2")),
@@ -60,8 +60,8 @@ fn fleet() -> Map {
         host("ci-1", "ci", Some("corp-gw")),
         host("legacy-1", "legacy", Some("ops@203.0.113.7:2222")),
         ssh_config("iot-1", None, true),
-        host("loop-a", "lab", Some("loop-b")),
-        host("loop-b", "lab", Some("loop-a")),
+        ssh_config("loop-a", Some("loop-b"), false),
+        ssh_config("loop-b", Some("loop-a"), false),
         host("standalone", "staging", None),
     ];
     hosts[3].jump_source = Some(JumpSource::Inherited {
@@ -82,13 +82,25 @@ fn first_hop_brings_its_own_chain_later_hops_are_pinned() {
 }
 
 #[test]
+fn launcher_hop_own_jump_is_never_followed() {
+    // `-J` gets `user@addr` for a launcher hop; ssh cannot see its own jump.
+    let m = Map::build(vec![
+        host("bastion", "g", None),
+        host("jump", "g", Some("bastion")),
+        host("db", "g", Some("jump")),
+    ]);
+    assert_eq!(chain_of(&m, "db"), ["jump"]);
+    assert_eq!(chain_of(&m, "jump"), ["bastion"]);
+}
+
+#[test]
 fn source_is_recorded_per_hop() {
     let m = fleet();
     let Chain::Hops(h) = &m.chains[idx(&m, "db-1")] else {
         panic!()
     };
-    // bastion-eu comes from jump-2's own setting, jump-2 from db-1's (group).
-    assert_eq!(h[0].source, JumpSource::Own);
+    // bastion-eu comes from jump-2's own ssh_config, jump-2 from db-1's (group).
+    assert_eq!(h[0].source, JumpSource::SshConfig);
     assert_eq!(
         h[1].source,
         JumpSource::Inherited {
@@ -182,8 +194,8 @@ fn diamond_is_not_a_cycle_and_self_jump_is() {
     // Per-path visited set: x -> m1,m2 where both m1 and m2 jump via base.
     let m = Map::build(vec![
         host("base", "g", None),
-        host("m1", "g", Some("base")),
-        host("m2", "g", Some("base")),
+        ssh_config("m1", Some("base"), false),
+        ssh_config("m2", Some("base"), false),
         host("x", "g", Some("m1,m2")),
         host("selfie", "g", Some("selfie")),
     ]);

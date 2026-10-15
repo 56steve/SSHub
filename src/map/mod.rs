@@ -5,11 +5,12 @@
 //! default it inherits, or an ssh_config `ProxyJump` (as reported by
 //! `ssh -G`). Groups and tags never create an edge.
 //!
-//! Chain rule (matches what `ssh -J` does, checked against `ssh -vv`, and
+//! Chain rule (matches what `ssh -J` does, checked against `ssh -v`, and
 //! `LauncherStore::expand_jump`): the first token of a host's jump list also
-//! brings that hop's own chain; every later token is pinned by the `-J` list,
-//! so the host's explicit list overrides that hop's own setting. That is why
-//! one hop can sit under two parents. `ProxyJump none` is an empty chain.
+//! brings that hop's own chain when the hop is an ssh_config host (ssh itself
+//! follows its `ProxyJump`); every later token is pinned by the `-J` list. A
+//! launcher hop is expanded to `user@addr`, so its own jump setting is never
+//! followed. That is why one hop can sit under two parents. `ProxyJump none` is an empty chain.
 //!
 //! Hop tokens are untrusted text (imports write them): anything
 //! `parse_adhoc_target` refuses, such as a leading `-`, is an `Invalid` hop,
@@ -201,7 +202,10 @@ fn expand(
             cycle.push(h);
             return Err(cycle);
         }
-        if i == 0 {
+        // Only ssh itself follows a hop's own chain, and it only knows
+        // ssh_config: a launcher hop is expanded to `user@addr`, so its own
+        // jump setting is never applied.
+        if i == 0 && hosts[h].ssh_config {
             visiting.push(h);
             let own = expand(hosts, index, h, visiting);
             visiting.pop();

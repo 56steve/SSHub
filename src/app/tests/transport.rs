@@ -151,7 +151,8 @@ pub(crate) fn connect_argv_expands_launcher_only_jump_hops() {
     // A hop naming a host that exists only in launcher.db is unknown to ssh
     // (`ssh -J bastion-eu` looks the name up in DNS / ~/.ssh/config and fails),
     // so connect must hand ssh `user@address:port`. The first hop also brings
-    // its own jump (bastion-eu -> jump-2 -> db-1); unknown tokens stay as typed.
+    // a launcher hop's own jump (jump-2 via bastion-eu) is never followed, since
+    // ssh cannot see it; unknown tokens stay as typed.
     let store = test_store();
     let mut eu = NewHost::launcher("bastion-eu", "10.20.0.2");
     eu.username = Some("ops".into());
@@ -166,7 +167,7 @@ pub(crate) fn connect_argv_expands_launcher_only_jump_hops() {
     let managed = store.create_host(&db).unwrap();
 
     let resolved = store.resolve_connection(&managed).unwrap();
-    let want = "ops@10.20.0.2,ops@10.20.9.2:2200,dns.example.com";
+    let want = "ops@10.20.9.2:2200,dns.example.com";
     assert_eq!(resolved.jump_argv.as_deref(), Some(want));
     // The stored / displayed / exported value is untouched.
     assert_eq!(

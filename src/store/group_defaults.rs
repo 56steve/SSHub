@@ -216,16 +216,17 @@ impl LauncherStore {
 
     /// Resolve the effective connection values for `host`.
     pub fn resolve_connection(&self, host: &ManagedHost) -> Result<ResolvedConnection> {
-        self.resolve_connection_visiting(host, &mut vec![host.name.clone()])
+        let mut out = self.resolve_fields(host)?;
+        out.jump_argv = match out.proxy_jump.as_deref() {
+            Some(jump) => Some(self.expand_jump(jump)?),
+            None => None,
+        };
+        Ok(out)
     }
 
-    /// `visiting` holds the hosts whose jump chains are being expanded, so a
-    /// hop loop stops expanding instead of recursing.
-    fn resolve_connection_visiting(
-        &self,
-        host: &ManagedHost,
-        visiting: &mut Vec<String>,
-    ) -> Result<ResolvedConnection> {
+    /// The effective values of [`LauncherStore::resolve_connection`] except the
+    /// expanded `-J` string (left equal to the stored one).
+    fn resolve_fields(&self, host: &ManagedHost) -> Result<ResolvedConnection> {
         let chain = self.ordered_default_groups(host)?;
         let mut out = ResolvedConnection::for_group_chain(&chain);
 
@@ -250,34 +251,26 @@ impl LauncherStore {
         if let Some(f) = host.forward_agent {
             out.forward_agent = f;
         }
-        out.jump_argv = match out.proxy_jump.as_deref() {
-            Some(jump) => Some(self.expand_jump(jump, visiting)?),
-            None => None,
-        };
         Ok(out)
     }
 
     /// Rewrite hops of `jump` that name a launcher-only host as
     /// `user@address[:port]`, the form `ssh -J` takes without a config entry.
-    /// Matches the network map's chain rule: the first hop also brings its own
-    /// jump chain; later hops are pinned by this list. ssh_config rows and
-    /// unknown tokens stay as written, since `ssh` resolves those itself. Hop
-    /// identities cannot ride in `-J`: ssh uses its defaults for every hop.
+    /// ssh_config rows and unknown tokens stay as written, since `ssh`
+    /// resolves those itself (including a first hop's own ssh_config chain). A
+    /// launcher-only hop's own jump setting is never followed: ssh cannot see
+    /// it, and every hop is pinned by this list. Hop identities cannot ride in
+    /// `-J` either: ssh uses its defaults for every hop.
     ///
     /// Every token must parse as `[user@]host[:port]` (leading `-`, whitespace
     /// and control characters are refused): the string reaches `ssh -J`
     /// verbatim and imports write it, so it is untrusted.
-    fn expand_jump(&self, jump: &str, visiting: &mut Vec<String>) -> Result<String> {
+    fn expand_jump(&self, jump: &str) -> Result<String> {
         if crate::map::is_jump_none(jump) {
             return Ok(jump.trim().to_string());
         }
         let mut out: Vec<String> = Vec::new();
-        for (i, token) in jump
-            .split(',')
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-            .enumerate()
-        {
+        for token in jump.split(',').map(str::trim).filter(|t| !t.is_empty()) {
             let Some(raw) = crate::map::parse_raw_hop(token) else {
                 anyhow::bail!("jump hop {token:?} is not a valid [user@]host[:port]");
             };
@@ -293,22 +286,7 @@ impl LauncherStore {
                     continue;
                 }
             };
-            if visiting.contains(&hop.name) {
-                out.push(token.to_string());
-                continue;
-            }
-            visiting.push(hop.name.clone());
-            let r = self.resolve_connection_visiting(&hop, visiting)?;
-            visiting.pop();
-            if i == 0 {
-                if let Some(own) = r
-                    .jump_argv
-                    .as_deref()
-                    .filter(|j| !crate::map::is_jump_none(j))
-                {
-                    out.push(own.to_string());
-                }
-            }
+            let r = self.resolve_fields(&hop)?;
             let user = raw
                 .user
                 .clone()

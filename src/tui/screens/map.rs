@@ -1340,15 +1340,25 @@ mod tests {
         iot.ssh_config = true;
         vec![
             host("bastion-eu", "prod", None),
-            host("jump-2", "prod", Some("bastion-eu")),
+            {
+                let mut h = host("jump-2", "prod", Some("bastion-eu"));
+                h.ssh_config = true;
+                h
+            },
             host("web-1", "prod", Some("bastion-eu")),
             host("db-1", "prod/db", Some("jump-2")),
             host("bastion-us", "us", None),
             host("db-us-2", "us", Some("bastion-us,jump-2")),
             host("legacy-1", "legacy", Some("ops@203.0.113.7:2222")),
             iot,
-            host("loop-a", "lab", Some("loop-b")),
-            host("loop-b", "lab", Some("loop-a")),
+            MapHost {
+                ssh_config: true,
+                ..host("loop-a", "lab", Some("loop-b"))
+            },
+            MapHost {
+                ssh_config: true,
+                ..host("loop-b", "lab", Some("loop-a"))
+            },
             host("standalone", "staging", None),
         ]
     }

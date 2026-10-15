@@ -101,9 +101,8 @@ fn arrows_walk_the_tree_and_hosts_tab_keys_do_not_leak() {
     let hosts_before = app.hosts.len();
     let selected_before = app.selected;
 
-    // Down to the jump-2 row, right onto a glyph: the ribbon names the host.
-    app.handle_key(key(KeyCode::Down)).unwrap();
-    app.handle_key(key(KeyCode::Right)).unwrap();
+    // The biggest subtree (jump-2) is the first row; right onto its glyph: the
+    // ribbon names the host.
     app.handle_key(key(KeyCode::Right)).unwrap();
     let text = screen(&draw(&app, 160, 45));
     assert!(text.contains("\u{25c2} db-1"), "{text}");
@@ -125,18 +124,36 @@ fn arrows_walk_the_tree_and_hosts_tab_keys_do_not_leak() {
     assert_eq!(app.active_tab, 0);
 }
 
+/// ssh_config hosts that jump through each other: ssh follows a config hop's
+/// own `ProxyJump`, so only these can form a loop.
+struct LoopResolver;
+
+impl HostResolver for LoopResolver {
+    fn list_hosts(&self) -> anyhow::Result<Vec<String>> {
+        Ok(vec!["loop-a".into(), "loop-b".into()])
+    }
+
+    fn resolve_host(&self, name: &str) -> anyhow::Result<SshHost> {
+        let mut h = SshHost::new(name);
+        h.hostname = Some(format!("{name}.example"));
+        h.port = Some(22);
+        h.proxy_jump = Some(if name == "loop-a" { "loop-b" } else { "loop-a" }.into());
+        Ok(h)
+    }
+}
+
 #[test]
 fn enter_on_a_cycle_host_refuses_instead_of_connecting() {
     let store = Arc::new(LauncherStore::open_in_memory().unwrap());
-    for (n, j) in [("loop-a", "loop-b"), ("loop-b", "loop-a")] {
+    for n in ["loop-a", "loop-b"] {
         let mut h = NewHost::launcher(n, format!("{n}.example"));
-        h.proxy_jump = Some(j.into());
+        h.source = sshub::store::HostSource::SshConfig;
         store.create_host(&h).unwrap();
     }
     let mut app = App::new_with_deps(
         AppConfig::default(),
         AppDeps {
-            resolver: Box::new(EmptyResolver),
+            resolver: Box::new(LoopResolver),
             metadata: Arc::new(MetadataDb::default()),
             store,
             password_store: Box::new(sshub::credentials::NoopPasswordStore),
