@@ -39,7 +39,7 @@
  │ ● up ● slow × down ○ unknown ▶ session                                      │ │ ┆raw┆ hop: no ping, no detail; a saves it as a host                        │ 
  │ ─▸ jump edge   ┈┈ "hosts behind" leader   Σ all hosts behind, any depth     │ │ ‹proxy cmd› opaque: no hops parsed, status = target's                      │ 
  │ ┆raw┆  ‹proxy cmd› ┄┄  ↻ ══ cycle  ◇ reused hop                             │ │ ◇ jump-2 has two rows: two chains reach it                                 │ 
- │ lenses: o tunnels  B blast  t test — they re-skin glyphs and edges          │ │ a cycle row's glyphs keep their status                                     │ 
+ │ lenses: o tunnels  B blast  t test - they re-skin glyphs and edges          │ │ a cycle row's glyphs keep their status                                     │ 
  └─────────────────────────────────────────────────────────────────────────────┘ └────────────────────────────────────────────────────────────────────────────┘ 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  ↵ edit chain   e edit loop-a   ↑↓ row   ? help                                                                                                                 

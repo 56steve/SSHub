@@ -39,7 +39,7 @@
  │ ● up ● slow × down ○ unknown ▶ session                                      │ │ address   postgres@10.20.4.11:22  ·  prod/db  #db #pci                     │ 
  │ ─▸ jump edge   ┈┈ "hosts behind" leader   Σ all hosts behind, any depth     │ │ jump      inherited from "prod/db" = jump-2; jump-2's from "prod"          │ 
  │ ┆raw┆  ‹proxy cmd› ┄┄  ↻ ══ cycle  ◇ reused hop                             │ │ session   ▶ open 2h  ⇄L 6379→cache-1 running                               │ 
- │ lenses: o tunnels  B blast  t test — they re-skin glyphs and edges          │ │ ssh       ssh -J bastion-eu,jump-2 db-1                                    │ 
+ │ lenses: o tunnels  B blast  t test - they re-skin glyphs and edges          │ │ ssh       ssh -J bastion-eu,jump-2 db-1                                    │ 
  └─────────────────────────────────────────────────────────────────────────────┘ └────────────────────────────────────────────────────────────────────────────┘ 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  ↑↓ row   ←→ along the path   ↵ connect   / filter   B blast   o tunnel lens   u use as jump   t test   ␣ fold   e edit   y copy cmd   ? help   q quit          

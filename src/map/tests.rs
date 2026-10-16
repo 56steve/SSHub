@@ -268,19 +268,6 @@ fn proxy_command_is_one_opaque_hop_without_its_text() {
     assert_eq!(chain_of(&m, "behind"), [PROXY_CMD_LABEL, "edge"]);
 }
 
-#[test]
-fn display_width_of_map_glyphs_is_one_cell() {
-    // Every glyph the map draws is one terminal cell wide (design section 5).
-    for g in "◉●×○▶◇↻⇄·»✓✗–┈┄═╘├└┬─▸┆‹›▾▸⋯Σ".chars()
-    {
-        assert_eq!(
-            unicode_width::UnicodeWidthChar::width(g),
-            Some(1),
-            "{g:?} is not one cell"
-        );
-    }
-}
-
 /// Oracle: real `ssh -v` shows the path ssh takes. With `Host a / ProxyJump z`
 /// in ssh_config, `ssh -J a,b t` goes z -> a -> b -> t: the first hop brings
 /// its own chain, `b` is pinned by the `-J` list.

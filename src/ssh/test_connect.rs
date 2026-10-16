@@ -485,12 +485,28 @@ mod tests {
     }
 
     #[test]
-    fn classify_failure_handles_the_remaining_ssh_messages() {
-        // Texts printed by OpenSSH itself; the oracle tests above cover the
-        // rest against a real client.
+    fn oracle_a_failing_proxy_command_is_classified_from_real_ssh_output() {
+        if !have_ssh() {
+            return;
+        }
+        let out = Command::new("ssh")
+            .args([
+                "-F",
+                "/dev/null",
+                "-o",
+                "ProxyCommand=false",
+                "-o",
+                "BatchMode=yes",
+            ])
+            .args(["u@h.invalid", "true"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let exit = out.status.code().unwrap_or(-1);
         assert_eq!(
-            classify_failure(255, "Connection closed by UNKNOWN port 65535").0,
-            "proxy cmd failed"
+            classify_failure(exit, &stderr).0,
+            "proxy cmd failed",
+            "{stderr}"
         );
         assert_eq!(classify_failure(1, "weird").0, "failed (exit 1)");
     }

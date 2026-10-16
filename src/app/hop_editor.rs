@@ -918,7 +918,7 @@ pub(crate) fn step_text(st: &crate::ssh::test_connect::StepState) -> (char, Stri
         StepState::Running => ('\u{bb}', "testing\u{2026}".into()),
         StepState::Ok { ms } => ('\u{2713}', format!("ok {ms}ms")),
         StepState::Failed { reason, .. } => ('\u{2717}', reason.clone()),
-        StepState::Skipped { reason } => ('\u{2013}', reason.clone()),
-        StepState::Cancelled => ('\u{2013}', "cancelled".into()),
+        StepState::Skipped { reason } => ('-', reason.clone()),
+        StepState::Cancelled => ('-', "cancelled".into()),
     }
 }

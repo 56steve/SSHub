@@ -39,7 +39,7 @@
  │ ● up ● slow × down ○ unknown ▶ session                                      │ │ 12 hosts: 8 directly behind, 4 behind jump-2                               │ 
  │ ─▸ jump edge   ┈┈ "hosts behind" leader   Σ all hosts behind, any depth     │ │ 2 sessions open · 2 tunnels ride on it                                     │ 
  │ ┆raw┆  ‹proxy cmd› ┄┄  ↻ ══ cycle  ◇ reused hop                             │ │ not hit: db-us-2 (jump-2 via bastion-us)                                   │ 
- │ lenses: o tunnels  B blast  t test — they re-skin glyphs and edges          │ │ Σ is the radius of every row, before you press B.                          │ 
+ │ lenses: o tunnels  B blast  t test - they re-skin glyphs and edges          │ │ Σ is the radius of every row, before you press B.                          │ 
  └─────────────────────────────────────────────────────────────────────────────┘ └────────────────────────────────────────────────────────────────────────────┘ 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  B blast off   Esc clear   n/N next dependent   b broadcast to these   y copy list   ? help                                                                     

@@ -39,7 +39,7 @@
  │ ● up ● slow × down ○ unknown ▶ session                                      │ │ ⇄L bastion-eu 5432→db-1:5432  running                                      │ 
  │ ─▸ jump edge   ┈┈ "hosts behind" leader   Σ all hosts behind, any depth     │ │ ⇄D jump-2     :1080 socks      running                                     │ 
  │ ┆raw┆  ‹proxy cmd› ┄┄  ↻ ══ cycle  ◇ reused hop                             │ │ ⇄L db-1  running   ⇄R corp-gw reconnecting                                 │ 
- │ lenses: o tunnels  B blast  t test — they re-skin glyphs and edges          │ │ ⇄L web-us-1 8080→:80 stopped  · hosts without a tunnel → ·                 │ 
+ │ lenses: o tunnels  B blast  t test - they re-skin glyphs and edges          │ │ ⇄L web-us-1 8080→:80 stopped  · hosts without a tunnel → ·                 │ 
  └─────────────────────────────────────────────────────────────────────────────┘ └────────────────────────────────────────────────────────────────────────────┘ 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  o status lens   x start/stop   3 tunnels tab   ↵ connect   ? help                                                                                              

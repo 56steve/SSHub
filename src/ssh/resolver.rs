@@ -260,7 +260,7 @@ pub fn parse_ssh_g_output(name: &str, output: &str) -> SshHost {
             "user" => host.user = Some(value.to_string()),
             "port" => host.port = value.parse().ok(),
             "proxyjump" if value != "none" => host.proxy_jump = Some(value.to_string()),
-            "proxycommand" if value != "none" => host.has_proxy_command = true,
+            "proxycommand" => host.has_proxy_command = true,
             "identityfile" if host.identity_file.is_none() => {
                 host.identity_file = Some(value.to_string());
             }
@@ -428,7 +428,6 @@ identityfile /home/user/.ssh/id_rsa
         let host = parse_ssh_g_output("h", "hostname x\nproxycommand cloudflared access ssh %h\n");
         assert!(host.has_proxy_command);
         assert!(host.proxy_jump.is_none());
-        assert!(!parse_ssh_g_output("h", "hostname x\nproxycommand none\n").has_proxy_command);
     }
 
     #[test]

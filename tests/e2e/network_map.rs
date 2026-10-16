@@ -451,13 +451,19 @@ fn y_copies_the_command_a_saves_a_raw_hop_and_z_zooms_the_map() {
     to_map(&mut app);
 
     // y on the raw hop copies `ssh <hop>`; on the host behind it, the -J form.
-    press(&mut app, 'y');
+    // (Captured: the escape sequence must not reach the developer's terminal.)
+    let ((), copied) = sshub::osc52::capture(|| {
+        press(&mut app, 'y');
+        app.handle_key(key(KeyCode::Right)).unwrap();
+        press(&mut app, 'y');
+    });
     assert_eq!(
-        app.host_notice.as_deref(),
-        Some("copied: ssh -p 2222 'ops@203.0.113.7'")
+        copied,
+        [
+            "ssh -p 2222 'ops@203.0.113.7'",
+            "ssh -J 'ops@203.0.113.7:2222' -o 'ForwardAgent=no' legacy.example"
+        ]
     );
-    app.handle_key(key(KeyCode::Right)).unwrap();
-    press(&mut app, 'y');
     assert_eq!(
         app.host_notice.as_deref(),
         Some("copied: ssh -J 'ops@203.0.113.7:2222' -o 'ForwardAgent=no' legacy.example")
@@ -507,11 +513,17 @@ fn pickers_do_not_open_where_the_outline_has_no_room_to_draw_them() {
 
 #[test]
 fn y_shell_quotes_every_word_of_the_copied_command() {
-    // Names and addresses come from imports: `;` and `$()` must not run when
-    // the copied line is pasted into a shell.
+    // Names, users and addresses come from imports: `;`, `$()` and a quote must
+    // not run or split when the copied line is pasted into a shell.
+    let marker = tempfile::tempdir().unwrap().keep().join("pwned");
+    let address = format!("db$(touch {}) x;y", marker.display());
     let store = Arc::new(LauncherStore::open_in_memory().unwrap());
-    let mut h = NewHost::launcher("evil", "db;touch /tmp/pwned");
-    h.proxy_jump = Some("ops@bastion;id".into());
+    store
+        .create_host(&NewHost::launcher("bastion", "10.0.0.1"))
+        .unwrap();
+    let mut h = NewHost::launcher("evil", address.clone());
+    h.username = Some("o'brien".into());
+    h.proxy_jump = Some("bastion".into());
     store.create_host(&h).unwrap();
     let mut app = App::new_with_deps(
         AppConfig::default(),
@@ -525,13 +537,33 @@ fn y_shell_quotes_every_word_of_the_copied_command() {
     app.reload_hosts().unwrap();
     to_map(&mut app);
     app.handle_key(key(KeyCode::Right)).unwrap(); // the glyph of `evil`
-    press(&mut app, 'y');
-    let copied = app.host_notice.clone().unwrap_or_default();
-    assert!(copied.contains("'ops@bastion;id'"), "{copied}");
-    assert!(copied.contains("'db;touch /tmp/pwned'"), "{copied}");
-    // No bare `;` outside quotes: splitting like a POSIX shell leaves one word each.
-    let words = copied.trim_start_matches("copied: ");
-    assert_eq!(words.matches('\'').count() % 2, 0, "{copied}");
+    let ((), copied) = sshub::osc52::capture(|| press(&mut app, 'y'));
+    let line = copied.first().expect("nothing was copied").clone();
+
+    // Let a POSIX shell split the line the way a paste would, and print each
+    // word on its own line: the words are exactly ssh's argv.
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("printf '%s\\n' {line}"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{line}");
+    let words: Vec<String> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    assert_eq!(words.first().map(String::as_str), Some("ssh"), "{line}");
+    assert!(words.contains(&"-J".to_string()) && words.contains(&"10.0.0.1".to_string()));
+    assert_eq!(
+        words.last().unwrap(),
+        &format!("o'brien@{address}"),
+        "the target is one word: {words:?}"
+    );
+    assert!(
+        !marker.exists(),
+        "the pasted line ran a command substitution"
+    );
 }
 
 /// A profile with hosts but no jump edges (design D07).
@@ -602,4 +634,29 @@ fn the_d07_actions_work_and_shift_z_opens_the_per_group_board() {
         "mode {:?}",
         app.mode
     );
+}
+
+#[test]
+fn down_from_a_hop_lands_on_the_hop_drawn_on_the_next_row() {
+    let mut app = app();
+    to_map(&mut app);
+    let mut seen = 0;
+    for _ in 0..6 {
+        let v = app.map_view.as_ref().unwrap();
+        // On a hop the selection is the node of the row under the cursor, and
+        // the ribbon names it: never an ancestor the row does not draw.
+        if let Some(MapSel::Hop(n)) = v.selection() {
+            let row = v.rows[v.row];
+            assert_eq!(row, sshub::map::Row::Node(n), "{:?}", v.selection());
+            let label = v.map.key_label(&v.map.nodes[n].key);
+            let text = screen(&draw(&app, 160, 45));
+            assert!(
+                text.contains(&format!("path ribbon \u{2500} {label}")),
+                "{text}"
+            );
+            seen += 1;
+        }
+        app.handle_key(key(KeyCode::Down)).unwrap();
+    }
+    assert!(seen >= 2, "walked {seen} hop rows");
 }

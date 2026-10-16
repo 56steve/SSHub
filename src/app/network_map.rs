@@ -306,9 +306,11 @@ impl MapView {
         })
     }
 
-    /// Step to the previous / next row. From a hop the cursor keeps its depth
-    /// (clamped); from a glyph it lands on the same glyph index (clamped), or
-    /// on the row's own hop when that row has no glyphs.
+    /// Step to the previous / next row. From a hop the cursor lands on the new
+    /// row's own (last) hop, the one drawn on it: keeping the depth would leave
+    /// it on an ancestor that this row does not draw. From a glyph it lands on
+    /// the same glyph index (clamped), or on the row's own hop when that row
+    /// has no glyphs.
     pub fn move_row(&mut self, delta: isize) {
         if self.rows.is_empty() {
             return;
@@ -321,7 +323,7 @@ impl MapView {
         let new_hops = self.hop_count(next);
         let new_glyphs = self.slots(next) - new_hops;
         self.pos = if self.pos < old_hops || new_glyphs == 0 {
-            self.pos.min(new_hops - 1)
+            new_hops - 1
         } else {
             new_hops + (self.pos - old_hops).min(new_glyphs - 1)
         };

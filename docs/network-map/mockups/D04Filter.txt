@@ -27,7 +27,7 @@
  └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ 
  ┌─ path ribbon ─ db-us-2 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ 
  │            ┌─ hop 1 ────────────────────┐      ┌─ hop 2 ────────────────────┐      ┌─ target ───────────────────┐                                          │ 
- │            │ ● bastion-us          88ms │      │ ● jump-2              31ms │      │ ○ db-us-2                — │                                          │ 
+ │            │ ● bastion-us          88ms │      │ ● jump-2              31ms │      │ ○ db-us-2                - │                                          │ 
  │ ◉ you ━━━▶ │ ops@10.40.0.2:22           │ ━━━▶ │ ops@10.20.9.2:22           │ ━━━▶ │ postgres@10.40.4.12:22     │                                          │ 
  │            │ own value                  │      │ own value                  │      │ target                     │                                          │ 
  │            └────────────────────────────┘      └────────────────────────────┘      └────────────────────────────┘                                          │ 
@@ -39,7 +39,7 @@
  │ ● up ● slow × down ○ unknown ▶ session                                      │ │ Filter works at two levels: rows with no match drop                        │ 
  │ ─▸ jump edge   ┈┈ "hosts behind" leader   Σ all hosts behind, any depth     │ │ out, and inside kept rows non-matching hosts turn ·                        │ 
  │ ┆raw┆  ‹proxy cmd› ┄┄  ↻ ══ cycle  ◇ reused hop                             │ │ so the strip keeps its shape. Groups/tags add no edges.                    │ 
- │ lenses: o tunnels  B blast  t test — they re-skin glyphs and edges          │ │ tokens    group: tag: via: !  plain = name                                 │ 
+ │ lenses: o tunnels  B blast  t test - they re-skin glyphs and edges          │ │ tokens    group: tag: via: !  plain = name                                 │ 
  └─────────────────────────────────────────────────────────────────────────────┘ └────────────────────────────────────────────────────────────────────────────┘ 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  type filter   Tab complete   ↵ keep   Esc clear   # tags   ? help                                                                                              

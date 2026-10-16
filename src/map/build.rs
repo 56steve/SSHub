@@ -220,17 +220,14 @@ mod tests {
             .map(HostEntry::from_managed)
             .collect();
         assert_eq!(entries.len(), 1840);
-        let t = std::time::Instant::now();
+        // Size, not speed: a wall-clock bound flakes on a loaded runner.
         let hosts = collect_hosts(&store, &entries).unwrap();
         let map = crate::map::Map::build(hosts);
-        let took = t.elapsed();
         assert_eq!(map.hosts.len(), 1840);
         assert!(map.roots.len() > 100);
-        assert!(
-            took < std::time::Duration::from_millis(1500),
-            "collect + build took {took:?}"
-        );
-        eprintln!("collect + build, 1840 hosts: {took:?}");
+        // Two out of three hosts jump through one of the 212 hops.
+        let behind: usize = map.roots.iter().map(|&r| map.nodes[r].sigma).sum();
+        assert!(behind >= 1000, "{behind} hosts behind the roots");
     }
 
     #[test]

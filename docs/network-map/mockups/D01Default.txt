@@ -37,9 +37,9 @@
  └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ 
  ┌─ legend ────────────────────────────────────────────────────────────────────┐ ┌─ node ─ bastion-eu ────────────────────────────────────────────────────────┐ 
  │ ● up ● slow × down ○ unknown ▶ session                                      │ │ address   ops@10.20.0.2:22  ·  group prod  #bastion                        │ 
- │ ─▸ jump edge   ┈┈ "hosts behind" leader   Σ all hosts behind, any depth     │ │ jump      none — reached directly                                          │ 
+ │ ─▸ jump edge   ┈┈ "hosts behind" leader   Σ all hosts behind, any depth     │ │ jump      none - reached directly                                          │ 
  │ ┆raw┆  ‹proxy cmd› ┄┄  ↻ ══ cycle  ◇ reused hop                             │ │ carries   12 hosts (8 direct + 4 behind jump-2)  B blast                   │ 
- │ lenses: o tunnels  B blast  t test — they re-skin glyphs and edges          │ │ tunnels   ⇄L 5432→db-1:5432 running                                        │ 
+ │ lenses: o tunnels  B blast  t test - they re-skin glyphs and edges          │ │ tunnels   ⇄L 5432→db-1:5432 running                                        │ 
  └─────────────────────────────────────────────────────────────────────────────┘ └────────────────────────────────────────────────────────────────────────────┘ 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  ↑↓ row   ←→ along the path   ↵ connect   / filter   B blast   o tunnel lens   u use as jump   t test   ␣ fold   e edit   y copy cmd   ? help   q quit          

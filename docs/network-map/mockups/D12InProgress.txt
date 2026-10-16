@@ -39,7 +39,7 @@
  │ ● up ● slow × down ○ unknown ▶ session                                      │ │ 1  ssh bastion-eu true                      ✓ 12ms                         │ 
  │ ─▸ jump edge   ┈┈ "hosts behind" leader   Σ all hosts behind, any depth     │ │ 2  ssh -J bastion-eu jump-2 true            ✓ 29ms                         │ 
  │ ┆raw┆  ‹proxy cmd› ┄┄  ↻ ══ cycle  ◇ reused hop                             │ │ 3  ssh -J bastion-eu,jump-2 db-2 true       » testing                      │ 
- │ lenses: o tunnels  B blast  t test — they re-skin glyphs and edges          │ │ Stops at the first failure. Esc cancels.                                   │ 
+ │ lenses: o tunnels  B blast  t test - they re-skin glyphs and edges          │ │ Stops at the first failure. Esc cancels.                                   │ 
  └─────────────────────────────────────────────────────────────────────────────┘ └────────────────────────────────────────────────────────────────────────────┘ 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  Esc cancel test   ↑↓ row   ? help                                                                                                                              
