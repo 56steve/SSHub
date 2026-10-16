@@ -1213,10 +1213,25 @@ fn tunnel_start_for_a_host_with_an_invalid_proxy_jump_fails_instead_of_running_d
             "--address",
             "10.0.0.9",
             "--proxy-jump",
-            "bad hop",
+            "ops@10.0.0.1",
         ])
         .assert()
         .success();
+    // The CLI refuses a bad jump at write time, so plant one the way an old
+    // profile or a hand-edited database would hold it.
+    rusqlite::Connection::open(d.path().join("launcher.db"))
+        .unwrap()
+        .execute(
+            "UPDATE hosts SET proxy_jump = 'bad hop' WHERE name = 'victim'",
+            [],
+        )
+        .unwrap();
+    // `show` prints what is stored, not null.
+    sshub(d.path())
+        .args(["host", "show", "victim", "--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"proxy_jump\": \"bad hop\""));
     sshub(d.path())
         .args([
             "tunnel",
@@ -1239,4 +1254,60 @@ fn tunnel_start_for_a_host_with_an_invalid_proxy_jump_fails_instead_of_running_d
         .assert()
         .failure()
         .stderr(predicate::str::contains("not a valid"));
+}
+
+#[test]
+fn host_add_and_edit_refuse_an_invalid_proxy_jump_and_show_keeps_the_stored_one() {
+    let d = dir();
+    sshub(d.path())
+        .args([
+            "host",
+            "add",
+            "--name",
+            "ok",
+            "--address",
+            "10.0.0.1",
+            "--proxy-jump",
+            "ops@10.0.0.9:2200",
+        ])
+        .assert()
+        .success();
+    for bad in [
+        "a$IFS-oProxyCommand=touch$IFS/tmp/x@127.0.0.1:1",
+        "a b@h",
+        "-oProxyCommand=id@h",
+    ] {
+        sshub(d.path())
+            .args([
+                "host",
+                "add",
+                "--name",
+                "evil",
+                "--address",
+                "10.0.0.2",
+                "--proxy-jump",
+                bad,
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("not a valid"));
+        // Editing must not replace the good value with the bad one.
+        sshub(d.path())
+            .args(["host", "edit", "--name", "ok", "--set-proxy-jump", bad])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("not a valid"));
+    }
+    sshub(d.path())
+        .args(["host", "show", "ok", "--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\"proxy_jump\": \"ops@10.0.0.9:2200\"",
+        ));
+    // The refused host was never created.
+    sshub(d.path())
+        .args(["host", "show", "evil"])
+        .assert()
+        .failure();
 }

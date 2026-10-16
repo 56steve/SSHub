@@ -297,6 +297,15 @@ fn cmd_connect(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
     Ok(status.code().unwrap_or(1))
 }
 
+/// A ProxyJump that is not valid hops is never stored: the same message the
+/// host form and connect give.
+fn refuse_bad_jump(jump: Option<&str>) -> Result<()> {
+    if let Some(problem) = jump.and_then(crate::map::hops::jump_problem) {
+        bail!("{problem}");
+    }
+    Ok(())
+}
+
 fn cmd_add(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
     let spec = HostAddSpec::parse(args)?;
     let unique_name = ctx.store.unique_host_name(&spec.name, None)?;
@@ -311,6 +320,7 @@ fn cmd_add(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
         .transpose()?
         .map(|i| i.id);
 
+    refuse_bad_jump(spec.proxy_jump.as_deref())?;
     let group_ids = resolve_group_ids(ctx, &spec.groups)?;
 
     let created = ctx.store.create_host(&NewHost {
@@ -425,6 +435,7 @@ fn cmd_edit(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
         update.environment = Some(None);
     }
     if let Some(v) = patch.set_proxy_jump {
+        refuse_bad_jump(v.as_deref())?;
         update.proxy_jump = Some(v);
     }
     if patch.clear_proxy_jump {

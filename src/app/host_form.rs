@@ -155,6 +155,15 @@ impl App {
     }
 
     pub(crate) fn discard_host_form(&mut self) -> Result<()> {
+        // The loop hint belongs to the form it opened with; leaving it behind
+        // would sit on the footer rule of the map.
+        if self
+            .host_notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("jump loop"))
+        {
+            self.host_notice = None;
+        }
         self.host_form = None;
         self.mode = AppMode::Normal;
         Ok(())
