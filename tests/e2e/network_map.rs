@@ -492,6 +492,7 @@ fn y_copies_the_command_a_saves_a_raw_hop_and_z_zooms_the_map() {
     // Not in whatever group the hosts tab stands on, and the footer is the
     // form's, not the map's.
     assert!(f.group_ids.is_empty(), "{:?}", f.group_ids);
+    assert!(!f.dirty, "prefilled, not edited");
     let text = screen(&draw(&app, 160, 45));
     let footer = text.lines().last().unwrap();
     assert!(
@@ -499,6 +500,9 @@ fn y_copies_the_command_a_saves_a_raw_hop_and_z_zooms_the_map() {
         "{footer}"
     );
     assert!(!footer.contains("blast"), "{footer}");
+    // Esc closes the untouched form without the discard question.
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, AppMode::Normal);
 }
 
 #[test]
@@ -707,4 +711,51 @@ fn one_host_reads_as_one_host_and_a_bare_tag_filters_nothing() {
     let text = screen(&draw(&app, 160, 45));
     assert!(text.contains("5 hosts match"), "{text}");
     assert!(text.contains("bastion-eu"), "{text}");
+}
+
+#[test]
+fn below_120_columns_the_header_is_one_row_and_the_clock_never_covers_the_stats() {
+    let mut app = app();
+    to_map(&mut app);
+    for (w, h) in [(100, 30), (79, 23), (60, 20)] {
+        let buf = draw(&app, w, h);
+        let text = screen(&buf);
+        let first = text.lines().next().unwrap();
+        assert!(
+            first.contains("sshub") && first.contains("hosts"),
+            "{w}: {first:?}"
+        );
+        assert!(
+            first.contains("down"),
+            "{w}: the stats are cut by the clock: {first:?}"
+        );
+        // The tab bar follows the rule under the header, with the sixth tab on it.
+        let second = text.lines().nth(2).unwrap();
+        assert!(
+            second.contains("1") && second.contains("hosts"),
+            "{w}: {second:?}"
+        );
+        if w >= 79 {
+            assert!(second.contains("[6] map"), "{w}: {second:?}");
+        }
+    }
+    // The wordmark stays from 120 columns up.
+    assert!(screen(&draw(&app, 120, 30))
+        .lines()
+        .nth(1)
+        .unwrap()
+        .contains("hosts:"));
+}
+
+#[test]
+fn a_filter_that_leaves_only_a_parent_hop_draws_without_a_panic() {
+    let mut app = app();
+    to_map(&mut app);
+    press(&mut app, '/');
+    for c in "bastion-eu".chars() {
+        press(&mut app, c);
+    }
+    for (w, h) in [(160, 45), (155, 31), (100, 30), (79, 23)] {
+        let _ = draw(&app, w, h);
+    }
 }

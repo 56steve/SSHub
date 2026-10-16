@@ -181,11 +181,13 @@ impl App {
     /// ProxyJump field is not focused or the form is read-only (ssh_config).
     pub fn hop_section(&self, inherited: &crate::store::ResolvedConnection) -> Option<HopSection> {
         let form = self.host_form.as_ref()?;
-        if form.field != HostFormField::ProxyJump {
-            return None;
-        }
+        // An ssh_config host's chain is shown whichever field has the cursor
+        // (nothing about it can be edited, so there is no field to wait for).
         if form.metadata_only {
             return Some(self.read_only_section(form));
+        }
+        if form.field != HostFormField::ProxyJump {
+            return None;
         }
         let own = form.proxy_jump.trim();
         let direct = hops::split(own).is_empty() && !own.is_empty();
@@ -580,9 +582,10 @@ impl App {
                     );
                     (
                         format!(
-                            "{:<30} {glyph} {ms:<6} {:>3} hosts \u{b7} {group:<10} {bar}{}",
+                            "{:<30} {glyph} {ms:<6} {:>3} {} \u{b7} {group:<10} {bar}{}",
                             format!("you \u{203a} {}", route.tokens.join(" \u{203a} ")),
                             route.hosts,
+                            if route.hosts == 1 { "host " } else { "hosts" },
                             if loops { "  \u{21bb} would loop" } else { "" }
                         ),
                         loops,
@@ -630,7 +633,15 @@ impl App {
             }
             _ => String::new(),
         };
+        // Adding to a list that is only the inherited one replaces it.
+        let inherited_list = self
+            .host_form
+            .as_ref()
+            .is_some_and(|f| f.proxy_jump.trim().is_empty());
         let title = match p.target {
+            _ if inherited_list => {
+                "replace inherited chain \u{2500} routes first, then hosts".to_string()
+            }
             PickTarget::Add(n) if tokens.is_empty() => {
                 let _ = n;
                 "add the first hop \u{2500} routes first, then hosts".to_string()

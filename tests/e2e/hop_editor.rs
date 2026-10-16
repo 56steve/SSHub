@@ -262,3 +262,19 @@ fn ssh_config_hosts_get_no_editor_keys() {
     assert!(app.hop_editor.picker.is_none());
     assert_eq!(jump(&app), "bastion-eu");
 }
+
+#[test]
+fn the_picker_says_one_host_and_titles_an_inherited_list_as_a_replacement() {
+    // bastion-eu has one host behind it (db-1): `1 host`, never `1 hosts`.
+    let mut app = app(Some("bastion-us"));
+    edit(&mut app, "bastion-eu");
+    assert_eq!(jump(&app), "");
+    press(&mut app, 'a');
+    let text = screen(&app);
+    assert!(
+        text.contains("replace inherited chain"),
+        "an inherited list is replaced, not added to:\n{text}"
+    );
+    assert!(!text.contains(" 1 hosts"), "{text}");
+    assert!(text.contains(" 1 host "), "{text}");
+}

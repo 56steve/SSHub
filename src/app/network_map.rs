@@ -1323,7 +1323,8 @@ impl App {
             // nothing says this hop belongs there.
             f.group_ids.clear();
             f.group_index = 0;
-            f.dirty = true;
+            // Prefilled, not edited: Esc closes without asking.
+            f.dirty = false;
         }
         Ok(())
     }
