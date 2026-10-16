@@ -15,6 +15,7 @@ mod hybrid_compat;
 mod import_export;
 mod keychain;
 mod local_shell;
+mod map_mockups;
 mod metadata_persist;
 mod network_map;
 mod quick_connect;

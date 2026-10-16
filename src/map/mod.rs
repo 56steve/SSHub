@@ -319,6 +319,10 @@ pub struct Map {
     pub clusters: Vec<Cluster>,
     /// Final trie node of each host's chain (`None`: direct or cyclic).
     pub host_node: Vec<Option<usize>>,
+    /// Hosts that serve as a hop somewhere on the map.
+    pub hop_hosts: HashSet<usize>,
+    /// Hops of the longest chain.
+    pub max_depth: usize,
 }
 
 impl Map {
@@ -433,6 +437,7 @@ impl Map {
             .copied()
             .filter(|i| matches!(&chains[*i], Chain::Hops(h) if h.is_empty()) && !used.contains(i))
             .collect();
+        map.hop_hosts = used.clone();
         map.cycles = loops.into_values().collect();
         map.hosts = hosts;
         map.chains = chains;
@@ -440,6 +445,7 @@ impl Map {
         if map.roots.len() > CLUSTER_ROOTS {
             map.clusters = map.cluster_roots();
         }
+        map.max_depth = map.nodes.iter().map(|n| n.depth + 1).max().unwrap_or(0);
         map
     }
 
@@ -469,7 +475,11 @@ impl Map {
             c.roots.push(r);
             c.sigma += self.nodes[r].sigma;
         }
-        let mut clusters: Vec<Cluster> = by_name.into_values().collect();
+        // A cluster of one hop is just that hop: it stays a plain row.
+        let mut clusters: Vec<Cluster> = by_name
+            .into_values()
+            .filter(|c| c.roots.len() > 1)
+            .collect();
         clusters.sort_by(|a, b| b.sigma.cmp(&a.sigma).then_with(|| a.name.cmp(&b.name)));
         clusters
     }
@@ -506,6 +516,17 @@ impl Map {
             Row::DirectGroup(i) => self.direct_groups[i].1.clone(),
             Row::Direct | Row::More(_) => Vec::new(),
         }
+    }
+
+    /// No jump edge anywhere: every host is reached directly.
+    pub fn is_edgeless(&self) -> bool {
+        self.nodes.is_empty() && self.cycles.is_empty()
+    }
+
+    /// Whether `h` is reached with no jump and is no hop itself, so a ping from
+    /// here says something about it.
+    pub fn reached_directly(&self, h: usize) -> bool {
+        matches!(&self.chains[h], Chain::Hops(c) if c.is_empty()) && !self.hop_hosts.contains(&h)
     }
 
     /// `ssh -J a,b target`, hops as the map shows them (names, `user@host:port`

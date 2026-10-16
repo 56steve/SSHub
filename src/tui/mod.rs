@@ -1177,12 +1177,15 @@ fn compute_header_stats(app: &App) -> [usize; 4] {
 /// The footer's pairs, plus how many trailing ones must never be dropped.
 /// Footer hints of the map tab, by what owns the keyboard.
 fn map_footer(app: &App) -> Vec<(String, &'static str)> {
-    use crate::app::network_map::Lens;
+    use crate::app::network_map::{Lens, MapSel};
+    use crate::config::KeyAction as A;
     let kb = &app.config.keybinds;
-    let key = |a: crate::config::KeyAction| kb.primary(a).to_string();
+    let key = |a: A| screens::map::key_label(kb.primary(a));
     let Some(v) = app.map_view.as_ref() else {
         return vec![("?".into(), "help"), ("q".into(), "quit")];
     };
+    let help = ("?".to_string(), "help");
+    let arrows = ("\u{2191}\u{2193}".to_string(), "row");
     if v.picker.is_some() {
         return vec![
             ("\u{2191}\u{2193}".into(), "tag"),
@@ -1194,15 +1197,15 @@ fn map_footer(app: &App) -> Vec<(String, &'static str)> {
         matches!(&r.owner, crate::app::test_connect::TestOwner::Map(s) if Some(*s) == v.selection())
     }) {
         return if run.running() {
-            vec![("Esc".into(), "cancel test"), ("?".into(), "help")]
+            vec![("Esc".into(), "cancel test"), arrows, help]
         } else {
             vec![
-                (key(crate::config::KeyAction::MapTest), "test again"),
-                (key(crate::config::KeyAction::KnownHosts), "known hosts"),
-                (key(crate::config::KeyAction::PushKey), "push key"),
-                (key(crate::config::KeyAction::MapSshLog), "ssh log"),
+                (key(A::MapTest), "test again"),
+                (key(A::KnownHosts), "known hosts"),
+                (key(A::PushKey), "push key"),
+                (key(A::MapSshLog), "ssh log"),
                 ("Esc".into(), "close"),
-                ("?".into(), "help"),
+                help,
             ]
         };
     }
@@ -1217,63 +1220,177 @@ fn map_footer(app: &App) -> Vec<(String, &'static str)> {
     if v.editing {
         return vec![
             ("type".into(), "filter"),
+            ("Tab".into(), "complete"),
             ("\u{21b5}".into(), "keep"),
             ("Esc".into(), "clear"),
+            (key(A::TagFilter), "tags"),
+            help,
         ];
     }
-    let mut hints = match v.lens {
-        Lens::Blast(_) => vec![
-            (
-                format!(
-                    "{}/{}",
-                    key(crate::config::KeyAction::MapNextDependent),
-                    key(crate::config::KeyAction::MapPrevDependent)
+    match &v.lens {
+        Lens::Blast(_) => {
+            return vec![
+                (key(A::MapBlast), "blast off"),
+                ("Esc".into(), "clear"),
+                (
+                    format!("{}/{}", key(A::MapNextDependent), key(A::MapPrevDependent)),
+                    "next dependent",
                 ),
-                "next/prev dependent",
-            ),
-            (key(crate::config::KeyAction::Broadcast), "broadcast"),
-            (key(crate::config::KeyAction::MapBlast), "exit blast"),
-            ("Esc".into(), "clear lens"),
-            ("?".into(), "help"),
-        ],
-        Lens::Tunnel => vec![
-            ("\u{2191}\u{2193}\u{2190}\u{2192}".into(), "move"),
-            (
-                key(crate::config::KeyAction::MapToggleTunnel),
-                "start/stop tunnel",
-            ),
-            (key(crate::config::KeyAction::MapTunnelLens), "exit lens"),
-            ("Esc".into(), "clear lens"),
-            ("?".into(), "help"),
-        ],
-        Lens::None => vec![
-            ("\u{2191}\u{2193}".into(), "row"),
+                (key(A::Broadcast), "broadcast to these"),
+                (key(A::MapCopyCmd), "copy list"),
+                help,
+            ]
+        }
+        Lens::Tunnel => {
+            return vec![
+                (key(A::MapTunnelLens), "status lens"),
+                (key(A::MapToggleTunnel), "start/stop"),
+                (
+                    format!("{} ", key(A::TabTunnels)).trim().to_string(),
+                    "tunnels tab",
+                ),
+                ("\u{21b5}".into(), "connect"),
+                help,
+            ]
+        }
+        Lens::None => {}
+    }
+    let sel = v.selection();
+    // Nothing jumps anywhere (D07), and the expanded direct-only view (D14).
+    if v.edgeless() && !v.direct_open {
+        return vec![
+            (key(A::Edit), "edit host"),
+            (key(A::GroupsManage), "groups"),
+            (key(A::MapUseAsJump), "use as jump"),
+            (key(A::MapFoldAll), "show direct hosts"),
+            ("1".into(), "hosts"),
+            help,
+            ("q".into(), "quit"),
+        ];
+    }
+    if v.direct_open {
+        return vec![
+            (key(A::MapFoldAll), "collapse direct"),
+            (key(A::MapFold), "fold"),
+            ("\u{21b5}".into(), "connect"),
+            (key(A::Search), "filter"),
+            help,
+        ];
+    }
+    if let Some(MapSel::Cycle(i)) = sel {
+        let first = v.map.hosts[v.map.cycles[i].path[0]].name.clone();
+        // The name is part of the label, so it cannot be a `&'static str`:
+        // the cycle footer is built from its own pieces below.
+        let _ = first;
+        return vec![
+            ("\u{21b5}".into(), "edit chain"),
+            (key(A::Edit), "edit loop"),
+            arrows,
+            help,
+        ];
+    }
+    let narrow = app.terminal_area.width < 120;
+    if v.clustered() && matches!(sel, Some(MapSel::Cluster(_) | MapSel::More(_))) {
+        return vec![
+            (key(A::MapFold), "open/close cluster"),
+            ("\u{2192}".into(), "into cluster"),
+            (key(A::MapFoldAll), "fold all"),
+            (key(A::Search), "reveal"),
+            (key(A::MapBlast), "blast"),
+            ("\u{21b5}".into(), "connect"),
+            help,
+        ];
+    }
+    let mut hints = if narrow {
+        vec![
+            arrows,
+            ("\u{2190}\u{2192}".into(), "path"),
+            ("\u{21b5}".into(), "connect"),
+            (key(A::Search), "filter"),
+            (key(A::MapBlast), "blast"),
+            (key(A::MapTunnelLens), "lens"),
+            help,
+        ]
+    } else {
+        vec![
+            arrows,
             ("\u{2190}\u{2192}".into(), "along the path"),
             ("\u{21b5}".into(), "connect"),
-            (key(crate::config::KeyAction::Search), "filter"),
-            (key(crate::config::KeyAction::TagFilter), "tags"),
-            (key(crate::config::KeyAction::MapBlast), "blast"),
-            (key(crate::config::KeyAction::MapTunnelLens), "tunnels"),
-            (key(crate::config::KeyAction::MapUseAsJump), "use as jump"),
-            (key(crate::config::KeyAction::MapTest), "test"),
-            (key(crate::config::KeyAction::MapCopyCmd), "copy cmd"),
-            (key(crate::config::KeyAction::TogglePanelZoom), "zoom"),
-            ("e".into(), "edit"),
-            ("?".into(), "help"),
+            (key(A::Search), "filter"),
+            (key(A::MapBlast), "blast"),
+            (key(A::MapTunnelLens), "tunnel lens"),
+            (key(A::MapUseAsJump), "use as jump"),
+            (key(A::MapTest), "test"),
+            (key(A::MapFold), "fold"),
+            (key(A::Edit), "edit"),
+            (key(A::MapCopyCmd), "copy cmd"),
+            help,
             ("q".into(), "quit"),
-        ],
+        ]
     };
     // `a` only means something on a raw hop.
     let on_raw_hop = matches!(
-        v.selection(),
-        Some(crate::app::network_map::MapSel::Hop(n))
-            if matches!(v.map.nodes[n].key, crate::map::HopKey::Raw(_))
+        sel,
+        Some(MapSel::Hop(n)) if matches!(v.map.nodes[n].key, crate::map::HopKey::Raw(_))
     );
-    if on_raw_hop && matches!(v.lens, Lens::None) {
-        let at = hints.len().saturating_sub(3);
-        hints.insert(at, (key(crate::config::KeyAction::AddHost), "save as host"));
+    if on_raw_hop && !narrow {
+        let at = hints.len().saturating_sub(2);
+        hints.insert(at, (key(A::AddHost), "save as host"));
     }
     hints
+}
+
+/// Footer of the host form while its ProxyJump field is the hop editor.
+fn hop_editor_footer(app: &App) -> Option<Vec<(String, &'static str)>> {
+    let form = app.host_form.as_ref()?;
+    if app.mode != AppMode::HostForm
+        || form.field != crate::app::HostFormField::ProxyJump
+        || form.metadata_only
+    {
+        return None;
+    }
+    let save = app.save_key_label();
+    let ed = &app.hop_editor;
+    if ed.is_picking() {
+        return Some(vec![
+            ("\u{2191}\u{2193}".into(), "choose"),
+            ("\u{21b5}".into(), "add hop / use route"),
+            ("End".into(), "raw hop"),
+            ("Esc".into(), "close"),
+        ]);
+    }
+    if ed.is_typing_raw() {
+        return Some(vec![("\u{21b5}".into(), "add"), ("Esc".into(), "cancel")]);
+    }
+    let failed = app
+        .test_run
+        .as_ref()
+        .is_some_and(|r| r.owner == crate::app::test_connect::TestOwner::Editor && !r.running());
+    if failed {
+        return Some(vec![
+            ("t".into(), "test again"),
+            ("H".into(), "known hosts"),
+            (save, "save"),
+            ("Esc".into(), "cancel"),
+        ]);
+    }
+    if form.proxy_jump.trim().is_empty() {
+        return Some(vec![
+            ("a".into(), "add hop (overrides group)"),
+            ("t".into(), "test inherited chain"),
+            ("Tab".into(), "next field"),
+            (save, "save"),
+            ("Esc".into(), "cancel"),
+        ]);
+    }
+    Some(vec![
+        ("a".into(), "add hop"),
+        ("d".into(), "remove"),
+        ("t".into(), "test chain"),
+        ("Tab".into(), "next field"),
+        (save, "save"),
+        ("Esc".into(), "cancel"),
+    ])
 }
 
 fn footer_keybinds(
@@ -1365,6 +1482,10 @@ fn footer_keybinds(
         ],
         _ => vec![("q".into(), "quit")],
     };
+    // The host form's hop editor has its own footers (D10, D11, D13).
+    if let Some(hints) = hop_editor_footer(app) {
+        binds = hints;
+    }
     // Issue #18: surface the panel-zoom hint once a panel is focused/zoomed.
     if app.active_tab == 0
         && (app.panel_zoomed || app.focused_panel != crate::app::PanelId::default())
@@ -1437,6 +1558,22 @@ fn footer_keybinds(
         .into_iter()
         .map(|(key, label)| (key, std::borrow::Cow::Borrowed(label)))
         .collect();
+    // The map's loop row names the host `e` edits (`e edit loop-a`).
+    if app.active_tab == 5 {
+        let name = app.map_view.as_ref().and_then(|v| match v.selection()? {
+            crate::app::network_map::MapSel::Cycle(i) => {
+                Some(v.map.hosts[v.map.cycles[i].path[0]].name.clone())
+            }
+            _ => None,
+        });
+        if let Some(name) = name {
+            for (_, label) in binds.iter_mut() {
+                if label == "edit loop" {
+                    *label = std::borrow::Cow::Owned(format!("edit {name}"));
+                }
+            }
+        }
+    }
     // The action only exists on a real profile workspace: directory-override
     // (compat) installs and dependency-injected Apps without a profile cannot
     // open it, and advertising it would push useful hints off the row.
@@ -2048,6 +2185,7 @@ fn render_form_popup(frame: &mut Frame, app: &App, kind: FormKind) {
                     &app.identities,
                     &inherited,
                     app.hop_section(&inherited).as_ref(),
+                    popup_area.width.saturating_sub(2),
                     &app.save_key_label(),
                     &app.config.keybinds.secret_field_hints(),
                     &app.copy_field_hint(),

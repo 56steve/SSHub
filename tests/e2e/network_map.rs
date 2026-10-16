@@ -103,9 +103,7 @@ fn tab_six_shows_the_jump_tree_and_the_map_footer() {
         "jump-2",
         "direct-only",
         "path ribbon",
-        "along the path",
-        "copy cmd",
-        "zoom",
+        "blast",
     ] {
         assert!(text.contains(needle), "missing {needle:?}:\n{text}");
     }
@@ -262,7 +260,7 @@ fn filter_grammar_hides_rows_and_esc_restores_them() {
     assert!(v.rows.len() < all, "{} < {all}", v.rows.len());
     let text = screen(&draw(&app, 160, 45));
     assert!(text.contains("/ tag:db"), "{text}");
-    assert!(text.contains("2 of 5 hosts"), "{text}");
+    assert!(text.contains(" hosts match"), "{text}");
 
     // The hosts-tab search state is untouched.
     assert!(app.search_query.is_empty());
@@ -534,4 +532,74 @@ fn y_shell_quotes_every_word_of_the_copied_command() {
     // No bare `;` outside quotes: splitting like a POSIX shell leaves one word each.
     let words = copied.trim_start_matches("copied: ");
     assert_eq!(words.matches('\'').count() % 2, 0, "{copied}");
+}
+
+/// A profile with hosts but no jump edges (design D07).
+fn edgeless_app() -> App {
+    let store = Arc::new(LauncherStore::open_in_memory().unwrap());
+    for name in ["alpha", "beta", "gamma"] {
+        store
+            .create_host(&NewHost::launcher(name, format!("{name}.example")))
+            .unwrap();
+    }
+    let mut app = App::new_with_deps(
+        AppConfig::default(),
+        AppDeps {
+            resolver: Box::new(EmptyResolver),
+            metadata: Arc::new(MetadataDb::default()),
+            store,
+            password_store: Box::new(sshub::credentials::NoopPasswordStore),
+        },
+    );
+    app.reload_hosts().unwrap();
+    app
+}
+
+#[test]
+fn with_no_jump_edges_the_map_shows_the_d07_empty_state_at_155x31() {
+    let mut app = edgeless_app();
+    to_map(&mut app);
+    for (w, h) in [(160, 45), (155, 31)] {
+        let text = screen(&draw(&app, w, h));
+        for needle in [
+            "No jump edges yet.",
+            "All 3 hosts are reached directly, so there is no hop to hang them behind.",
+            "A row appears when a host, its group, or ~/.ssh/config sets a ProxyJump.",
+            "on a host: route other hosts through it",
+            "edit a host",
+            "give a group a default ProxyJump",
+            "Shift+Z",
+            "per-group health board",
+            "e edit host   G groups   u use as jump   Shift+Z show direct hosts   1 hosts",
+        ] {
+            assert!(text.contains(needle), "{w}x{h} missing {needle:?}:\n{text}");
+        }
+    }
+}
+
+#[test]
+fn the_d07_actions_work_and_shift_z_opens_the_per_group_board() {
+    let mut app = edgeless_app();
+    to_map(&mut app);
+    // `u` with no hop picks one first.
+    press(&mut app, 'u');
+    assert!(app.map_view.as_ref().unwrap().use_picker.is_some());
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    // `G` opens the group manager.
+    press(&mut app, 'G');
+    assert_ne!(app.mode, AppMode::Normal);
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    assert_eq!(app.active_tab, 5);
+    // `Shift+Z` gives D14: one glyph strip per group.
+    press(&mut app, 'Z');
+    let text = screen(&draw(&app, 160, 45));
+    assert!(text.contains("direct-only expanded"), "{text}");
+    assert!(text.contains("one glyph per host"), "{text}");
+    // `e` edits the selected host (or opens a picker).
+    press(&mut app, 'e');
+    assert!(
+        app.mode == AppMode::HostForm || app.map_view.as_ref().unwrap().use_picker.is_some(),
+        "mode {:?}",
+        app.mode
+    );
 }

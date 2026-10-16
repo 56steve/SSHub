@@ -225,9 +225,15 @@ fn host_status(app: &App, st: &Styles, host: usize) -> Status {
             style: st.warn,
             ms: samples.and_then(|s| s.last().copied()),
         },
-        // No reply is not a verdict: ICMP can be filtered, and a host behind a
-        // jump is often not pingable from here. Only a failed test connect
-        // shows `×`.
+        // A host reached directly is pinged the way the hosts tab shows it, so a
+        // missing reply reads as down. Behind a jump (or as a hop) no reply is
+        // not a verdict: ICMP from here says nothing about the path through
+        // the jump, and only a failed test connect marks those down.
+        crate::ping::PingClass::Unreachable if view.map.reached_directly(host) => Status {
+            glyph: '\u{d7}',
+            style: st.err,
+            ms: None,
+        },
         _ => Status {
             glyph: '○',
             style: st.unknown,
@@ -250,6 +256,10 @@ struct Cols {
     /// Hop-column step: names are clipped to fit it.
     step: u16,
     latency: bool,
+    /// Width of the name column and of the latency text in hop nodes, set
+    /// per frame from what is visible so the latencies line up.
+    name_w: usize,
+    ms_w: usize,
 }
 
 impl Cols {
@@ -261,6 +271,8 @@ impl Cols {
                 cargo: 65,
                 step: 27,
                 latency: true,
+                name_w: 0,
+                ms_w: 0,
             }
         } else {
             Self {
@@ -269,6 +281,8 @@ impl Cols {
                 cargo: 51,
                 step: 21,
                 latency: false,
+                name_w: 0,
+                ms_w: 0,
             }
         }
     }
@@ -285,7 +299,9 @@ impl Cols {
 pub fn render_map(frame: &mut Frame, area: Rect, app: &App) {
     let theme = app.theme();
     let st = Styles::of(theme);
-    if area.width < 40 || area.height < 12 {
+    // `area` is the dashboard body: the terminal minus 8 rows of chrome, so the
+    // design's "80x24" is a body of 80 columns by 16 rows, and "40x12" is 4.
+    if area.width < 40 || area.height < 4 {
         let buf = frame.buffer_mut();
         put(
             buf,
@@ -309,12 +325,38 @@ pub fn render_map(frame: &mut Frame, area: Rect, app: &App) {
         return;
     };
 
-    let full = area.width >= 120 && area.height >= 36;
-    let (ribbon_h, bottom_h) = if view.zoomed {
+    let ctx = Ctx {
+        app,
+        view,
+        st: &st,
+        tunnels: app.map_tunnels(),
+        max_glyphs: max_glyphs(area.width),
+        test: map_test(app, view.selection()),
+    };
+    view.outline.set(area.width < 80 || area.height < 16);
+    if view.outline.get() {
+        draw_outline(frame.buffer_mut(), area, &ctx);
+        return;
+    }
+
+    // The mockups leave one column on each side of the panels on wide screens.
+    let margin = u16::from(area.width >= 132);
+    let area = Rect::new(
+        area.x + margin,
+        area.y,
+        area.width.saturating_sub(2 * margin),
+        area.height,
+    );
+
+    // The map owns the whole body when there is nothing to put under it (no
+    // jump edges: D07), when direct-only is expanded (D14), or when zoomed.
+    let whole = view.zoomed || view.direct_open || view.edgeless();
+    let full = area.width >= 118 && area.height >= 30;
+    let (ribbon_h, bottom_h) = if whole {
         (0, 0)
     } else if full {
         (10, 6)
-    } else if area.height >= 18 {
+    } else if area.height >= 16 {
         (4, 0)
     } else {
         (0, 0)
@@ -324,24 +366,15 @@ pub fn render_map(frame: &mut Frame, area: Rect, app: &App) {
     let ribbon_area = Rect::new(area.x, area.y + map_h, area.width, ribbon_h);
     let bottom_area = Rect::new(area.x, area.y + map_h + ribbon_h, area.width, bottom_h);
 
-    let ctx = Ctx {
-        app,
-        view,
-        st: &st,
-        tunnels: app.map_tunnels(),
-        max_glyphs: max_glyphs(area.width),
-        test: map_test(app, view.selection()),
-    };
-    view.outline.set(area.width < 80 || area.height < 24);
-    if view.outline.get() {
-        draw_outline(frame.buffer_mut(), area, &ctx);
-        return;
-    }
     let buf = frame.buffer_mut();
     let sel = view.selection();
     let title = map_title(&ctx);
     let inner = panel(buf, map_area, &title, st.accent, st.bright);
-    draw_map(buf, inner, &ctx);
+    if view.edgeless() && !view.direct_open {
+        draw_empty(buf, inner, &ctx);
+    } else {
+        draw_map(buf, inner, &ctx);
+    }
     if let Some(p) = &view.picker {
         draw_tag_picker(buf, inner, p, &st);
     }
@@ -350,10 +383,27 @@ pub fn render_map(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     if ribbon_h > 0 {
-        let ribbon_title = format!("path ribbon \u{2500} {}", sel_title(view, sel));
+        // The full ribbon is titled `path ribbon`; the one-line one (D09) names
+        // the host and its group.
+        let ribbon_title = if full {
+            format!("path ribbon \u{2500} {}", sel_title(view, sel))
+        } else {
+            let group = match sel {
+                Some(MapSel::Host(h)) => Some(view.map.hosts[h].group.clone()),
+                Some(MapSel::Hop(n)) => match view.map.nodes[n].key {
+                    HopKey::Saved(h) => Some(view.map.hosts[h].group.clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            match group {
+                Some(g) => format!("{} \u{2500} {g}", sel_title(view, sel)),
+                None => sel_title(view, sel),
+            }
+        };
         let inner = panel(buf, ribbon_area, &ribbon_title, st.dim, st.bright);
         if full {
-            draw_ribbon_full(buf, inner, app, view, sel, &st);
+            draw_ribbon_full(buf, inner, &ctx, sel);
         } else {
             draw_ribbon_line(buf, inner, app, view, sel, &st);
         }
@@ -369,7 +419,7 @@ pub fn render_map(frame: &mut Frame, area: Rect, app: &App) {
         );
         let inner = panel(buf, legend, "legend", st.dim, st.bright);
         draw_legend(buf, inner, &st);
-        let facts_title = format!("node \u{2500} {}", sel_title(view, sel));
+        let facts_title = facts_title(&ctx, sel);
         let inner = panel(buf, facts, &facts_title, st.dim, st.bright);
         draw_facts(buf, inner, &ctx, sel);
     }
@@ -543,32 +593,161 @@ fn map_title(ctx: &Ctx) -> String {
             run.headline()
         );
     }
-    let mut title = match &view.lens {
-        Lens::Blast(b) => format!(
-            "map \u{2500} blast radius \u{b7} {} hosts depend on {}",
-            b.hosts.len(),
-            view.map.key_label(&b.key)
-        ),
+    match &view.lens {
+        Lens::Blast(b) => {
+            return format!(
+                "map \u{2500} blast radius \u{b7} {} hosts depend on {}",
+                b.hosts.len(),
+                view.map.key_label(&b.key)
+            )
+        }
         Lens::Tunnel => {
-            "map \u{2500} tunnel lens \u{b7} \u{21c4} on hops and hosts that carry a tunnel".into()
+            return "map \u{2500} tunnel lens \u{b7} \u{21c4} on hops and hosts that carry a tunnel"
+                .into()
         }
-        Lens::None => {
-            "map \u{2500} hops as a tree \u{b7} hosts as glyphs behind their last hop".into()
-        }
-    };
+        Lens::None => {}
+    }
     if view.editing || view.filter_active() {
-        let shown = view
-            .matched
-            .as_ref()
-            .map_or(view.map.hosts.len(), HashSet::len);
-        title.push_str(&format!(
-            " \u{b7} / {}{} \u{b7} {shown} of {} hosts",
-            view.query,
-            if view.editing { "\u{258f}" } else { "" },
-            view.map.hosts.len()
+        return format!("map \u{2500} filter \u{b7} {}", view.query.trim());
+    }
+    if view.direct_open {
+        return format!(
+            "map \u{2500} {} hosts \u{b7} {} hop rows \u{b7} direct-only expanded",
+            view.map.hosts.len(),
+            view.map.nodes.len() + view.map.cycles.len()
+        );
+    }
+    if view.clustered() {
+        return format!(
+            "map \u{2500} {} hosts \u{b7} {} jump hosts \u{b7} chains up to {} hops \u{b7} clustered",
+            thousands(view.map.hosts.len()),
+            view.map.hop_hosts.len(),
+            view.map.max_depth
+        );
+    }
+    "map \u{2500} hops as a tree \u{b7} hosts as glyphs behind their last hop".into()
+}
+
+/// `1,840`.
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The map with no jump edge at all (design D07): a dim preview of what a row
+/// looks like, then what to do about it.
+fn draw_empty(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
+    let (view, st) = (ctx.view, ctx.st);
+    let right = inner.x + inner.width;
+    let n = view.map.hosts.len();
+    let kb = &ctx.app.config.keybinds;
+    let k = |a: crate::config::KeyAction| key_label(kb.primary(a));
+
+    let preview = [
+        "\u{25c9} you \u{2500}\u{252c}\u{2500}\u{25b8}\u{25cf} bastion \u{2500}\u{252c}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508} group \u{25cf}\u{25cf}\u{25cf}\u{25cf}\u{25cf}\u{25cf}     \u{3a3} 9",
+        "       \u{2502}             \u{2514}\u{2500}\u{25b8}\u{25cf} jump \u{2508}\u{2508}\u{2508} group \u{25cf}\u{25cf}\u{25cf}        \u{3a3} 3",
+        "       \u{2514}\u{2500}\u{25b8}\u{25cf} bastion \u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508} group \u{25cf}\u{25cf}\u{25cf}\u{25cf}       \u{3a3} 4",
+    ];
+    // (text, key part, style of the rest)
+    let mut lines: Vec<(String, usize, Style)> = Vec::new();
+    let plain = |t: String, style: Style| (t, 0usize, style);
+    if n == 0 {
+        lines.push(plain("No hosts yet.".into(), st.bright));
+        lines.push(plain(
+            "Add one on the hosts tab (1), then give it a ProxyJump to see a row here.".into(),
+            st.text,
+        ));
+    } else {
+        lines.push(plain("No jump edges yet.".into(), st.bright));
+        lines.push(plain(
+            format!("All {n} hosts are reached directly, so there is no hop to hang them behind."),
+            st.text,
         ));
     }
-    title
+    lines.push(plain(String::new(), st.text));
+    lines.push(plain(
+        "A row appears when a host, its group, or ~/.ssh/config sets a ProxyJump.".into(),
+        st.muted,
+    ));
+    lines.push(plain("Try one:".into(), st.muted));
+    lines.push(plain(String::new(), st.text));
+    let action = |key: String, text: String| {
+        let at = 2 + key.chars().count();
+        (format!("  {key}  {text}"), at, st.text)
+    };
+    lines.push(action(
+        k(crate::config::KeyAction::MapUseAsJump),
+        "on a host: route other hosts through it (fastest first edge)".into(),
+    ));
+    lines.push(action(
+        k(crate::config::KeyAction::Edit),
+        "edit a host \u{2192} ProxyJump \u{2192} a add hop".into(),
+    ));
+    lines.push(action(
+        k(crate::config::KeyAction::GroupsManage),
+        "give a group a default ProxyJump".into(),
+    ));
+    lines.push(action(
+        k(crate::config::KeyAction::MapFoldAll),
+        format!("show the {n} direct hosts as a per-group health board"),
+    ));
+    lines.push(plain(String::new(), st.text));
+    lines.push(plain(
+        "Groups and tags never create edges.".into(),
+        st.muted,
+    ));
+
+    // Fit the block: the preview first goes when there is no room, then the
+    // blank lines, then the tail.
+    let h = inner.height as usize;
+    let with_preview = h >= lines.len() + preview.len() + 2;
+    if !with_preview {
+        while lines.len() > h {
+            match lines.iter().rposition(|(t, _, _)| t.is_empty()) {
+                Some(i) => {
+                    lines.remove(i);
+                }
+                None => {
+                    lines.pop();
+                }
+            }
+        }
+    }
+    let used = lines.len() + if with_preview { preview.len() + 2 } else { 0 };
+    let top = inner.y + (h.saturating_sub(used) / 2).min(6) as u16;
+    let left = inner.x + (inner.width.saturating_sub(80) / 2).max(1);
+    let mut y = top;
+    if with_preview {
+        for p in &preview {
+            put(buf, left, y, p, st.dim, right);
+            y += 1;
+        }
+        y += 2;
+    }
+    for (text, key_len, style) in &lines {
+        if y >= inner.y + inner.height {
+            break;
+        }
+        if *key_len > 0 {
+            let (key, rest) = text.split_at(
+                text.char_indices()
+                    .nth(*key_len)
+                    .map_or(text.len(), |(i, _)| i),
+            );
+            let x = put(buf, left, y, key, st.accent, right);
+            put(buf, x, y, rest, *style, right);
+        } else {
+            put(buf, left, y, text, *style, right);
+        }
+        y += 1;
+    }
 }
 
 /// `#` tag picker, centred over the map.
@@ -640,11 +819,15 @@ fn draw_use_picker(
             buf.set_string(x, y, " ", st.text);
         }
     }
-    let title = format!(
-        "use {} as jump \u{b7} Tab: {}",
-        p.token,
-        if p.append { "append" } else { "replace" }
-    );
+    let title = match p.purpose {
+        crate::app::network_map::UsePurpose::Apply => format!(
+            "use {} as jump \u{b7} Tab: {}",
+            p.token,
+            if p.append { "append" } else { "replace" }
+        ),
+        crate::app::network_map::UsePurpose::Edit => "edit which host".to_string(),
+        crate::app::network_map::UsePurpose::PickHop => "use which host as the jump".to_string(),
+    };
     let body = panel(buf, area, &title, st.accent, st.bright);
     let max_x = body.x + body.width;
     put(
@@ -693,19 +876,26 @@ struct NodeLook {
 fn node_look(ctx: &Ctx, cols: &Cols, node: usize, shared: &HashSet<HopKey>) -> NodeLook {
     let (app, view, st) = (ctx.app, ctx.view, ctx.st);
     let n = &view.map.nodes[node];
-    let room = cols.step.saturating_sub(5) as usize;
+    // Room between the node column and the next trunk, minus the glyph.
+    let room = cols.hop2.saturating_sub(cols.hop1 + 4) as usize;
     match &n.key {
         HopKey::Saved(h) => {
             let s = host_status(app, st, *h);
             let glyph = ctx.test_glyph(*h).map_or(s.glyph, |(g, _)| g);
             let name =
-                crate::tui::text::ellipsize(&view.map.hosts[*h].name, room.saturating_sub(7));
-            let mut text = format!("{glyph} {name}");
-            if cols.latency {
-                if let Some(ms) = s.ms {
-                    text.push_str(&format!("  {}", ms_text(Some(ms))));
-                }
-            }
+                crate::tui::text::ellipsize(&view.map.hosts[*h].name, room.saturating_sub(2));
+            let mut text = if cols.latency && cols.ms_w > 0 {
+                // Names padded to one column and latencies right-aligned, so
+                // the ms of every visible hop line up.
+                format!(
+                    "{glyph} {name:<nw$}{ms:>mw$}",
+                    nw = cols.name_w,
+                    ms = ms_text(s.ms),
+                    mw = cols.ms_w
+                )
+            } else {
+                format!("{glyph} {name}")
+            };
             if shared.contains(&n.key) {
                 text.push_str(" \u{25c7}");
             }
@@ -775,6 +965,7 @@ fn draw_strip(
     groups: &[(String, Vec<usize>)],
     selected: Option<usize>,
     row: usize,
+    cap: usize,
 ) -> u16 {
     let st = ctx.st;
     for (gi, (group, hosts)) in groups.iter().enumerate() {
@@ -784,13 +975,15 @@ fn draw_strip(
         if x >= max_x {
             break;
         }
-        x = put(buf, x, y, group, st.muted, max_x);
-        x = put(buf, x, y, " ", st.muted, max_x);
+        if !group.is_empty() {
+            x = put(buf, x, y, group, st.muted, max_x);
+            x = put(buf, x, y, " ", st.muted, max_x);
+        }
         // Keep the selected glyph on screen when the group is longer than the cap.
         let start = selected
             .and_then(|s| hosts.iter().position(|&h| h == s))
-            .map_or(0, |p| (p + 1).saturating_sub(ctx.max_glyphs));
-        let shown = hosts.iter().skip(start).take(ctx.max_glyphs);
+            .map_or(0, |p| (p + 1).saturating_sub(cap));
+        let shown = hosts.iter().skip(start).take(cap);
         for &h in shown {
             let (glyph, gstyle) = ctx.glyph(h, tint);
             let style = if selected == Some(h) {
@@ -803,7 +996,7 @@ fn draw_strip(
             }
             x = put(buf, x, y, &glyph.to_string(), style, max_x);
         }
-        let hidden = hosts.len().saturating_sub(ctx.max_glyphs);
+        let hidden = hosts.len().saturating_sub(cap);
         if hidden > 0 {
             x = put(buf, x, y, &format!("+{hidden}"), st.muted, max_x);
         }
@@ -811,32 +1004,108 @@ fn draw_strip(
     x
 }
 
+/// Every host behind the hops of cluster `c`, at any depth.
+fn cluster_hosts(map: &Map, c: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut stack: Vec<usize> = map.clusters[c].roots.clone();
+    while let Some(n) = stack.pop() {
+        out.extend(
+            map.nodes[n]
+                .cargo
+                .iter()
+                .flat_map(|(_, h)| h.iter().copied()),
+        );
+        stack.extend(map.nodes[n].children.iter().copied());
+    }
+    out.sort_unstable();
+    out
+}
+
 fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
     let (view, st) = (ctx.view, ctx.st);
     if inner.height < 4 {
         return;
     }
-    let cols = Cols::for_width(inner.width + 2);
+    let mut cols = Cols::for_width(inner.width + 2);
+    // Hops under a cluster sit one step in, so the later columns move over.
+    if view.clustered() {
+        cols.hop2 += 8;
+        cols.cargo += 8;
+    }
     let right = inner.x + inner.width;
     let sigma_x = right.saturating_sub(5);
     let cx = |c: u16| inner.x + c;
 
-    // Header.
+    // Header: the columns, or the filter line while a filter is set.
     let hy = inner.y;
-    put(buf, cx(1), hy, "you", st.muted, right);
-    put(buf, cx(cols.hop1), hy, "hop 1", st.muted, right);
-    put(buf, cx(cols.hop2), hy, "hop 2", st.muted, right);
-    put(
-        buf,
-        cx(cols.cargo),
-        hy,
-        "hosts behind this hop \u{b7} one glyph each",
-        st.muted,
-        sigma_x,
-    );
+    if view.editing || view.filter_active() {
+        put(
+            buf,
+            cx(1),
+            hy,
+            &format!(
+                "/ {}{}",
+                view.query,
+                if view.editing { "\u{258f}" } else { "" }
+            ),
+            st.text,
+            cx(cols.cargo),
+        );
+        let n = view.matched.as_ref().map_or(0, HashSet::len);
+        put(
+            buf,
+            cx(cols.cargo),
+            hy,
+            &format!("{n} hosts match \u{b7} rows without a match are hidden, hops above kept"),
+            st.muted,
+            sigma_x,
+        );
+    } else if !view.edgeless() {
+        put(buf, cx(1), hy, "you", st.muted, right);
+        let clustered = view.clustered();
+        put(
+            buf,
+            cx(cols.hop1),
+            hy,
+            if clustered {
+                "hop 1 \u{b7} clusters"
+            } else {
+                "hop 1"
+            },
+            st.muted,
+            right,
+        );
+        put(buf, cx(cols.hop2), hy, "hop 2", st.muted, right);
+        put(
+            buf,
+            cx(cols.cargo),
+            hy,
+            if clustered {
+                "hosts behind \u{b7} one glyph each"
+            } else {
+                "hosts behind this hop \u{b7} one glyph each"
+            },
+            st.muted,
+            sigma_x,
+        );
+    }
     put(buf, sigma_x + 3, hy, "\u{3a3}", st.muted, right);
 
     let map = &view.map;
+    // Align the names and latencies of the hop nodes on screen.
+    {
+        let (mut name_w, mut ms_w) = (0usize, 0usize);
+        for r in &view.rows {
+            if let Row::Node(n) = r {
+                if let HopKey::Saved(h) = map.nodes[*n].key {
+                    name_w = name_w.max(map.hosts[h].name.chars().count());
+                    ms_w = ms_w.max(ms_text(host_status(ctx.app, st, h).ms).len());
+                }
+            }
+        }
+        cols.name_w = (name_w + 2).min(cols.step.saturating_sub(12) as usize);
+        cols.ms_w = ms_w;
+    }
     let sel = view.selection();
     let sel_host = match sel {
         Some(MapSel::Host(h)) => Some(h),
@@ -859,35 +1128,34 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
         .map(|(k, _)| k.clone())
         .collect();
 
-    // Top-level items own the left trunk: root nodes and loops.
+    // Top-level items own the left trunk: root hops, clusters and loops. A root
+    // hop inside a cluster hangs off the cluster's trunk instead.
+    let in_cluster: HashSet<usize> = map
+        .clusters
+        .iter()
+        .flat_map(|c| c.roots.iter().copied())
+        .collect();
     let top: Vec<usize> = view
         .rows
         .iter()
         .enumerate()
         .filter(|(_, r)| match r {
-            Row::Node(n) => map.nodes[*n].depth == 0,
+            Row::Node(n) => map.nodes[*n].depth == 0 && !in_cluster.contains(n),
             Row::Cycle(_) | Row::Cluster(_) => true,
             Row::Direct | Row::More(_) | Row::DirectGroup(_) => false,
         })
         .map(|(i, _)| i)
         .collect();
     let top_set: HashSet<usize> = top.iter().copied().collect();
-    // In a clustered map the cluster rows own the left trunk and the root
-    // hops sit one step in, under their cluster.
     let clustered = view.clustered();
-    let top: Vec<usize> = if clustered {
-        top.into_iter()
-            .filter(|&i| !matches!(view.rows[i], Row::Node(_)))
-            .collect()
-    } else {
-        top
-    };
     let last_top = top.last().copied();
 
-    // One blank row between top-level items when everything fits.
+    // One blank row between top-level items when everything fits. The
+    // collapsed direct-only item is two rows: the summary and its hint.
     let visible = inner.height.saturating_sub(2) as usize;
+    let height = |r: &Row| usize::from(matches!(r, Row::Direct) && !view.direct_open) + 1;
     let blanks = top.len().saturating_sub(1) + usize::from(view.rows.contains(&Row::Direct));
-    let spacious = view.rows.len() + blanks <= visible;
+    let spacious = view.rows.iter().map(height).sum::<usize>() + blanks <= visible;
     let mut ys: Vec<usize> = Vec::with_capacity(view.rows.len());
     let mut y = 0usize;
     for (i, r) in view.rows.iter().enumerate() {
@@ -896,7 +1164,7 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
             y += 1;
         }
         ys.push(y);
-        y += 1;
+        y += height(r);
     }
     let sel_y = ys.get(view.row).copied().unwrap_or(0);
     let offset = (sel_y + 1).saturating_sub(visible);
@@ -947,16 +1215,19 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     Tint::Normal => st.dim,
                 };
                 let fill = if look.dashed { "\u{2504}" } else { "\u{2500}" };
-                let col = if node.depth == 0 {
-                    cols.hop1 + if clustered { 3 } else { 0 }
+                let under = node.depth == 0 && in_cluster.contains(&n);
+                let col = if under {
+                    cols.hop1 + 4
+                } else if node.depth == 0 {
+                    cols.hop1
                 } else {
                     cols.hop2
                 };
                 // Connector into the node.
-                if node.depth == 0 && clustered {
-                    put(buf, cx(cols.hop1), y, "\u{251c}", edge_style, right);
-                    put(buf, cx(cols.hop1 + 1), y, fill, edge_style, right);
-                    put(buf, cx(cols.hop1 + 2), y, "\u{25b8}", edge_style, right);
+                if under {
+                    put(buf, cx(cols.hop1 + 1), y, "\u{251c}", edge_style, right);
+                    put(buf, cx(cols.hop1 + 2), y, fill, edge_style, right);
+                    put(buf, cx(cols.hop1 + 3), y, "\u{25b8}", edge_style, right);
                 } else if node.depth == 0 {
                     let first = top.first() == Some(&i);
                     let last = last_top == Some(i);
@@ -975,7 +1246,7 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                             st.accent.add_modifier(Modifier::BOLD),
                             right,
                         );
-                        put(buf, cx(7), y, "\u{2500}\u{2500}", edge_style, right);
+                        put(buf, cx(6), y, "\u{2500}\u{2500}", edge_style, right);
                     }
                     put(buf, cx(cols.trunk1()), y, joint, edge_style, right);
                     put(buf, cx(cols.trunk1() + 1), y, fill, edge_style, right);
@@ -1037,6 +1308,7 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     &node.cargo,
                     sel_host.filter(|_| row_selected),
                     i,
+                    ctx.max_glyphs,
                 );
                 if let (true, Some(h)) = (row_selected, sel_host) {
                     put(
@@ -1074,7 +1346,7 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                         st.accent.add_modifier(Modifier::BOLD),
                         right,
                     );
-                    put(buf, cx(7), y, "\u{2500}\u{2500}", st.dim, right);
+                    put(buf, cx(6), y, "\u{2500}\u{2500}", st.dim, right);
                 }
                 put(
                     buf,
@@ -1092,10 +1364,6 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     st.err,
                     right,
                 );
-                let names: Vec<&str> = c.path.iter().map(|&h| map.hosts[h].name.as_str()).collect();
-                let path = format!("\u{21bb} {}", names.join(" \u{2550}\u{2550}\u{25b8} "));
-                let path =
-                    crate::tui::text::ellipsize(&path, (cols.cargo - cols.hop1) as usize - 1);
                 let style = if row_selected && matches!(sel, Some(MapSel::Cycle(_))) {
                     st.selected
                 } else if tint == Tint::Dim {
@@ -1103,7 +1371,23 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                 } else {
                     st.err
                 };
-                let end = put(buf, cx(cols.hop1), y, &path, style, sigma_x);
+                // `loop-a` at the first hop column, `loop-b` at the second, and
+                // the rest of the loop (ending where it began) after it.
+                let names: Vec<&str> = c.path.iter().map(|&h| map.hosts[h].name.as_str()).collect();
+                let head = format!("\u{21bb} {}", names[0]);
+                let mut end = put(buf, cx(cols.hop1), y, &head, style, cx(cols.hop2));
+                if names.len() > 1 {
+                    let to = cx(cols.hop2).saturating_sub(1);
+                    for x in end + 1..to {
+                        put(buf, x, y, "\u{2550}", st.err, right);
+                    }
+                    put(buf, to, y, "\u{25b8}", st.err, right);
+                    let mut rest = format!("\u{21bb} {}", names[1]);
+                    for n in &names[2..] {
+                        rest.push_str(&format!(" \u{2550}\u{2550}\u{25b8} {n}"));
+                    }
+                    end = put(buf, cx(cols.hop2), y, &rest, style, cx(cols.cargo));
+                }
                 for x in end + 1..cx(cols.cargo).saturating_sub(1) {
                     put(buf, x, y, "\u{2508}", st.dim, right);
                 }
@@ -1125,6 +1409,7 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     &groups,
                     sel_host.filter(|_| row_selected),
                     i,
+                    ctx.max_glyphs,
                 );
                 put(
                     buf,
@@ -1159,7 +1444,7 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                         st.accent.add_modifier(Modifier::BOLD),
                         right,
                     );
-                    put(buf, cx(7), y, "\u{2500}\u{2500}", edge, right);
+                    put(buf, cx(6), y, "\u{2500}\u{2500}", edge, right);
                 }
                 let joint = match (first, last) {
                     (true, true) => "\u{2500}",
@@ -1183,45 +1468,82 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     (true, _) => st.selected,
                     (_, Tint::Dim) => st.dim,
                     (_, Tint::Warn) => st.warn,
-                    _ => st.text,
+                    _ => st.bright,
                 };
                 let head = format!(
-                    "{} {}  {} hops",
+                    "{} {}  {} hops ",
                     if open { "\u{25be}" } else { "\u{25b8}" },
                     crate::tui::text::ellipsize(&cl.name, 20),
                     cl.roots.len()
                 );
-                let end = put(buf, cx(cols.hop1), y, &head, style, cx(cols.cargo));
-                for x in end + 1..cx(cols.cargo).saturating_sub(1) {
-                    put(buf, x, y, "\u{2508}", st.dim, right);
-                }
+                let mut x = put(buf, cx(cols.hop1), y, &head, style, cx(cols.cargo));
                 // The strip of the cluster is its hops themselves, one glyph each.
-                put(buf, cx(cols.cargo), y, "hops ", st.muted, sigma_x);
                 let hops = map.row_hosts(row);
-                let mut x = cx(cols.cargo) + 5;
                 let selected = sel_host.filter(|_| row_selected);
-                for (k, &h) in hops.iter().take(ctx.max_glyphs).enumerate() {
-                    let _ = k;
+                let cap = 12.min(ctx.max_glyphs + 2);
+                for &h in hops.iter().take(cap) {
                     let (glyph, gstyle) = ctx.glyph(h, tint);
-                    let style = if selected == Some(h) {
+                    let gs = if selected == Some(h) {
                         st.selected
                     } else {
                         gstyle
                     };
-                    if x < sigma_x {
+                    if x < cx(cols.cargo) {
                         record_glyph(ctx, x, y, i, h);
                     }
-                    x = put(buf, x, y, &glyph.to_string(), style, sigma_x);
+                    x = put(buf, x, y, &glyph.to_string(), gs, cx(cols.cargo));
                 }
-                if hops.len() > ctx.max_glyphs {
-                    put(
+                if hops.len() > cap {
+                    x = put(
                         buf,
                         x,
                         y,
-                        &format!("+{}", hops.len() - ctx.max_glyphs),
+                        &format!(" +{}", hops.len() - cap),
+                        st.muted,
+                        cx(cols.cargo),
+                    );
+                }
+                for xx in x + 1..cx(cols.cargo).saturating_sub(1) {
+                    put(buf, xx, y, "\u{2508}", st.dim, right);
+                }
+                // What is behind it: a note while open, a host summary when shut.
+                if open {
+                    put(
+                        buf,
+                        cx(cols.cargo),
+                        y,
+                        "expanded below \u{b7} sorted by \u{3a3}, largest radius first",
                         st.muted,
                         sigma_x,
                     );
+                } else {
+                    let behind = cluster_hosts(map, c);
+                    let groups: HashSet<&str> = behind
+                        .iter()
+                        .map(|&h| map.hosts[h].group.as_str())
+                        .collect();
+                    let mut x = put(
+                        buf,
+                        cx(cols.cargo),
+                        y,
+                        &format!("{} hosts \u{b7} {} groups ", behind.len(), groups.len()),
+                        st.muted,
+                        sigma_x,
+                    );
+                    for &h in behind.iter().take(cap) {
+                        let (glyph, gstyle) = ctx.glyph(h, tint);
+                        x = put(buf, x, y, &glyph.to_string(), gstyle, sigma_x);
+                    }
+                    if behind.len() > cap {
+                        put(
+                            buf,
+                            x,
+                            y,
+                            &format!(" +{}", behind.len() - cap),
+                            st.muted,
+                            sigma_x,
+                        );
+                    }
                 }
                 let sigma_style = match tint {
                     Tint::Dim => st.dim,
@@ -1252,19 +1574,25 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     .unwrap_or(0);
                 put(
                     buf,
-                    cx(cols.hop1),
+                    cx(cols.hop1 + 1),
                     y,
                     "\u{2514}\u{2500}\u{25b8}",
                     st.dim,
                     right,
                 );
                 let style = if row_selected { st.selected } else { st.muted };
+                let key = key_label(
+                    ctx.app
+                        .config
+                        .keybinds
+                        .primary(crate::config::KeyAction::MapFold),
+                );
                 put(
                     buf,
                     cx(cols.hop1 + 4),
                     y,
                     &format!(
-                        "\u{2026} {hidden} more hops  \u{3a3} \u{2264} {tail_max} each \u{b7} space shows {REVEAL_STEP} more"
+                        "\u{2026} {hidden} more hops  \u{3a3} \u{2264} {tail_max} each \u{b7} {key} show {REVEAL_STEP} more"
                     ),
                     style,
                     sigma_x,
@@ -1282,16 +1610,19 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     cx(3),
                     y,
                     &format!(
-                        "{:<12}{:>4}",
+                        "{:<12}{:>2}",
                         crate::tui::text::ellipsize(name, 12),
                         hosts.len()
                     ),
                     style,
                     cx(cols.cargo),
                 );
-                draw_strip(
+                // One glyph per host: as many as the row holds, then `+n`.
+                let start = cx(3 + 12 + 2 + 3);
+                let room = sigma_x.saturating_sub(start + 6) as usize;
+                let end = draw_strip(
                     buf,
-                    cx(cols.hop1 + 6),
+                    start,
                     y,
                     sigma_x,
                     ctx,
@@ -1299,59 +1630,77 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     &[(String::new(), hosts.clone())],
                     sel_host.filter(|_| row_selected),
                     i,
+                    room.max(1),
+                );
+                if let (true, Some(h)) = (row_selected, sel_host) {
+                    put(
+                        buf,
+                        end + 1,
+                        y,
+                        &format!("\u{25c2} {}", map.hosts[h].name),
+                        st.accent,
+                        sigma_x,
+                    );
+                }
+            }
+            Row::Direct if view.direct_open => {
+                put(buf, cx(1), y, "\u{25be}", st.muted, right);
+                let style = if row_selected { st.selected } else { st.text };
+                put(buf, cx(3), y, "direct-only", style, cx(cols.hop1 + 6));
+                put(
+                    buf,
+                    cx(3 + 11 + 3),
+                    y,
+                    &format!(
+                        "{} hosts with no jump \u{b7} one glyph per host \u{b7} \u{2190}\u{2192} walks hosts, \u{2191}\u{2193} groups",
+                        map.direct.len()
+                    ),
+                    st.muted,
+                    sigma_x,
+                );
+                put(
+                    buf,
+                    sigma_x,
+                    y,
+                    &format!("{:>4}", map.direct.len()),
+                    st.bright,
+                    right,
                 );
             }
             Row::Direct => {
-                put(
-                    buf,
-                    cx(1),
-                    y,
-                    if view.direct_open {
-                        "\u{25be}"
-                    } else {
-                        "\u{22ef}"
-                    },
-                    st.muted,
-                    right,
-                );
+                put(buf, cx(1), y, "\u{22ef}", st.muted, right);
                 let style = if row_selected { st.selected } else { st.muted };
-                put(
-                    buf,
-                    cx(cols.hop1),
-                    y,
-                    "direct-only \u{b7} no jump, nothing behind them",
-                    style,
-                    cx(cols.cargo),
-                );
-                if view.direct_open {
-                    put(
-                        buf,
-                        cx(cols.cargo),
-                        y,
-                        &format!("{} hosts, one strip per group", map.direct.len()),
-                        st.muted,
-                        sigma_x,
-                    );
-                    put(
-                        buf,
-                        sigma_x,
-                        y,
-                        &format!("{:>4}", map.direct.len()),
-                        st.bright,
-                        right,
-                    );
-                    continue;
-                }
-                let mut groups: BTreeMap<&str, usize> = BTreeMap::new();
-                for &h in &map.direct {
-                    *groups.entry(map.hosts[h].group.as_str()).or_default() += 1;
-                }
+                // The long label when the column holds it, else just the name.
+                let label = if cols.cargo.saturating_sub(cols.hop1) >= 44 {
+                    "direct-only \u{b7} no jump, nothing behind them"
+                } else {
+                    "direct-only"
+                };
+                put(buf, cx(cols.hop1), y, label, style, cx(cols.cargo));
                 let mut x = cx(cols.cargo);
-                for (gi, (g, n)) in groups.iter().enumerate() {
-                    if gi > 0 {
-                        x += 3;
+                let limit = sigma_x.saturating_sub(2);
+                for (gi, (g, hosts)) in map.direct_groups.iter().enumerate() {
+                    let down = hosts
+                        .iter()
+                        .filter(|&&h| host_status(ctx.app, st, h).glyph == '\u{d7}')
+                        .count();
+                    let text = format!("{g} {}", hosts.len());
+                    let down_text = if down > 0 {
+                        format!(" {down}\u{d7}")
+                    } else {
+                        String::new()
+                    };
+                    let gap = if gi > 0 { 3 } else { 0 };
+                    let need = gap + cells(&text) + cells(&down_text);
+                    let left = map.direct_groups.len() - gi;
+                    // Keep room for `+n` when more groups follow.
+                    if x + need + if left > 1 { 4 } else { 0 } > limit {
+                        put(buf, x + gap, y, &format!("+{left}"), st.muted, limit);
+                        break;
                     }
-                    x = put(buf, x, y, &format!("{g} {n}"), st.muted, sigma_x);
+                    x += gap;
+                    x = put(buf, x, y, &text, st.muted, limit);
+                    x = put(buf, x, y, &down_text, st.err, limit);
                 }
                 put(
                     buf,
@@ -1361,6 +1710,23 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     st.bright,
                     right,
                 );
+                // The hint under it, when the item has its second row.
+                if y + 1 < inner.y + inner.height.saturating_sub(1) {
+                    let key = key_label(
+                        ctx.app
+                            .config
+                            .keybinds
+                            .primary(crate::config::KeyAction::MapFoldAll),
+                    );
+                    put(
+                        buf,
+                        cx(cols.hop1),
+                        y + 1,
+                        &format!("{key} expand into one glyph strip per group (a health board)"),
+                        st.dim,
+                        sigma_x,
+                    );
+                }
             }
         }
     }
@@ -1565,11 +1931,24 @@ fn hop_source_in_path(map: &Map, node: usize, idx: usize, hop_host: usize) -> St
     String::new()
 }
 
+/// A loop as the ribbon draws it: the chain of the loop's first host, which is
+/// every other host of the loop in order, ending on the first one again, then
+/// the first hop repeats (`...`).
 fn cycle_cards(map: &Map, path: &[usize], st: &Styles) -> Vec<Card> {
-    path.iter()
+    let mut order: Vec<usize> = path.iter().skip(1).copied().collect();
+    if let Some(&again) = path.get(1) {
+        order.push(again);
+    }
+    let last = order.len().saturating_sub(1);
+    order
+        .iter()
         .enumerate()
         .map(|(i, &h)| Card {
-            title: format!("hop {}", i + 1),
+            title: if i == last && i > 0 {
+                "\u{2026}".into()
+            } else {
+                format!("hop {}", i + 1)
+            },
             status: Some(h),
             name: map.hosts[h].name.clone(),
             addr: host_addr(map, h),
@@ -1586,14 +1965,8 @@ const CARD_W: u16 = 30;
 const CARD_H: u16 = 5;
 const ARROW_W: u16 = 6;
 
-fn draw_ribbon_full(
-    buf: &mut Buffer,
-    inner: Rect,
-    app: &App,
-    view: &MapView,
-    sel: Option<MapSel>,
-    st: &Styles,
-) {
+fn draw_ribbon_full(buf: &mut Buffer, inner: Rect, ctx: &Ctx, sel: Option<MapSel>) {
+    let (app, view, st) = (ctx.app, ctx.view, ctx.st);
     let right = inner.x + inner.width;
     let Some(sel) = sel else {
         return;
@@ -1603,14 +1976,6 @@ fn draw_ribbon_full(
         apply_test(&mut cards, run, st);
     }
     if cards.is_empty() {
-        let msg = match sel {
-            MapSel::Direct => format!(
-                "{} hosts connect directly: no jump, and nothing jumps through them.",
-                view.map.direct.len()
-            ),
-            _ => String::new(),
-        };
-        put(buf, inner.x + 1, inner.y + 1, &msg, st.muted, right);
         return;
     }
     let avail = inner.width.saturating_sub(12);
@@ -1625,7 +1990,8 @@ fn draw_ribbon_full(
     } else {
         ("\u{2501}", "\u{25b6}")
     };
-    let top = inner.y + 1;
+    // The cards start on the panel's first row, as in the mockups.
+    let top = inner.y;
     let mid = top + 2;
     let mut x = inner.x + 1;
     x = put(
@@ -1648,7 +2014,7 @@ fn draw_ribbon_full(
         put(
             buf,
             inner.x + 1,
-            inner.y,
+            top + CARD_H,
             &format!("\u{2039} +{hidden} hops \u{203a}"),
             st.info.add_modifier(Modifier::BOLD),
             right,
@@ -1672,24 +2038,63 @@ fn draw_ribbon_full(
     if is_cycle {
         put(buf, x + 1, mid, "\u{21bb} repeats", st.err, right);
     }
-    put(
-        buf,
-        inner.x + 1,
-        inner.y + inner.height - 1,
-        &ribbon_hint(sel),
-        st.muted,
-        right,
-    );
+    if let Some(hint) = ribbon_hint(ctx, sel) {
+        put(buf, inner.x + 1, top + CARD_H + 1, &hint, st.muted, right);
+    }
 }
 
-fn ribbon_hint(sel: MapSel) -> String {
-    match sel {
-        MapSel::Hop(_) => "\u{2192} walks right along the row: hop, then its glyphs, one host per step.  \u{21b5} connects.".into(),
-        MapSel::Host(_) => "\u{21b5} connects through this path.".into(),
-        MapSel::Cycle(_) => "jump loop: not connectable. e edits a host in it.".into(),
-        MapSel::Cluster(_) => "\u{21b5} or space opens the cluster. Shift+Z folds all.".into(),
-        MapSel::More(_) => "space reveals more hops.".into(),
-        MapSel::Direct => "space expands one strip per group.".into(),
+/// The line under the ribbon cards. None while a lens or a test owns the panel.
+fn ribbon_hint(ctx: &Ctx, sel: MapSel) -> Option<String> {
+    let view = ctx.view;
+    if !matches!(view.lens, Lens::None) || ctx.test.is_some() {
+        return None;
+    }
+    let kb = &ctx.app.config.keybinds;
+    let k = |a: crate::config::KeyAction| key_label(kb.primary(a));
+    Some(match sel {
+        MapSel::Hop(n) => format!(
+            "\u{2192} walks right along the row: hop \u{2192} its glyphs, one host per step.  \u{21b5} connects to {}.",
+            view.map.key_label(&view.map.nodes[n].key)
+        ),
+        MapSel::Host(_) => format!(
+            "\u{21b5} connect through this path   {} test   {} copy ssh   {} edit hops",
+            k(crate::config::KeyAction::MapTest),
+            k(crate::config::KeyAction::MapCopyCmd),
+            k(crate::config::KeyAction::Edit)
+        ),
+        MapSel::Cycle(i) => {
+            let p = &view.map.cycles[i].path;
+            let name = |j: usize| view.map.hosts[p[j.min(p.len() - 1)]].name.clone();
+            format!(
+                "Not connectable. Clear ProxyJump on {} or {}, then {} test. \u{21b5} opens the hop editor.",
+                name(0),
+                name(1),
+                k(crate::config::KeyAction::MapTest)
+            )
+        }
+        MapSel::Cluster(_) => format!(
+            "\u{21b5} or {} opens the cluster. {} folds all.",
+            k(crate::config::KeyAction::MapFold),
+            k(crate::config::KeyAction::MapFoldAll)
+        ),
+        MapSel::More(_) => format!("{} reveals more hops.", k(crate::config::KeyAction::MapFold)),
+        MapSel::Direct => format!(
+            "{} expands one strip per group.",
+            k(crate::config::KeyAction::MapFoldAll)
+        ),
+    })
+}
+
+/// A key as the footers and hints print it: Space is `\u{2423}`, the rest as
+/// bound.
+pub fn key_label(spec: &str) -> String {
+    match spec {
+        "Space" => "\u{2423}".to_string(),
+        // `Shift+G` reads `G`; `Shift+Z` stays spelled out beside the zoom `z`.
+        _ => match spec.strip_prefix("Shift+") {
+            Some(rest) if rest.chars().count() == 1 && rest != "Z" => rest.to_string(),
+            _ => spec.to_string(),
+        },
     }
 }
 
@@ -1812,10 +2217,20 @@ fn draw_ribbon_line(
     } else if inner.height > 1 {
         let note = match sel {
             MapSel::Host(h) | MapSel::Cycle(h) if matches!(sel, MapSel::Host(_)) => {
-                jump_note(&view.map, h)
+                format!(
+                    "{}  \u{b7}  {}",
+                    jump_note(&view.map, h, false),
+                    view.map.ssh_command(h)
+                )
             }
             MapSel::Hop(n) => match view.map.nodes[n].key {
-                HopKey::Saved(h) => jump_note(&view.map, h),
+                HopKey::Saved(h) => {
+                    format!(
+                        "{}  \u{b7}  {}",
+                        jump_note(&view.map, h, false),
+                        view.map.node_command(n)
+                    )
+                }
                 _ => String::new(),
             },
             MapSel::Cycle(_) => "jump loop: not connectable".into(),
@@ -1825,17 +2240,55 @@ fn draw_ribbon_line(
     }
 }
 
-/// `jump inherited from group "prod/db"` for a host.
-fn jump_note(map: &Map, h: usize) -> String {
+/// How a host's jump is set: short for the one-line ribbon, long for the facts.
+fn jump_note(map: &Map, h: usize, long: bool) -> String {
     let host = &map.hosts[h];
-    match (&host.jump, &host.jump_source) {
-        (Some(_), Some(JumpSource::Inherited { group })) => {
+    let Some(jump) = host
+        .jump
+        .as_deref()
+        .filter(|j| !crate::map::is_jump_none(j))
+    else {
+        return if long {
+            "none (reached directly)".into()
+        } else {
+            "reached directly, no jump".into()
+        };
+    };
+    match (&host.jump_source, long) {
+        (Some(JumpSource::Inherited { group }), false) => {
             format!("jump inherited from group \"{group}\"")
         }
-        (Some(_), Some(JumpSource::SshConfig)) => "jump from ssh_config".into(),
-        (Some(_), _) => "jump set on this host".into(),
-        _ => "reached directly, no jump".into(),
+        (Some(JumpSource::Inherited { group }), true) => {
+            format!(
+                "inherited from \"{group}\" = {jump}{}",
+                first_hop_chain(map, jump)
+            )
+        }
+        (Some(JumpSource::SshConfig), false) => "jump from ssh_config".into(),
+        (Some(JumpSource::SshConfig), true) => {
+            format!(
+                "ssh_config ProxyJump = {jump}{}",
+                first_hop_chain(map, jump)
+            )
+        }
+        (_, false) => "jump set on this host".into(),
+        (_, true) => format!("own ProxyJump = {jump}{}", first_hop_chain(map, jump)),
     }
+}
+
+/// `; jump-2's own = bastion-eu` when the first hop is an ssh_config host that
+/// brings a jump of its own (ssh follows it).
+fn first_hop_chain(map: &Map, jump: &str) -> String {
+    let first = jump.split(',').next().unwrap_or("").trim();
+    map.hosts
+        .iter()
+        .find(|h| h.name == first && h.ssh_config)
+        .and_then(|h| {
+            h.jump
+                .as_deref()
+                .map(|j| format!("; {}'s own = {j}", h.name))
+        })
+        .unwrap_or_default()
 }
 
 fn draw_legend(buf: &mut Buffer, inner: Rect, st: &Styles) {
@@ -1852,9 +2305,10 @@ fn draw_legend(buf: &mut Buffer, inner: Rect, st: &Styles) {
         &[
             ("\u{25cf} up ", st.ok),
             ("\u{25cf} slow ", st.warn),
-            ("\u{d7} test failed ", st.err),
+            ("\u{d7} down ", st.err),
             ("\u{25cb} unknown ", st.unknown),
             ("\u{25b6} session", st.accent),
+            ("   ping is from here", st.dim),
         ],
     );
     line(
@@ -1879,10 +2333,147 @@ fn draw_legend(buf: &mut Buffer, inner: Rect, st: &Styles) {
         buf,
         3,
         &[(
-            "\u{25cf} is ICMP from this machine, not through the jump",
-            st.dim,
+            "lenses: o tunnels  B blast  t test, they re-skin glyphs and edges",
+            st.muted,
         )],
     );
+}
+
+fn facts_title(ctx: &Ctx, sel: Option<MapSel>) -> String {
+    let view = ctx.view;
+    if ctx.test.is_some() {
+        return "steps".into();
+    }
+    match &view.lens {
+        Lens::Blast(b) => format!("blast radius \u{2500} {}", view.map.key_label(&b.key)),
+        Lens::Tunnel => format!(
+            "tunnels \u{2500} {}",
+            ctx.tunnels.values().map(Vec::len).sum::<usize>()
+        ),
+        Lens::None => match sel {
+            Some(MapSel::Host(h)) => format!("host \u{2500} {}", view.map.hosts[h].name),
+            _ => format!("node \u{2500} {}", sel_title(view, sel)),
+        },
+    }
+}
+
+/// `\u{25b6} open 2h` for a host with a live session.
+fn session_text(app: &App, name: &str) -> Option<String> {
+    let s = app
+        .sessions
+        .iter()
+        .find(|s| !s.local_shell && s.config.host_name == name)?;
+    Some(match s.phase {
+        crate::session::SessionPhase::Running { started_at } => {
+            let secs = started_at.elapsed().as_secs();
+            let age = if secs >= 3600 {
+                format!("{}h", secs / 3600)
+            } else if secs >= 60 {
+                format!("{}m", secs / 60)
+            } else {
+                format!("{secs}s")
+            };
+            format!("\u{25b6} open {age}")
+        }
+        _ => "\u{25b6} connecting".to_string(),
+    })
+}
+
+fn tunnel_state_word(t: TunnelState) -> &'static str {
+    match t {
+        TunnelState::Running => "running",
+        TunnelState::Reconnecting => "reconnecting",
+        TunnelState::Stopped => "stopped",
+    }
+}
+
+/// Lines of the blast-radius panel: split of the radius, what rides on it, and
+/// the hosts a shared hop keeps out of it.
+fn blast_lines(ctx: &Ctx, b: &crate::app::network_map::BlastLens) -> Vec<String> {
+    let (app, map) = (ctx.app, &ctx.view.map);
+    let n = b.hosts.len();
+    // Hosts whose last hop is the key sit directly behind it; the rest sit
+    // behind a hop that comes after it.
+    let mut direct = 0usize;
+    let mut next: HashMap<String, usize> = HashMap::new();
+    for &h in &b.hosts {
+        let keys = map.chain_keys(h);
+        match keys.iter().position(|k| *k == b.key) {
+            Some(i) if i + 1 == keys.len() => direct += 1,
+            Some(i) => *next.entry(map.key_label(&keys[i + 1])).or_default() += 1,
+            None => {}
+        }
+    }
+    let behind = n - direct.min(n);
+    let via = match next.len() {
+        0 => String::new(),
+        1 => format!(" {}", next.keys().next().expect("one")),
+        k => format!(" {k} other hops"),
+    };
+    let split = if behind == 0 {
+        format!("{n} hosts, all directly behind it")
+    } else {
+        format!("{n} hosts: {direct} directly behind, {behind} behind{via}")
+    };
+    let sessions = b
+        .hosts
+        .iter()
+        .filter(|&&h| session_text(app, &map.hosts[h].name).is_some())
+        .count();
+    let tunnels: usize = b
+        .hosts
+        .iter()
+        .chain(match &b.key {
+            HopKey::Saved(h) => Some(h),
+            _ => None,
+        })
+        .filter_map(|h| ctx.tunnels.get(h))
+        .map(Vec::len)
+        .sum();
+    // A hop under this one that other chains reuse: the hosts behind those
+    // other chains are not hit.
+    let below: HashSet<HopKey> = (0..map.nodes.len())
+        .filter(|&i| map.nodes[i].key == b.key)
+        .flat_map(|i| {
+            let mut out = Vec::new();
+            let mut stack: Vec<usize> = map.nodes[i].children.clone();
+            while let Some(c) = stack.pop() {
+                out.push(map.nodes[c].key.clone());
+                stack.extend(map.nodes[c].children.iter().copied());
+            }
+            out
+        })
+        .collect();
+    let mut not_hit: Vec<String> = Vec::new();
+    for h in 0..map.hosts.len() {
+        if b.hosts.contains(&h) {
+            continue;
+        }
+        let keys = map.chain_keys(h);
+        if let Some(i) = keys.iter().position(|k| below.contains(k)) {
+            let hop = map.key_label(&keys[i]);
+            let by = i
+                .checked_sub(1)
+                .map(|j| map.key_label(&keys[j]))
+                .unwrap_or_else(|| "you".into());
+            not_hit.push(format!("{} ({hop} via {by})", map.hosts[h].name));
+        }
+    }
+    not_hit.sort();
+    let mut lines = vec![
+        split,
+        format!("{sessions} sessions open \u{b7} {tunnels} tunnels ride on it"),
+    ];
+    if let Some(first) = not_hit.first() {
+        let more = if not_hit.len() > 1 {
+            format!(" +{} more", not_hit.len() - 1)
+        } else {
+            String::new()
+        };
+        lines.push(format!("not hit: {first}{more}"));
+    }
+    lines.push("\u{3a3} is the radius of every row, before you press B.".into());
+    lines
 }
 
 fn draw_facts(buf: &mut Buffer, inner: Rect, ctx: &Ctx, sel: Option<MapSel>) {
@@ -1905,7 +2496,7 @@ fn draw_facts(buf: &mut Buffer, inner: Rect, ctx: &Ctx, sel: Option<MapSel>) {
                 buf,
                 inner.x + 1,
                 inner.y + i as u16,
-                &format!("{} {cmd:<40} {glyph} {text}", i + 1),
+                &format!("{}  {cmd:<40} {glyph} {text}", i + 1),
                 style,
                 right,
             );
@@ -1923,73 +2514,135 @@ fn draw_facts(buf: &mut Buffer, inner: Rect, ctx: &Ctx, sel: Option<MapSel>) {
         put(buf, inner.x + 1, last, &note, st.muted, right);
         return;
     }
+    // (label, value): an empty label is a plain line.
     let mut rows: Vec<(&str, String)> = Vec::new();
-    let host_rows = |h: usize, rows: &mut Vec<(&str, String)>| {
+    match &view.lens {
+        Lens::Blast(b) => {
+            rows.extend(blast_lines(ctx, b).into_iter().map(|l| ("", l)));
+        }
+        Lens::Tunnel => {
+            let mut all: Vec<(&usize, &HostTunnel)> = ctx
+                .tunnels
+                .iter()
+                .flat_map(|(h, ts)| ts.iter().map(move |t| (h, t)))
+                .collect();
+            all.sort_by_key(|(h, t)| (map.hosts[**h].name.clone(), t.id));
+            for (h, t) in all {
+                rows.push((
+                    "",
+                    format!(
+                        "\u{21c4}{} {:<12} {:<18} {}",
+                        tunnel_letter(t.kind),
+                        crate::tui::text::ellipsize(&map.hosts[*h].name, 12),
+                        t.summary,
+                        tunnel_state_word(t.state)
+                    ),
+                ));
+            }
+            let at = inner.height as usize;
+            let mut note = String::from("hosts without a tunnel show \u{b7}");
+            if rows.len() >= at && at > 0 {
+                let more = rows.len() - (at - 1);
+                rows.truncate(at - 1);
+                note = format!("+{more} more tunnels \u{b7} {note}");
+            }
+            rows.push(("", note));
+        }
+        Lens::None => facts_rows(ctx, sel, &mut rows),
+    }
+    for (i, (k, v)) in rows.iter().take(inner.height as usize).enumerate() {
+        let y = inner.y + i as u16;
+        if k.is_empty() {
+            put(buf, inner.x + 1, y, v, st.text, right);
+        } else {
+            let x = put(buf, inner.x + 1, y, &format!("{k:<10}"), st.muted, right);
+            put(buf, x, y, v, st.text, right);
+        }
+    }
+}
+
+/// The default facts rows for what the cursor is on.
+fn facts_rows(ctx: &Ctx, sel: Option<MapSel>, rows: &mut Vec<(&'static str, String)>) {
+    let (app, view) = (ctx.app, ctx.view);
+    let map = &view.map;
+    let addr_row = |h: usize, hop: bool, rows: &mut Vec<(&'static str, String)>| {
         let host = &map.hosts[h];
-        let tags: String = host.tags.iter().map(|t| format!(" #{t}")).collect();
+        let tags: String = host
+            .tags
+            .iter()
+            .map(|t| format!("{}#{t}", if t == &host.tags[0] { "  " } else { " " }))
+            .collect();
+        // `group prod  #bastion` on a hop, `prod/db  #db #pci` on a host.
+        let group = if hop {
+            format!("group {}", host.group)
+        } else {
+            host.group.clone()
+        };
         rows.push((
             "address",
-            format!("{}  \u{b7}  group {}{tags}", host_addr(map, h), host.group),
+            format!("{}  \u{b7}  {group}{tags}", host_addr(map, h)),
         ));
-        rows.push(("jump", jump_note(map, h)));
+        rows.push(("jump", jump_note(map, h, true)));
     };
-    if let Lens::Blast(b) = &view.lens {
-        let sessions = b
-            .hosts
-            .iter()
-            .filter(|&&h| host_status(ctx.app, st, h).glyph == '\u{25b6}')
-            .count();
-        let tunnels: usize = b
-            .hosts
-            .iter()
-            .filter_map(|h| ctx.tunnels.get(h))
-            .map(Vec::len)
-            .sum();
-        rows.push((
-            "radius",
-            format!(
-                "{} hosts depend on {}",
-                b.hosts.len(),
-                map.key_label(&b.key)
-            ),
-        ));
-        rows.push((
-            "riding",
-            format!("{sessions} sessions open \u{b7} {tunnels} tunnels on dependents"),
-        ));
-        rows.push((
-            "keys",
-            "n/N next and previous dependent   b broadcast   B or Esc off".into(),
-        ));
-        for (i, (k, v)) in rows.iter().take(inner.height as usize).enumerate() {
-            let y = inner.y + i as u16;
-            let x = put(buf, inner.x + 1, y, &format!("{k:<8}"), st.muted, right);
-            put(buf, x + 1, y, v, st.text, right);
-        }
-        return;
-    }
     match sel {
         Some(MapSel::Hop(n)) => {
             let node = &map.nodes[n];
             match &node.key {
                 HopKey::Saved(h) => {
-                    host_rows(*h, &mut rows);
-                    rows.push(("carries", format!("{} hosts behind this hop", node.sigma)));
+                    addr_row(*h, true, rows);
+                    let direct: usize = node.cargo.iter().map(|(_, hs)| hs.len()).sum();
+                    let behind = node.sigma - direct;
+                    let via = match node.children.len() {
+                        0 => String::new(),
+                        1 => format!(" {}", map.key_label(&map.nodes[node.children[0]].key)),
+                        k => format!(" {k} hops"),
+                    };
+                    let split = if behind == 0 {
+                        format!("{} hosts", node.sigma)
+                    } else {
+                        format!(
+                            "{} hosts ({direct} direct + {behind} behind{via})",
+                            node.sigma
+                        )
+                    };
+                    rows.push((
+                        "carries",
+                        format!(
+                            "{split}  {} blast",
+                            key_label(
+                                ctx.app
+                                    .config
+                                    .keybinds
+                                    .primary(crate::config::KeyAction::MapBlast)
+                            )
+                        ),
+                    ));
+                    tunnel_rows(ctx, *h, rows);
                 }
                 other => {
                     rows.push(("hop", map.key_label(other)));
                     rows.push(("carries", format!("{} hosts behind this hop", node.sigma)));
                 }
             }
-            rows.push(("command", map.node_command(n)));
-            if let HopKey::Saved(h) = node.key {
-                tunnel_rows(ctx, h, &mut rows);
-            }
         }
         Some(MapSel::Host(h)) => {
-            host_rows(h, &mut rows);
-            rows.push(("command", map.ssh_command(h)));
-            tunnel_rows(ctx, h, &mut rows);
+            addr_row(h, false, rows);
+            let mut live = session_text(app, &map.hosts[h].name).unwrap_or_default();
+            for t in ctx.tunnels.get(&h).into_iter().flatten() {
+                if !live.is_empty() {
+                    live.push_str("  ");
+                }
+                live.push_str(&format!(
+                    "\u{21c4}{} {} {}",
+                    tunnel_letter(t.kind),
+                    t.summary,
+                    tunnel_state_word(t.state)
+                ));
+            }
+            if !live.is_empty() {
+                rows.push(("session", live));
+            }
+            rows.push(("ssh", map.ssh_command(h)));
         }
         Some(MapSel::Cycle(i)) => {
             let names: Vec<&str> = map.cycles[i]
@@ -2019,23 +2672,18 @@ fn draw_facts(buf: &mut Buffer, inner: Rect, ctx: &Ctx, sel: Option<MapSel>) {
         }
         None => {}
     }
-    for (i, (k, v)) in rows.iter().take(inner.height as usize).enumerate() {
-        let y = inner.y + i as u16;
-        let x = put(buf, inner.x + 1, y, &format!("{k:<8}"), st.muted, right);
-        put(buf, x + 1, y, v, st.text, right);
-    }
 }
 
 fn tunnel_rows(ctx: &Ctx, h: usize, rows: &mut Vec<(&'static str, String)>) {
     for t in ctx.tunnels.get(&h).into_iter().flatten() {
-        let state = match t.state {
-            TunnelState::Running => "running",
-            TunnelState::Reconnecting => "reconnecting",
-            TunnelState::Stopped => "stopped",
-        };
         rows.push((
             "tunnels",
-            format!("\u{21c4}{} {} {state}", tunnel_letter(t.kind), t.summary),
+            format!(
+                "\u{21c4}{} {} {}",
+                tunnel_letter(t.kind),
+                t.summary,
+                tunnel_state_word(t.state)
+            ),
         ));
     }
 }
@@ -2288,7 +2936,7 @@ mod tests {
         v.toggle_fold();
         assert!(v.rows.iter().any(|r| matches!(r, Row::DirectGroup(_))));
         let text = all_text(&render(&app, 160, 45));
-        assert!(text.contains("one strip per group"), "{text}");
+        assert!(text.contains("one glyph per host"), "{text}");
         assert!(text.contains("lab") && text.contains("home"), "{text}");
     }
 
@@ -2297,7 +2945,10 @@ mod tests {
         let app = app_with(fleet());
         // 100x30: compact columns, no latency, one-line ribbon.
         let t = all_text(&render(&app, 100, 30));
-        assert!(t.contains("bastion-eu") && t.contains("path ribbon"), "{t}");
+        assert!(
+            t.contains("bastion-eu") && t.contains("reached directly"),
+            "{t}"
+        );
         // Under 80x24: outline with the selected path on the last line.
         let buf = render(&app, 70, 20);
         let last = row_text(&buf, 19);
@@ -2342,6 +2993,7 @@ mod tests {
     fn empty_map_renders() {
         let app = app_with(Vec::new());
         let buf = render(&app, 160, 45);
-        assert!(all_text(&buf).contains("hosts behind this hop"));
+        let t = all_text(&buf);
+        assert!(t.contains("No hosts yet."), "{t}");
     }
 }

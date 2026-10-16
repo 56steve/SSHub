@@ -361,6 +361,20 @@ impl LauncherStore {
             .find(|g| g.default_proxy_jump.is_some()))
     }
 
+    /// The group a host in `member_ids` inherits its ProxyJump from, if any
+    /// group sets one: the same most-specific-wins winner as
+    /// [`LauncherStore::inherited_for_groups`].
+    pub fn jump_group_for(
+        &self,
+        primary: Option<i64>,
+        member_ids: &[i64],
+    ) -> Result<Option<HostGroup>> {
+        Ok(self
+            .ordered_groups_for_members(primary, member_ids)?
+            .into_iter()
+            .find(|g| g.default_proxy_jump.is_some()))
+    }
+
     /// Chain-only resolution across every group in `member_ids` (host fields
     /// unset): the inherited values the host form renders as muted
     /// placeholders when the form selects several groups. Uses the same

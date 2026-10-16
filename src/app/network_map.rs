@@ -68,9 +68,23 @@ pub enum Tint {
     Warn,
 }
 
+/// What the host picker is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsePurpose {
+    /// `u` with a hop chosen: pick the host that takes it as its jump.
+    Apply,
+    /// `e` with no host under the cursor: pick the host to edit.
+    Edit,
+    /// `u` with no hop chosen: pick the host to use as the jump, then pick
+    /// who takes it.
+    PickHop,
+}
+
 /// `u`: pick the host that should use a hop as its jump.
 pub struct UsePicker {
-    /// The jump token to apply (host name or `user@host:port`).
+    pub purpose: UsePurpose,
+    /// The jump token to apply (host name or `user@host:port`); empty unless
+    /// the purpose is [`UsePurpose::Apply`].
     pub token: String,
     pub query: String,
     pub selected: usize,
@@ -168,6 +182,11 @@ impl MapView {
         view
     }
 
+    /// Nothing jumps anywhere: the map has no edge to draw (design D07).
+    pub fn edgeless(&self) -> bool {
+        self.map.is_edgeless()
+    }
+
     pub fn clustered(&self) -> bool {
         !self.map.clusters.is_empty()
     }
@@ -211,6 +230,17 @@ impl MapView {
                     if shown.len() < c.roots.len() {
                         rows.push(Row::More(ci));
                     }
+                }
+            }
+            // Hops that belong to no cluster stay plain rows after them.
+            let clustered: HashSet<usize> = map
+                .clusters
+                .iter()
+                .flat_map(|c| c.roots.iter().copied())
+                .collect();
+            for &r in &map.roots {
+                if !clustered.contains(&r) {
+                    walk(map, r, &mut rows);
                 }
             }
         }
@@ -561,6 +591,47 @@ impl MapView {
         }
     }
 
+    /// Tab in the filter line: complete the last term. `group:`, `tag:` and
+    /// `via:` take a value from what the map knows; a bare word completes to a
+    /// term prefix. Repeating Tab cycles through the candidates.
+    pub fn complete_filter(&mut self) {
+        let (head, last) = match self.query.rsplit_once(' ') {
+            Some((h, l)) => (format!("{h} "), l.to_string()),
+            None => (String::new(), self.query.clone()),
+        };
+        let prefix = ["group:", "tag:", "via:"]
+            .into_iter()
+            .find(|p| last.starts_with(p))
+            .unwrap_or("");
+        let val = &last[prefix.len()..];
+        let mut cands: Vec<String> = match prefix {
+            "tag:" => self.all_tags(),
+            "group:" => self.map.hosts.iter().map(|h| h.group.clone()).collect(),
+            "via:" => self
+                .map
+                .nodes
+                .iter()
+                .map(|n| self.map.key_label(&n.key))
+                .collect(),
+            _ => ["group:", "tag:", "via:"].map(String::from).to_vec(),
+        };
+        cands.sort();
+        cands.dedup();
+        let lower = val.to_lowercase();
+        let hits: Vec<&String> = cands
+            .iter()
+            .filter(|c| c.to_lowercase().starts_with(&lower))
+            .collect();
+        if hits.is_empty() {
+            return;
+        }
+        let next = hits
+            .iter()
+            .position(|c| c.to_lowercase() == lower)
+            .map_or(0, |i| (i + 1) % hits.len());
+        self.query = format!("{head}{prefix}{}", hits[next]);
+    }
+
     pub fn filter_active(&self) -> bool {
         self.matched.is_some()
     }
@@ -647,10 +718,13 @@ impl App {
                 id: t.id,
                 kind: t.tunnel_type,
                 state,
-                summary: format!(
-                    "{}\u{2192}{}:{}",
-                    t.local_port, t.remote_host, t.remote_port
-                ),
+                summary: match t.tunnel_type {
+                    crate::store::TunnelType::Dynamic => format!(":{} socks", t.local_port),
+                    _ => format!(
+                        "{}\u{2192}{}:{}",
+                        t.local_port, t.remote_host, t.remote_port
+                    ),
+                },
             });
         }
         out
@@ -750,6 +824,7 @@ impl App {
             _ if self.is_action(KeyAction::MapUseAsJump, &key) => self.map_open_use_picker(),
             _ if self.is_action(KeyAction::MapTest, &key) => self.map_start_test(),
             _ if self.is_action(KeyAction::MapCopyCmd, &key) => self.map_copy_command(),
+            _ if self.is_action(KeyAction::GroupsManage, &key) => self.enter_group_manage()?,
             _ if self.is_action(KeyAction::TogglePanelZoom, &key) => {
                 if let Some(v) = self.map_view.as_mut() {
                     v.zoomed = !v.zoomed;
@@ -790,6 +865,7 @@ impl App {
                 v.reveal_matches();
                 return;
             }
+            KeyCode::Tab => v.complete_filter(),
             KeyCode::Backspace => {
                 v.query.pop();
             }
@@ -837,22 +913,55 @@ impl App {
     }
 
     /// `u`: pick the host that will use the hop under the cursor as its jump.
+    /// The hop `u` would use: the one under the cursor, else the host selected
+    /// on the hosts tab.
+    fn map_hop_for_use(&self) -> Option<HopKey> {
+        let v = self.map_view.as_ref()?;
+        match v.selection() {
+            Some(MapSel::Hop(n)) => return Some(v.map.nodes[n].key.clone()),
+            Some(MapSel::Host(h)) => return Some(HopKey::Saved(h)),
+            _ => {}
+        }
+        let name = self.selected_entry()?.name().to_string();
+        v.map
+            .hosts
+            .iter()
+            .position(|h| h.name == name)
+            .map(HopKey::Saved)
+    }
+
+    /// The host `e` would edit: the cursor's, else the hosts-tab selection.
+    fn map_host_for_edit(&self) -> Option<usize> {
+        let v = self.map_view.as_ref()?;
+        let on_cursor = match v.selection() {
+            Some(MapSel::Host(h)) => Some(h),
+            Some(MapSel::Hop(n)) => match v.map.nodes[n].key {
+                HopKey::Saved(h) | HopKey::ProxyCmd(h) => Some(h),
+                _ => None,
+            },
+            Some(MapSel::Cycle(i)) => v.map.cycles[i].path.first().copied(),
+            _ => None,
+        };
+        on_cursor.or_else(|| {
+            let name = self.selected_entry()?.name().to_string();
+            v.map.hosts.iter().position(|h| h.name == name)
+        })
+    }
+
     fn map_open_use_picker(&mut self) {
-        let Some(v) = self.map_view.as_mut() else {
+        let Some(v) = self.map_view.as_ref() else {
             return;
         };
         if v.outline.get() {
             self.host_notice = Some("use as jump needs a bigger terminal (80x24)".into());
             return;
         }
-        let hop = match v.selection() {
-            Some(MapSel::Hop(n)) => v.map.nodes[n].key.clone(),
-            Some(MapSel::Host(h)) => HopKey::Saved(h),
-            _ => {
-                self.host_notice = Some("put the cursor on a hop or host to use as a jump".into());
-                return;
-            }
+        let Some(hop) = self.map_hop_for_use() else {
+            // No hop to start from: pick one, then pick who takes it.
+            self.open_host_picker(UsePurpose::PickHop);
+            return;
         };
+        let v = self.map_view.as_mut().expect("checked above");
         let (token, own) = match &hop {
             HopKey::Saved(h) => (v.map.hosts[*h].name.clone(), Some(*h)),
             HopKey::Raw(r) => (r.label(), None),
@@ -882,7 +991,26 @@ impl App {
                 .then_with(|| v.map.hosts[a.0].name.cmp(&v.map.hosts[b.0].name))
         });
         v.use_picker = Some(UsePicker {
+            purpose: UsePurpose::Apply,
             token,
+            query: String::new(),
+            selected: 0,
+            append: false,
+            hosts,
+        });
+    }
+
+    /// A plain host picker (no loop checks): which host to edit, or which host
+    /// to use as a jump.
+    fn open_host_picker(&mut self, purpose: UsePurpose) {
+        let Some(v) = self.map_view.as_mut() else {
+            return;
+        };
+        let mut hosts: Vec<(usize, bool)> = (0..v.map.hosts.len()).map(|h| (h, false)).collect();
+        hosts.sort_by(|a, b| v.map.hosts[a.0].name.cmp(&v.map.hosts[b.0].name));
+        v.use_picker = Some(UsePicker {
+            purpose,
+            token: String::new(),
             query: String::new(),
             selected: 0,
             append: false,
@@ -915,10 +1043,22 @@ impl App {
                     self.host_notice = Some("that would loop: the hop depends on this host".into());
                     return Ok(());
                 }
-                let token = p.token.clone();
-                let append = p.append;
+                let (purpose, token, append) = (p.purpose, p.token.clone(), p.append);
                 v.use_picker = None;
-                self.map_apply_jump(h, &token, append)?;
+                match purpose {
+                    UsePurpose::Apply => self.map_apply_jump(h, &token, append)?,
+                    UsePurpose::Edit => {
+                        if self.reveal_host(h) {
+                            self.edit_selected_host()?;
+                        }
+                    }
+                    UsePurpose::PickHop => {
+                        // The chosen host is the hop: now pick who takes it.
+                        if self.reveal_host(h) {
+                            self.map_open_use_picker();
+                        }
+                    }
+                }
             }
             _ if down => p.selected = (p.selected + 1).min(visible.len().saturating_sub(1)),
             _ if up => p.selected = p.selected.saturating_sub(1),
@@ -1125,6 +1265,22 @@ impl App {
 
     /// `y`: copy the real command for the cursor's path, shell-quoted.
     fn map_copy_command(&mut self) {
+        // In the blast lens `y` copies the dependents instead: one name a line.
+        if let Some(Lens::Blast(b)) = self.map_view.as_ref().map(|v| &v.lens) {
+            let map = &self.map_view.as_ref().expect("lens").map;
+            let mut names: Vec<&str> = b
+                .hosts
+                .iter()
+                .map(|&h| map.hosts[h].name.as_str())
+                .collect();
+            names.sort_unstable();
+            let list = names.join("\n");
+            self.host_notice = Some(match write_osc52(&list) {
+                Ok(()) => format!("copied {} host names", names.len()),
+                Err(e) => format!("clipboard copy failed: {e}"),
+            });
+            return;
+        }
         let Some(cmd) = self.map_command_line() else {
             if self.host_notice.is_none() {
                 self.host_notice = Some("no command for this row".into());
@@ -1218,13 +1374,17 @@ impl App {
                 }
             },
             MapSel::Cycle(_) => {
-                self.host_notice = Some("jump loop: not connectable, edit a host in it (e)".into());
+                // The loop is not connectable: open a host of it to fix it.
+                self.map_edit()?;
+                self.host_notice = Some(
+                    "jump loop, not connectable: clear a ProxyJump in it (ssh_config hosts: edit ~/.ssh/config)"
+                        .into(),
+                );
             }
             MapSel::Direct => {
-                self.host_notice = Some(format!(
-                    "{} hosts connect directly, nothing jumps through them",
-                    v.map.direct.len()
-                ));
+                if let Some(v) = self.map_view.as_mut() {
+                    v.toggle_fold();
+                }
             }
             MapSel::Cluster(_) | MapSel::More(_) => {}
         }
@@ -1233,22 +1393,11 @@ impl App {
 
     /// `e`: open the host form for the host the cursor stands for.
     fn map_edit(&mut self) -> Result<()> {
-        let Some(v) = self.map_view.as_ref() else {
-            return Ok(());
-        };
-        let host = match v.selection() {
-            Some(MapSel::Host(h)) => Some(h),
-            Some(MapSel::Hop(n)) => match v.map.nodes[n].key {
-                HopKey::Saved(h) | HopKey::ProxyCmd(h) => Some(h),
-                _ => None,
-            },
-            Some(MapSel::Cycle(i)) => v.map.cycles[i].path.first().copied(),
-            _ => None,
-        };
-        match host {
+        match self.map_host_for_edit() {
             Some(h) if self.reveal_host(h) => self.edit_selected_host(),
-            _ => {
-                self.host_notice = Some("nothing to edit here: not a saved host".into());
+            Some(_) => Ok(()),
+            None => {
+                self.open_host_picker(UsePurpose::Edit);
                 Ok(())
             }
         }

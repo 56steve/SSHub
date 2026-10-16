@@ -101,7 +101,7 @@ pub struct HopEditor {
     pub notice: Option<String>,
     /// The map of every host, built on first use and kept while the form is
     /// open (the picker and the raw-hop loop check both read it).
-    map_cache: Option<Map>,
+    map_cache: std::cell::RefCell<Option<Map>>,
 }
 
 /// One row of the hop list as drawn.
@@ -137,13 +137,19 @@ pub struct HopSection {
     /// The chain is inherited, so the list is shown muted.
     pub inherited: bool,
     pub test: Option<TestView>,
+    /// `inherited from group "prod/db" \u{b7} add a hop to override`.
+    pub head: Option<String>,
+    /// `\u{3a3} db-9 would join jump-2's row on the map (4 \u{2192} 5 hosts)`.
+    pub join_note: Option<String>,
+    /// Width of the widest hop name, so the columns of the list line up.
+    pub name_w: usize,
 }
 
 /// The editor's test-connect result block.
 pub struct TestView {
     pub title: String,
-    /// (glyph, hop name, outcome text, failed)
-    pub rows: Vec<(char, String, String, bool)>,
+    /// One card per step: (glyph, hop name, outcome text, reason, failed).
+    pub rows: Vec<(char, String, String, String, bool)>,
     pub result: String,
     pub hint: String,
 }
@@ -157,6 +163,18 @@ pub struct PickerView {
 
 /// Rows of the picker shown at once.
 const PICKER_ROWS: usize = 9;
+
+impl HopEditor {
+    /// The picker is open.
+    pub fn is_picking(&self) -> bool {
+        self.picker.is_some()
+    }
+
+    /// The raw hop input is open.
+    pub fn is_typing_raw(&self) -> bool {
+        self.raw.is_some()
+    }
+}
 
 impl App {
     /// The hop-editor section for the open host form, `None` when the
@@ -245,7 +263,81 @@ impl App {
             };
             (r.text.clone(), err)
         });
+        let head = using_inherited
+            .then(|| {
+                inh.as_ref()?;
+                let primary = self
+                    .groups
+                    .iter()
+                    .find(|g| form.group_ids.contains(&g.id))
+                    .map(|g| g.id);
+                let ids: Vec<i64> = form.group_ids.iter().copied().collect();
+                let g = self.store.jump_group_for(primary, &ids).ok().flatten()?;
+                let path = self
+                    .store
+                    .group_ancestor_chain(Some(g.id))
+                    .ok()?
+                    .iter()
+                    .rev()
+                    .map(|a| a.name.clone())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                Some(format!(
+                    "inherited from group \"{path}\" \u{b7} add a hop to override"
+                ))
+            })
+            .flatten();
+        // Where the host would land on the map with this chain.
+        let join_note = (!tokens.is_empty()).then(|| {
+            let me = if form.name.trim().is_empty() {
+                "this host".to_string()
+            } else {
+                form.name.trim().to_string()
+            };
+            let last = tokens.last().cloned().unwrap_or_default();
+            let map = self.editor_map();
+            // ssh itself follows the first hop's own ssh_config chain, so the
+            // row the host lands on starts with that chain.
+            let mut want: Vec<String> = Vec::new();
+            if let Some(h) = tokens
+                .first()
+                .and_then(|t| map.hosts.iter().position(|x| &x.name == t))
+                .filter(|&h| map.hosts[h].ssh_config)
+            {
+                if let crate::map::Chain::Hops(c) = &map.chains[h] {
+                    want.extend(c.iter().map(|hop| map.key_label(&hop.key())));
+                }
+            }
+            want.extend(tokens.iter().cloned());
+            let at = (0..map.nodes.len()).find(|&n| {
+                map.node_path(n)
+                    .iter()
+                    .map(|&p| map.key_label(&map.nodes[p].key))
+                    .eq(want.iter().cloned())
+            });
+            match at {
+                Some(n) => {
+                    let before = map.nodes[n].sigma;
+                    let there = map
+                        .hosts
+                        .iter()
+                        .position(|h| h.name == me)
+                        .is_some_and(|i| map.host_node[i] == Some(n));
+                    let after = if there { before } else { before + 1 };
+                    format!("\u{3a3} {me} would join {last}'s row on the map ({before} \u{2192} {after} hosts)")
+                }
+                None => format!("\u{3a3} {me} would start a new row under {last} on the map"),
+            }
+        });
+        let name_w = rows
+            .iter()
+            .map(|r| r.name.chars().count())
+            .max()
+            .unwrap_or(0);
         Some(HopSection {
+            head,
+            join_note,
+            name_w,
             title,
             rows,
             empty_text,
@@ -272,12 +364,17 @@ impl App {
             .zip(&run.states)
             .map(|(step, st)| {
                 let (glyph, text) = step_text(st);
-                (glyph, step.label.clone(), text, st.is_failure())
+                let (text, reason) = match st {
+                    StepState::Failed { reason, .. } => ("failed".to_string(), reason.clone()),
+                    StepState::Skipped { .. } => ("skipped".to_string(), String::new()),
+                    _ => (text, String::new()),
+                };
+                (glyph, step.label.clone(), text, reason, st.is_failure())
             })
             .collect();
         let result = match run.failure() {
             Some((i, reason, detail)) => format!(
-                "\u{2717} failed at hop {} ({}): {reason}{}",
+                "result \u{2717} failed at hop {} ({}): {reason}{}",
                 i + 1,
                 run.steps[i].label,
                 if detail.is_empty() {
@@ -300,7 +397,7 @@ impl App {
         let hint = if run.running() {
             "Esc cancel"
         } else {
-            "t test again   H known hosts   Esc close   Save still allowed   (P push key, l ssh log: on the map)"
+            "H known hosts   t test again   Save still allowed   (P push key and l ssh log are on the map)"
         };
         Some(TestView {
             title: format!("test chain \u{2500} {}", run.headline()),
@@ -318,6 +415,18 @@ impl App {
             crate::ping::PingClass::Online | crate::ping::PingClass::Slow => '\u{25cf}',
             _ => '\u{25cb}',
         }
+    }
+
+    /// Status glyph and latency text of a hop by name, from the local ping.
+    fn hop_health(&self, name: &str) -> (char, String) {
+        let samples = self.ping_data.get(name).map(Vec::as_slice);
+        let ms = match (crate::ping::classify_ping(samples), samples) {
+            (crate::ping::PingClass::Online | crate::ping::PingClass::Slow, Some(s)) => {
+                s.last().map(|m| format!("{m}ms")).unwrap_or_default()
+            }
+            _ => String::new(),
+        };
+        (self.hop_glyph(name), ms)
     }
 
     fn hop_row(&self, token: &str, selected: bool, dim: bool) -> HopRowView {
@@ -370,6 +479,12 @@ impl App {
 
     fn picker_view(&self, p: &HopPicker, tokens: &[String]) -> PickerView {
         let rows = p.rows();
+        let me = self
+            .host_form
+            .as_ref()
+            .map(|f| f.name.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "this host".into());
         let first = p.selected.saturating_sub(PICKER_ROWS - 1);
         let mut out = Vec::new();
         let mut last_section = None;
@@ -385,26 +500,42 @@ impl App {
                 PickRow::Route(ri) => {
                     let route = &p.routes[*ri];
                     let loops = route.tokens.iter().any(|t| p.forbidden.contains(t));
+                    let last = route.tokens.last().map(String::as_str).unwrap_or("");
+                    let (glyph, ms) = self.hop_health(last);
+                    let group = self
+                        .hosts
+                        .iter()
+                        .find(|h| h.name() == last)
+                        .and_then(|h| h.managed().and_then(|m| m.group.as_ref()))
+                        .map_or("_ungrouped", |g| g.name.as_str());
+                    let biggest = p.routes.iter().map(|r| r.hosts).max().unwrap_or(1).max(1);
+                    let filled = (route.hosts * 8).div_ceil(biggest).clamp(1, 8);
+                    let bar = format!(
+                        "\u{2595}{}{}\u{258f}",
+                        "\u{2588}".repeat(filled),
+                        " ".repeat(8 - filled)
+                    );
                     (
                         format!(
-                            "you \u{203a} {}   {} hosts{}",
-                            route.tokens.join(" \u{203a} "),
+                            "{:<30} {glyph} {ms:<6} {:>3} hosts \u{b7} {group:<10} {bar}{}",
+                            format!("you \u{203a} {}", route.tokens.join(" \u{203a} ")),
                             route.hosts,
-                            if loops { "   \u{21bb} would loop" } else { "" }
+                            if loops { "  \u{21bb} would loop" } else { "" }
                         ),
                         loops,
                     )
                 }
                 PickRow::Host(hi) => {
                     let h = &p.hosts[*hi];
+                    let (glyph, ms) = self.hop_health(&h.name);
                     (
                         format!(
-                            "{:<16} {:<10} {}{}",
-                            crate::tui::text::ellipsize(&h.name, 16),
+                            "{glyph} {:<14} {:<10} {:<20} {ms}{}",
+                            crate::tui::text::ellipsize(&h.name, 14),
                             crate::tui::text::ellipsize(&h.group, 10),
-                            h.via,
+                            crate::tui::text::ellipsize(&h.via, 20),
                             if h.forbidden {
-                                "   \u{21bb} would loop"
+                                "  \u{21bb} would loop"
                             } else {
                                 ""
                             }
@@ -423,14 +554,14 @@ impl App {
         }
         let preview = match rows.get(p.selected) {
             Some(PickRow::Route(ri)) => format!(
-                "preview  you \u{2501}\u{25b6} {}",
+                "preview  you \u{2501}\u{25b6} {} \u{2501}\u{25b6} {me}",
                 p.routes[*ri].tokens.join(" \u{2501}\u{25b6} ")
             ),
             Some(PickRow::Host(hi)) => {
                 let mut t = tokens.to_vec();
                 apply(&mut t, p.target, p.hosts[*hi].name.clone());
                 format!(
-                    "preview  you \u{2501}\u{25b6} {}",
+                    "preview  you \u{2501}\u{25b6} {} \u{2501}\u{25b6} {me}",
                     t.join(" \u{2501}\u{25b6} ")
                 )
             }
@@ -439,10 +570,14 @@ impl App {
         let title = match p.target {
             PickTarget::Add(n) if tokens.is_empty() => {
                 let _ = n;
-                "add the first hop".to_string()
+                "add the first hop \u{2500} routes first, then hosts".to_string()
             }
-            PickTarget::Add(n) => format!("add hop after {}", n + 1),
-            PickTarget::Replace(n) => format!("replace hop {}", n + 1),
+            PickTarget::Add(n) => {
+                format!("add hop after {} \u{2500} routes first, then hosts", n + 1)
+            }
+            PickTarget::Replace(n) => {
+                format!("replace hop {} \u{2500} routes first, then hosts", n + 1)
+            }
         };
         PickerView {
             title,
@@ -578,14 +713,17 @@ impl App {
         true
     }
 
-    /// The map of every host, built once per open form.
-    fn editor_map(&mut self) -> &Map {
-        if self.hop_editor.map_cache.is_none() {
+    /// The map of every host, built once per open form (also while drawing: the
+    /// `\u{3a3}` line under the list reads it).
+    fn editor_map(&self) -> std::cell::Ref<'_, Map> {
+        if self.hop_editor.map_cache.borrow().is_none() {
             let hosts: Vec<MapHost> =
                 crate::map::collect_hosts(&self.store, &self.hosts).unwrap_or_default();
-            self.hop_editor.map_cache = Some(Map::build(hosts));
+            *self.hop_editor.map_cache.borrow_mut() = Some(Map::build(hosts));
         }
-        self.hop_editor.map_cache.as_ref().expect("just built")
+        std::cell::Ref::map(self.hop_editor.map_cache.borrow(), |m| {
+            m.as_ref().expect("just built")
+        })
     }
 
     fn open_hop_picker(&mut self, target: PickTarget) {
@@ -719,7 +857,7 @@ impl App {
                         .map(|f| f.name.trim().to_string())
                         .unwrap_or_default();
                     let loops = match host_part {
-                        Some(h) => hops::forbidden_hops(self.editor_map(), &edited).contains(&h),
+                        Some(h) => hops::forbidden_hops(&self.editor_map(), &edited).contains(&h),
                         None => false,
                     };
                     if loops {

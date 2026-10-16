@@ -271,3 +271,15 @@ Decisions from the adversarial review against the code. They override sections 4
 - **A bad stored ProxyJump hop** is a host notice on connect and push key, never an error that ends the TUI.
 - **Map keys beyond the first slices:** `y` copies the `ssh -J` command, `a` on a raw hop opens the new-host form filled from it, `z` / `Alt+Enter` zoom the map, `H` / `P` / `l` follow a failed test, click selects, double-click connects, the wheel moves the cursor. The tag and use-as-jump pickers are not opened in outline mode (they would have no room to draw).
 - **Rebuild cost.** Collecting 1,840 hosts behind 212 jumps takes about 0.4 s in a debug build (one pass of SQLite reads per host); it runs on open and on a host reload, never per frame. The hop editor builds its map once per open form.
+
+### 15.x Mockup parity pass
+
+The map now follows `docs/network-map/mockups/D01..D14` (compared against TestBackend dumps at 160x45, D09 at 100x30, plus 155x31).
+
+- Zero jump edges render D07: dim preview, four actions (`u`, `e`, `G`, `Shift+Z`) and the D07 footer. `u`/`e` act on the hosts-tab selection or open a host picker.
+- `Shift+Z` expands direct-only into one glyph strip per group (D14); `Enter` on the direct row toggles it.
+- At 155x31 the body is 23 rows: the one-line ribbon is kept, the legend/facts panel and blank separators drop out.
+- `B` and `N` (blast, previous dependent) are bare keys; `Tab` completes `group:`, `tag:`, `via:` in the filter; `y` in the blast lens copies the dependents.
+- Clusters need two or more root hops; a lone hop stays a plain row.
+- The host form hop editor draws boxed lists (D10, D11, D13) with form-specific footers.
+- Known deviations: no "hop is down" row (14.5 forbids inferring it from ping); hosts behind a jump show `○`, not `×`; the picker is inline in the form, not a floating overlay; no multi-cycle summary row; `l ssh log` is not in the editor footer (it leaves the form).

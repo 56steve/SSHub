@@ -19,6 +19,7 @@ pub fn render_host_form(
     identities: &[Identity],
     inherited: &crate::store::ResolvedConnection,
     hops: Option<&HopSection>,
+    width: u16,
     save_hint: &str,
     secret_hints: &str,
     copy_hint: &str,
@@ -268,7 +269,7 @@ pub fn render_host_form(
         ));
         if field == HostFormField::ProxyJump {
             if let Some(h) = hops {
-                super::hop_lines::push_hop_lines(&mut lines, h, theme);
+                super::hop_lines::push_hop_lines(&mut lines, h, theme, width);
             }
         }
     }
@@ -446,6 +447,7 @@ mod tests {
                         &[team_identity()],
                         inherited,
                         None,
+                        100,
                         "Ctrl+S",
                         "",
                         "",
