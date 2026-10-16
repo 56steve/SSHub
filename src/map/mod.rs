@@ -88,8 +88,41 @@ impl RawHop {
 /// Shares the ad-hoc connect parser, so a token ssh could read as an option
 /// (leading `-`), or with whitespace or control characters, is refused.
 pub fn parse_raw_hop(token: &str) -> Option<RawHop> {
+    let hop = parse_raw_hop_unchecked(token)?;
+    // OpenSSH 9.6+ refuses these in a `-J` user or host; older ones hand them
+    // to a shell. Either way a hop with one is not a hop.
+    const USER_BAD: &str = "\"&'();<>`{|}";
+    const HOST_BAD: &str = "\"$&'()/;<>\\`{|}";
+    let bad = |s: &str, set: &str| s.chars().any(|c| set.contains(c));
+    if hop.user.as_deref().is_some_and(|u| bad(u, USER_BAD)) || bad(&hop.host, HOST_BAD) {
+        return None;
+    }
+    Some(hop)
+}
+
+fn parse_raw_hop_unchecked(token: &str) -> Option<RawHop> {
     let token = token.trim();
-    let t = crate::app::adhoc::parse_adhoc_target(token.strip_prefix("ssh://").unwrap_or(token))?;
+    let token = token.strip_prefix("ssh://").unwrap_or(token);
+    // ssh splits the user on the LAST '@', so `john@corp.com@10.0.0.1` is user
+    // `john@corp.com` on host `10.0.0.1`; the ad-hoc parser takes the first.
+    if let Some((user, host)) = token.rsplit_once('@').filter(|(u, _)| u.contains('@')) {
+        if user.starts_with('-') || user.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return None;
+        }
+        let t = crate::app::adhoc::parse_adhoc_target(host)?;
+        return Some(RawHop {
+            user: Some(user.to_string()),
+            host: t.host,
+            port: t.port,
+            ipv6: t.ipv6,
+        });
+    }
+    let t = crate::app::adhoc::parse_adhoc_target(token)?;
+    // `-J` has no bare IPv6 literal (ssh reads the last colon as a port): it
+    // must be bracketed, which the ad-hoc connect parser does not insist on.
+    if !t.ipv6 && t.host.contains(':') {
+        return None;
+    }
     Some(RawHop {
         user: t.user,
         host: t.host,

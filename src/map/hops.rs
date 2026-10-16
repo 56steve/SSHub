@@ -193,4 +193,76 @@ mod tests {
         let mut seen = HashSet::new();
         assert!(routes.iter().all(|r| seen.insert(r.tokens.clone())));
     }
+
+    /// `ssh -G -J <token>` succeeds.
+    fn ssh_takes(token: &str) -> bool {
+        std::process::Command::new("ssh")
+            .args(["-F", "/dev/null", "-G", "-J", token, "x"])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    /// Tokens ssh takes that this parser still refuses, on purpose: an empty
+    /// port (`h:`) is a typo here, not a hop.
+    const STRICTER: &[&str] = &["h:"];
+
+    #[test]
+    fn oracle_a_token_we_accept_is_a_token_ssh_dash_j_accepts() {
+        if std::process::Command::new("ssh")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
+            crate::test_support::tool_missing("ssh");
+            return;
+        }
+        for token in [
+            "bastion",
+            "ops@10.0.0.1:2222",
+            "[::1]:22",
+            "a@[::1]:2",
+            "john@corp.com@10.0.0.1",
+            "a@b@c@d",
+            "ssh://u@h:22",
+            "ssh://h",
+            "h:",
+            "-oProxyCommand=id",
+            "ops@-oProxyCommand=id",
+            "a b",
+            "host:99999",
+            "host:0",
+            "@h",
+            "u@",
+            "[::1",
+            "[::1]x",
+            "::1",
+            "u@h:22:33",
+            "h;id",
+            "h$(id)",
+            "u;x@h",
+            "-h",
+            "h\tx",
+        ] {
+            let ours = token_issue(token).is_none();
+            let theirs = ssh_takes(token);
+            // Never hand ssh a hop it would refuse...
+            assert!(!ours || theirs, "we accept {token:?}, ssh -J refuses it");
+            // ...and refuse only what ssh refuses, bar the deliberate cases.
+            assert!(
+                ours || !theirs || STRICTER.contains(&token),
+                "we refuse {token:?}, which ssh -J takes"
+            );
+        }
+    }
+
+    #[test]
+    fn the_user_is_everything_before_the_last_at_sign() {
+        let hop = parse_raw_hop("john@corp.com@10.0.0.1:2200").unwrap();
+        assert_eq!(hop.user.as_deref(), Some("john@corp.com"));
+        assert_eq!((hop.host.as_str(), hop.port), ("10.0.0.1", Some(2200)));
+        assert_eq!(hop.label(), "john@corp.com@10.0.0.1:2200");
+        assert!(parse_raw_hop("-x@a@b").is_none());
+        assert!(parse_raw_hop("a@b c@d").is_none());
+        assert!(parse_raw_hop("a@b@").is_none());
+    }
 }
