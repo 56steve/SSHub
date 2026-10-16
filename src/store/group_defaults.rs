@@ -127,10 +127,17 @@ impl ResolvedConnection {
             port: host.port.unwrap_or(DEFAULT_PORT),
             proxy_jump: host.proxy_jump.clone(),
             jump_argv: valid_jump(host.proxy_jump.clone()),
-            jump_error: host
-                .proxy_jump
-                .as_deref()
-                .and_then(crate::map::hops::jump_problem),
+            jump_error: host.proxy_jump.as_deref().and_then(|j| {
+                crate::map::hops::jump_problem(j).or_else(|| {
+                    crate::map::hops::split(j)
+                        .iter()
+                        .any(|t| {
+                            t == &host.name
+                                || crate::map::parse_raw_hop(t).is_some_and(|r| r.host == host.name)
+                        })
+                        .then(|| format!("{} jumps through itself", host.name))
+                })
+            }),
             transport: host.transport.unwrap_or_default(),
             forward_agent: host.forward_agent.unwrap_or(false),
         }
@@ -236,6 +243,13 @@ impl LauncherStore {
     /// Resolve the effective connection values for `host`.
     pub fn resolve_connection(&self, host: &ManagedHost) -> Result<ResolvedConnection> {
         let mut out = self.resolve_fields(host)?;
+        // A host (a bastion in a group whose default jump is that bastion) must
+        // not be its own hop: ssh would dial itself, and the map draws a loop.
+        if let Some(jump) = out.proxy_jump.as_deref() {
+            if !crate::map::is_jump_none(jump) && self.jump_names_host(jump, host.id)? {
+                anyhow::bail!("{} jumps through itself", host.name);
+            }
+        }
         out.jump_argv = match out.proxy_jump.as_deref() {
             Some(jump) => match self.expand_jump(jump) {
                 Ok(j) => {
@@ -289,6 +303,28 @@ impl LauncherStore {
         Ok(out)
     }
 
+    /// The saved host a hop token names: the token as a name, else its host part.
+    fn hop_host(&self, token: &str) -> Result<Option<ManagedHost>> {
+        let Some(raw) = crate::map::parse_raw_hop(token) else {
+            return Ok(None);
+        };
+        match self.get_host_by_name(token)? {
+            Some(h) => Ok(Some(h)),
+            None if !raw.ipv6 => self.get_host_by_name(&raw.host),
+            None => Ok(None),
+        }
+    }
+
+    /// Some hop of `jump` is the saved host `id`.
+    fn jump_names_host(&self, jump: &str, id: i64) -> Result<bool> {
+        for token in jump.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+            if self.hop_host(token)?.is_some_and(|h| h.id == id) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Rewrite hops of `jump` that name a launcher-only host as
     /// `user@address[:port]`, the form `ssh -J` takes without a config entry.
     /// ssh_config rows and unknown tokens stay as written, since `ssh`
@@ -309,12 +345,7 @@ impl LauncherStore {
             let Some(raw) = crate::map::parse_raw_hop(token) else {
                 anyhow::bail!("jump hop {token:?} is not a valid [user@]host[:port]");
             };
-            let found = match self.get_host_by_name(token)? {
-                Some(h) => Some(h),
-                None if !raw.ipv6 => self.get_host_by_name(&raw.host)?,
-                None => None,
-            };
-            let hop = match found {
+            let hop = match self.hop_host(token)? {
                 Some(h) if h.source == crate::store::HostSource::Launcher => h,
                 _ => {
                     out.push(token.to_string());
@@ -336,14 +367,14 @@ impl LauncherStore {
             }
             .label();
             // The address and user come from the database, which imports write
-            // verbatim: a comma would add a second hop, a second `@` or
-            // whitespace is no host. Anything that is not one valid hop stays as
-            // the token was written, so ssh meets the same text as before.
-            if crate::map::hops::validate_raw(&label).is_ok() {
-                out.push(label);
-            } else {
-                out.push(token.to_string());
+            // verbatim: a comma would add a second hop, whitespace or a shell
+            // character is no host. Sending the hop's NAME instead would let ssh
+            // resolve it through DNS or ssh_config to a different machine than
+            // the saved address, so the host is refused.
+            if crate::map::hops::validate_raw(&label).is_err() {
+                anyhow::bail!("jump host {token:?} has an address or user that is not a valid hop");
             }
+            out.push(label);
         }
         Ok(out.join(","))
     }
@@ -854,5 +885,42 @@ mod tests {
         let resolved = store.resolve_connection(&stored).unwrap();
         assert_eq!(resolved.identity_id, Some(child_ident));
         assert_eq!(resolved.identity, store.get_identity(child_ident).unwrap());
+    }
+
+    #[test]
+    fn a_user_with_an_at_sign_survives_expansion_and_bad_launcher_hops_are_refused() {
+        let store = memory();
+        assert_eq!(
+            store.expand_jump("john@corp.com@10.0.0.1").unwrap(),
+            "john@corp.com@10.0.0.1"
+        );
+        // A saved hop is rewritten to its address; a bad stored address is not
+        // replaced by the hop's name (ssh would resolve that to another host).
+        store
+            .create_host(&NewHost::launcher("good", "10.0.0.9"))
+            .unwrap();
+        assert_eq!(store.expand_jump("good").unwrap(), "10.0.0.9");
+        store
+            .create_host(&NewHost::launcher("evil", "h;touch x"))
+            .unwrap();
+        assert!(store.expand_jump("evil").is_err());
+    }
+
+    #[test]
+    fn a_host_that_jumps_through_itself_is_refused() {
+        let store = memory();
+        let mut nh = NewHost::launcher("bastion", "10.0.0.1");
+        nh.proxy_jump = Some("bastion".into());
+        let me = store.create_host(&nh).unwrap();
+        let err = store.resolve_connection(&me).unwrap_err().to_string();
+        assert!(err.contains("jumps through itself"), "{err}");
+        // Through another host is fine.
+        store
+            .create_host(&NewHost::launcher("other", "10.0.0.2"))
+            .unwrap();
+        let mut nh = NewHost::launcher("db", "10.0.0.3");
+        nh.proxy_jump = Some("other".into());
+        let db = store.create_host(&nh).unwrap();
+        assert!(store.resolve_connection(&db).is_ok());
     }
 }
