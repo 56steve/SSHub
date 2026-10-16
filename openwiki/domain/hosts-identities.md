@@ -60,6 +60,19 @@ placeholders; clearing a field restores inheritance. Tags and favorites never
 inherit. Algorithm: `src/store/group_defaults.rs`, summarised in
 [data model](../architecture/data-model.md#group-inherited-connection-defaults-srcstoregroup_defaultsrs).
 
+### ProxyJump, the hop editor and the map
+
+A host's ProxyJump is stored as one comma separated string (or `none`, which
+overrides a group default and means "direct"). The host form edits it as a hop
+list (`src/app/hop_editor.rs`, pure helpers in `src/map/hops.rs`): a fuzzy picker
+offers routes already in use (replacing every hop) and saved hosts, refuses any
+host that would close a loop, and validates raw `[user@]host[:port]` hops with the
+ad-hoc parser (a leading `-` is refused). Saving rejects a token that is not a
+valid hop. `ssh` only sees the `-J` string, so a hop that exists only in
+launcher.db is expanded to `user@addr:port` when the argv is built
+(`ResolvedConnection::jump_argv`); the hop's own identity does not travel. The
+[map tab](../workflows/tui.md#network-map-tab-6) draws exactly these jumps.
+
 ## Identities
 
 An identity (`src/store/identities.rs`) bundles a display name, username,

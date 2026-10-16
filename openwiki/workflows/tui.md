@@ -1,7 +1,7 @@
 ---
 type: Workflow
 title: TUI Dashboard - Tabs, Overlays, and Keybindings
-description: The keyboard-driven SSHub dashboard with five tabs (hosts, SFTP, tunnels, identities, audit), the dashboard panel grid, every overlay (palette, session switcher, settings, theme picker, profiles, snippets, log browser, broadcast, keybind editor, help), default keybindings from src/keybinds.rs, and how screens map to AppMode.
+description: The keyboard-driven SSHub dashboard with six tabs (hosts, SFTP, tunnels, identities, audit, map), the dashboard panel grid, every overlay (palette, session switcher, settings, theme picker, profiles, snippets, log browser, broadcast, keybind editor, help), default keybindings from src/keybinds.rs, and how screens map to AppMode.
 resource: src/app/keys.rs
 tags: [tui, keybindings, dashboard, workflow, ux]
 ---
@@ -23,6 +23,7 @@ Order and digits come from `src/tui/widgets/tab_bar.rs` and `App::try_tab_switch
 | `3` | 2 | tunnels | `screens/tunnels.rs` | [tunnel manager](tunnels.md) |
 | `4` / `i` | 3 | identities | `screens/keys.rs` | [identities & ssh-agent](../domain/hosts-identities.md#identities) |
 | `5` | 4 | audit | `screens/audit.rs` | `auth_events` ([data model](../architecture/data-model.md)) |
+| `6` | 5 | map | `screens/map.rs` (state in `src/app/network_map.rs`, model in `src/map/`) | [jump map](#network-map-tab-6) |
 
 Configs written before the SFTP tab existed are re-digited once by `KeybindsConfig::migrate_pre_sftp_tabs`.
 
@@ -71,7 +72,13 @@ Tunnels: `Enter` start/stop (also cancels a pending reconnect), `a`/`e`/`d` add/
 
 Audit: `f` status filter (all/ok/fail), `r` range (all/24h/week/month).
 
+Map: arrows only (`MapUp/Down/Left/Right`; no `hjkl`), `Enter` connect, `e` edit, `/` filter, `#` tags, `B` blast radius (`n`/`N`, `b` broadcast), `o` tunnel lens (`x` start/stop), `u` use as jump, `t` test, `Space`/`Shift+Z` fold. All are `KeyAction::Map*` and rebindable.
+
 The footer hints are built per tab in `footer_keybinds` (`src/tui/mod.rs`) and pin `resume`, `help`, `quit` (and an available update) to the tail so truncation never hides them. The full binding table is in `README.md` (`## Keybindings`) and the help overlay; the man page covers the CLI only.
+
+## Network map (tab 6)
+
+`App::handle_key_map` (`src/app/network_map.rs`) is the tab's own handler: it never falls through to the hosts-tab handler, and its filter line, tag picker and `u` picker own the keyboard while open (digits typed into the filter do not switch tabs). The model is `src/map/` (pure, no UI): `collect_hosts` reads the effective ProxyJump of every host (launcher hosts through `resolve_connection`, ssh_config hosts from the `ssh -G` values the sync already stores, ProxyCommand presence from the sync fingerprint), `Map::build` resolves chains and builds the hop trie (Σ, blast radius, clusters, loops), `map::filter` is the `group:`/`tag:`/`via:`/`!name` grammar, `map::hops` backs the host form's hop editor, and `map::dot` prints `sshub map --dot`. Chain rule, matching `ssh -J` (verified against `ssh -v`): the first hop of a list brings its own ssh_config chain, later hops are pinned by the list, and a launcher-only hop is expanded to `user@addr:port` by `LauncherStore::expand_jump` (so connect, test connect and the map agree). Status glyphs come from the local ICMP ping: no reply is "unknown", never "down"; only a failed test connect (`src/ssh/test_connect.rs`, `App::poll_test_run`) marks a hop `×`. Test connect runs `SshCommandRunner` (no `accept-new`, whole process group killed on Esc) one step per hop and maps ssh's stderr to short reasons; its oracle tests run real `ssh` and the shared `tempdir_sshd` in `src/test_support.rs`. The layout reference is `docs/network-map-design.md` and `docs/network-map/mockups/`.
 
 ## Mouse
 
