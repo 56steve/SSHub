@@ -2149,8 +2149,38 @@ fn render_form_popup(frame: &mut Frame, app: &App, kind: FormKind) {
     // the bottom, taking the save/cancel and reveal hints with it, which is how
     // a masked password ended up looking unrevealable. `form_rows_needed` is
     // guarded by a render test at 80x24 so a new field cannot re-clip them.
+    // The hop editor of the host form (list, picker, test result) is part of the
+    // form: it grows the popup instead of being cut off at 70% of the screen.
+    let host_ctx = if matches!(kind, FormKind::Host) {
+        app.host_form.as_ref().map(|form| {
+            // Muted placeholders: what a save would actually use for each
+            // cleared field. Resolved across every selected group with the
+            // same most-specific-wins ordering as `resolve_connection`,
+            // so the placeholder matches the restored value.
+            let primary = app
+                .groups
+                .iter()
+                .find(|g| form.group_ids.contains(&g.id))
+                .map(|g| g.id);
+            let selected: Vec<i64> = form.group_ids.iter().copied().collect();
+            let inherited = app
+                .store()
+                .inherited_for_groups(primary, &selected)
+                .unwrap_or_else(|_| crate::store::ResolvedConnection::global_default());
+            let hops = app.hop_section(&inherited);
+            (form, inherited, hops)
+        })
+    } else {
+        None
+    };
+    let hop_extra = host_ctx
+        .as_ref()
+        .and_then(|(_, _, h)| h.as_ref())
+        .map_or(0, |h| {
+            screens::hop_lines::line_count(h, app.theme(), popup_width.saturating_sub(2))
+        });
     let popup_height = (area.height * 70 / 100)
-        .max(form_rows_needed(kind))
+        .max(form_rows_needed(kind) + hop_extra)
         .min(area.height);
     let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
@@ -2163,39 +2193,21 @@ fn render_form_popup(frame: &mut Frame, app: &App, kind: FormKind) {
     open_popup(frame, popup_area, theme);
 
     let body = match kind {
-        FormKind::Host => {
-            if let Some(form) = app.host_form.as_ref() {
-                // Muted placeholders: what a save would actually use for each
-                // cleared field. Resolved across every selected group with the
-                // same most-specific-wins ordering as `resolve_connection`,
-                // so the placeholder matches the restored value.
-                let primary = app
-                    .groups
-                    .iter()
-                    .find(|g| form.group_ids.contains(&g.id))
-                    .map(|g| g.id);
-                let selected: Vec<i64> = form.group_ids.iter().copied().collect();
-                let inherited = app
-                    .store()
-                    .inherited_for_groups(primary, &selected)
-                    .unwrap_or_else(|_| crate::store::ResolvedConnection::global_default());
-                Some(screens::host_form::render_host_form(
-                    form,
-                    &app.groups,
-                    &app.identities,
-                    &inherited,
-                    app.hop_section(&inherited).as_ref(),
-                    popup_area.width.saturating_sub(2),
-                    &app.save_key_label(),
-                    &app.config.keybinds.secret_field_hints(),
-                    &app.copy_field_hint(),
-                    theme,
-                    border,
-                ))
-            } else {
-                None
-            }
-        }
+        FormKind::Host => host_ctx.as_ref().map(|(form, inherited, hops)| {
+            screens::host_form::render_host_form(
+                form,
+                &app.groups,
+                &app.identities,
+                inherited,
+                hops.as_ref(),
+                popup_area.width.saturating_sub(2),
+                &app.save_key_label(),
+                &app.config.keybinds.secret_field_hints(),
+                &app.copy_field_hint(),
+                theme,
+                border,
+            )
+        }),
         FormKind::Identity => {
             if let Some(form) = app.identity_form.as_ref() {
                 let cert = app.cert_statuses.get(&form.certificate);
@@ -2701,6 +2713,21 @@ mod tests {
                     .collect();
                 assert!(row.contains("audit"), "audit tab must remain intact: {row}");
             }
+        }
+    }
+
+    #[test]
+    fn the_sixth_tab_is_never_covered_by_the_scope_or_the_version() {
+        let mut app = test_app_with_hosts();
+        app.active_tab = 5;
+        for width in [80, 90, 100, 110, 120, 160] {
+            let buffer = render_to_buffer(&app, width, 24);
+            let y = dashboard_layout::dashboard_layout_zoomed(buffer.area, app.ui_zoom)
+                .tab_bar
+                .y;
+            let row: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+            assert!(row.contains("[6] map"), "{width}: {row:?}");
+            assert!(row.contains("5  audit"), "{width}: {row:?}");
         }
     }
 

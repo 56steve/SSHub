@@ -72,6 +72,13 @@ impl Boxes {
     }
 }
 
+/// How many rows [`push_hop_lines`] draws.
+pub fn line_count(h: &HopSection, theme: &ResolvedTheme, width: u16) -> u16 {
+    let mut lines = Vec::new();
+    push_hop_lines(&mut lines, h, theme, width);
+    lines.len() as u16
+}
+
 /// Push the hop section as lines (no field index: a click there does nothing).
 /// `width` is the form's inner width.
 pub fn push_hop_lines(

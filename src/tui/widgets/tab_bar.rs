@@ -140,6 +140,8 @@ pub fn render_tab_bar(
         buf.set_string(x, y, gap, dim);
         x += gap.len() as u16;
     }
+    // Where the tabs end: the scope and version go before a tab does.
+    let tabs_end = x;
     if compact {
         // One column between the last tab and the profile label.
         x += 1;
@@ -221,7 +223,7 @@ pub fn render_tab_bar(
     let scope_style = Style::default().fg(theme.semantic().text_highlight);
     let draw_scope = |buf: &mut ratatui::buffer::Buffer, right_x: u16| {
         let scope_len = (7 + scope_path.len()) as u16; // "scope: " + path
-        if right_x > area.x + scope_len + 2 {
+        if right_x > area.x + scope_len + 2 && right_x - scope_len >= tabs_end + 2 {
             let scope_x = right_x - scope_len;
             buf.set_string(scope_x, y, "scope: ", dim);
             buf.set_string(scope_x + 7, y, scope_path, scope_style);
@@ -235,9 +237,13 @@ pub fn render_tab_bar(
             let ver_len = version.chars().count() as u16;
             if area.width > ver_len + 2 {
                 let ver_x = area.x + area.width - ver_len - 1;
-                buf.set_string(ver_x, y, version, version_style);
-                // Two-space gap between the scope path and the version.
-                draw_scope(buf, ver_x.saturating_sub(2));
+                // The scope path goes first, then the version, rather than
+                // either one drawing over the last tabs of a narrow terminal.
+                if ver_x >= tabs_end + 2 {
+                    buf.set_string(ver_x, y, version, version_style);
+                    // Two-space gap between the scope path and the version.
+                    draw_scope(buf, ver_x.saturating_sub(2));
+                }
             }
         }
         None => draw_scope(buf, area.x + area.width - 1),
