@@ -21,7 +21,9 @@ All notable changes to SSHub are documented in this file.
   the ProxyJump field is now a hop list with a fuzzy picker (reuse a route,
   add a host or a raw hop), a loop guard, per-hop test connect and a `direct`
   option that overrides a group jump; it still saves the same comma separated
-  string. `sshub map --dot` prints the map for Graphviz.
+  string. `sshub map --dot` prints the map for Graphviz. The ssh_config sync
+  now also records whether a host has a `ProxyCommand`, so the first start after
+  the upgrade rewrites each ssh_config row once (tags, notes and favorites stay).
 
 ### Fixed
 

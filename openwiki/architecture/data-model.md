@@ -167,7 +167,12 @@ imported hosts reappear on next launch; keyring entries are orphaned.
 1. DB hosts with `source = launcher` (full CRUD).
 2. DB hosts with `source = ssh_config`: rows synced from the ssh config by
    `sync_ssh_config_hosts` (`src/ssh/import.rs`), keyed by `ssh_config_hash`;
-   launcher rows are never overwritten.
+   launcher rows are never overwritten. The fingerprint ends in
+   `|proxycmd=yes` or `|proxycmd=no` (the only place the sync keeps whether
+   `ssh -G` printed a `ProxyCommand`; the network map and test connect read it
+   with `ssh_config_hash_has_proxy_command`). Adding that suffix changed every
+   stored hash, so the first sync after the upgrade rewrites each ssh_config row
+   once; tags, notes and favorites are kept by the upsert.
 3. Remaining ssh_config aliases with no DB row surface as
    `HostEntry::Legacy { host, meta }`, with metadata from `metadata.db`.
 
