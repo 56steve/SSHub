@@ -72,7 +72,7 @@ Tunnels: `Enter` start/stop (also cancels a pending reconnect), `a`/`e`/`d` add/
 
 Audit: `f` status filter (all/ok/fail), `r` range (all/24h/week/month).
 
-Map: arrows only (`MapUp/Down/Left/Right`; no `hjkl`), `Enter` connect, `e` edit, `/` filter, `#` tags, `B` blast radius (`n`/`N`, `b` broadcast), `o` tunnel lens (`x` start/stop), `u` use as jump, `t` test, `Space`/`Shift+Z` fold. All are `KeyAction::Map*` and rebindable.
+Map: arrows only (`MapUp/Down/Left/Right`; no `hjkl`), `Enter` connect, `e` edit, `/` filter, `#` tags, `B` blast radius (`n`/`N`, `b` broadcast), `o` tunnel lens (`x` start/stop), `u` use as jump, `t` test (then `H`/`P`/`l` on a failure), `y` copy the `ssh -J` command, `a` save a raw hop, `z` zoom, `Space`/`Shift+Z` fold; clicks select, double-click connects, the wheel moves the cursor (`ClickHit::MapCell`). All are `KeyAction::Map*` and rebindable.
 
 The footer hints are built per tab in `footer_keybinds` (`src/tui/mod.rs`) and pin `resume`, `help`, `quit` (and an available update) to the tail so truncation never hides them. The full binding table is in `README.md` (`## Keybindings`) and the help overlay; the man page covers the CLI only.
 

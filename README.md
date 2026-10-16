@@ -487,7 +487,9 @@ arrives as arrow keys, exactly as in a real terminal.
 | `B` | Blast radius of the hop; `n` / `N` step through the dependents, `b` broadcasts to them |
 | `o`, `x` | Tunnel lens; start / stop the tunnel of the host under the cursor |
 | `u` | Use the hop as the jump of another host (`Tab`: replace or append) |
-| `t` | Test the path with `ssh -J`, hop by hop, stopping at the first failure (`Esc` cancels; `H` opens known hosts) |
+| `t` | Test the path with `ssh -J`, hop by hop, stopping at the first failure (`Esc` cancels). After a failure: `H` known hosts, `P` push a key to the failed hop, `l` its ssh log |
+| `y`, `a`, `z` | Copy the `ssh -J` command; save a raw hop as a host; zoom the map (`Esc` unzooms) |
+| click | Select a hop or glyph; double-click connects; the wheel moves the cursor |
 | `Space`, `Shift+Z` | Fold a cluster / reveal 20 more hops / expand direct-only; fold every cluster |
 | `Esc` | Cancel a test, then clear the lens, then the filter |
 
