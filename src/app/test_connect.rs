@@ -63,6 +63,13 @@ impl TestRun {
         })
     }
 
+    /// A step was skipped because its hop is not a valid hop.
+    pub fn refused(&self) -> bool {
+        self.states.iter().any(|s| {
+            matches!(s, StepState::Skipped { reason } if reason.contains("invalid") || reason.contains("not a valid"))
+        })
+    }
+
     /// Title line: progress while running, outcome after.
     pub fn headline(&self) -> String {
         let total = self.steps.len();
@@ -72,6 +79,18 @@ impl TestRun {
         if self.done {
             if self.states.contains(&StepState::Cancelled) {
                 return "cancelled".into();
+            }
+            // A step that was skipped was not tested: that is not "ok".
+            if self.refused() {
+                return "refused: invalid hop".into();
+            }
+            let ok = self
+                .states
+                .iter()
+                .filter(|s| matches!(s, StepState::Ok { .. }))
+                .count();
+            if ok < total {
+                return format!("{ok} of {total} steps tested, the rest not tested");
             }
             return format!("all {total} steps ok");
         }
@@ -805,5 +824,30 @@ mod tests {
             }
         }
         assert!(!marker.exists(), "an injected -oProxyCommand ran");
+    }
+
+    #[test]
+    fn skipped_steps_are_never_reported_as_all_ok() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let mut run = run_with(TestOwner::Editor, rx, Arc::new(AtomicBool::new(false)));
+        run.done = true;
+        run.states = vec![
+            StepState::Skipped {
+                reason: "invalid hop, not tested".into(),
+            },
+            StepState::Skipped {
+                reason: "invalid hop, not tested".into(),
+            },
+        ];
+        assert_eq!(run.headline(), "refused: invalid hop");
+        run.states = vec![
+            StepState::Ok { ms: 1 },
+            StepState::Skipped {
+                reason: PROXY_SKIP.into(),
+            },
+        ];
+        assert_eq!(run.headline(), "1 of 2 steps tested, the rest not tested");
+        run.states = vec![StepState::Ok { ms: 1 }, StepState::Ok { ms: 2 }];
+        assert_eq!(run.headline(), "all 2 steps ok");
     }
 }

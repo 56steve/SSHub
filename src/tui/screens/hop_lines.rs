@@ -202,7 +202,14 @@ pub fn push_hop_lines(
             let row = |f: &dyn Fn(usize) -> String| -> String {
                 (0..n).map(f).collect::<Vec<_>>().join(gap)
             };
-            let pad = |s: &str| format!("{s:<w$}", w = card_w - 2);
+            // Text longer than the card is cut, never spilled over its border.
+            let pad = |s: &str| {
+                format!(
+                    "{:<w$}",
+                    crate::tui::text::ellipsize(s, card_w - 2),
+                    w = card_w - 2
+                )
+            };
             push(
                 bx.row(&format!(
                     "       {}",

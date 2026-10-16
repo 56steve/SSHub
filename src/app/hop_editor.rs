@@ -293,7 +293,12 @@ impl App {
             })
             .flatten();
         // Where the host would land on the map with this chain.
+        let bad_hop = tokens.iter().any(|t| hops::token_issue(t).is_some());
         let join_note = (!tokens.is_empty()).then(|| {
+            if bad_hop {
+                return "invalid hop: not a valid [user@]host[:port], it would be refused on connect"
+                    .to_string();
+            }
             let me = if form.name.trim().is_empty() {
                 "this host".to_string()
             } else {
@@ -436,12 +441,28 @@ impl App {
                     format!(" \u{b7} {detail}")
                 }
             ),
+            None if run.done && run.refused() => {
+                let why = run
+                    .states
+                    .iter()
+                    .find_map(|s| match s {
+                        StepState::Skipped { reason } if reason.contains("valid") => {
+                            Some(reason.clone())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                format!("\u{2717} not tested: {why}")
+            }
             None if run.done
                 && run
                     .states
                     .iter()
-                    .all(|s| matches!(s, StepState::Ok { .. } | StepState::Skipped { .. })) =>
+                    .any(|s| matches!(s, StepState::Skipped { .. })) =>
             {
+                "not every step was tested".to_string()
+            }
+            None if run.done && run.states.iter().all(|s| matches!(s, StepState::Ok { .. })) => {
                 "\u{2713} every step answered".to_string()
             }
             None if run.done => "cancelled".to_string(),
