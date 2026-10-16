@@ -1313,11 +1313,7 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     put(buf, cx(cols.trunk2() + 1), y, fill, edge_style, right);
                     put(buf, cx(cols.trunk2() + 2), y, "\u{25b8}", edge_style, right);
                 }
-                // Folded middle hops: only two hop columns exist.
                 let mut text = look.text.clone();
-                if merged.is_none() && node.depth >= 2 {
-                    text = format!("\u{2039} +{} hops \u{203a} {text}", node.depth - 1);
-                }
                 let mut style = match tint {
                     Tint::Dim => st.dim,
                     Tint::Warn => st.warn,
@@ -1336,50 +1332,66 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     style = st.selected;
                 }
                 let mut at = cx(col);
-                // The root hop and the hops folded after it share this row:
-                // `edge-gw ─▸ ‹ +4 hops › ─▸ vault-core`.
-                if let Some(top_hop) = merged {
-                    let first = node_look(ctx, &cols, top_hop, &shared);
-                    let first_style = if selected_hop == Some(top_hop) {
-                        st.selected
-                    } else if tint == Tint::Normal {
-                        first.style
-                    } else {
-                        style
-                    };
-                    let chain = folded_chain(map, n);
+                // Hops folded away above this row, counted the same way on every
+                // row: the pass-through hops between the last hop drawn and this
+                // one. A root hop with folded hops after it shares the row with
+                // them (`edge-gw ─▸ ‹ +4 hops › ─▸ vault-core`); a deeper row
+                // starts with the marker. The chain is `merged`'s root + folded.
+                let chain = folded_chain(map, n);
+                let hidden = if merged.is_some() {
+                    chain.len().saturating_sub(1)
+                } else {
+                    chain.len()
+                };
+                let limit = cx(cols.cargo).saturating_sub(1);
+                if merged.is_some() || hidden > 0 {
+                    let first = merged.map(|t| (t, node_look(ctx, &cols, t, &shared)));
                     let mid_selected = selected_hop.is_some_and(|h| chain.contains(&h));
                     // The columns of a plain row do not apply here: collapse the
-                    // padding, and keep the whole chain inside the hop columns
-                    // (one blank before the cargo), shortening the two names
-                    // before anything runs into the group label.
+                    // padding, and keep the chain inside the hop columns (a blank
+                    // before the cargo), shortening the names before anything
+                    // runs into the group label.
                     let squeeze = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
-                    let mut first_t = squeeze(&first.text);
+                    let mut first_t = first.as_ref().map(|(_, l)| squeeze(&l.text));
                     let mut last_t = squeeze(&text);
-                    let mid = (node.depth > 1)
-                        .then(|| format!("\u{2039} +{} hops \u{203a}", node.depth - 1));
-                    let budget =
-                        (cx(cols.cargo).saturating_sub(1)).saturating_sub(cx(col)) as usize;
-                    // " \u{2500}\u{25b8} " + mid + " \u{2500}\u{25b8}" or " \u{2500}\u{25b8}".
-                    let glue = 3 + mid.as_ref().map_or(0, |m| m.chars().count() + 4);
+                    let mid = (hidden > 0).then(|| format!("\u{2039} +{hidden} hops \u{203a}"));
+                    let budget = limit.saturating_sub(cx(col)) as usize;
+                    // Arrows: ` ─▸` after the first hop, `─▸` after the marker.
+                    let glue = first_t.as_ref().map_or(0, |_| 3)
+                        + mid.as_ref().map_or(0, |m| m.chars().count() + 3);
                     let room = budget.saturating_sub(glue);
-                    let (fw, lw) = (first_t.chars().count(), last_t.chars().count());
+                    let fw = first_t.as_ref().map_or(0, |f| f.chars().count());
+                    let lw = last_t.chars().count();
                     if fw + lw > room {
-                        let each = room / 2;
-                        let first_keep = fw.min(each.max(room.saturating_sub(lw)));
-                        first_t = crate::tui::text::ellipsize(&first_t, first_keep.max(4));
-                        let last_keep = room.saturating_sub(first_t.chars().count());
-                        last_t = crate::tui::text::ellipsize(&last_t, last_keep.max(4));
+                        let first_keep = fw.min((room / 2).max(room.saturating_sub(lw)));
+                        if let Some(f) = first_t.as_mut() {
+                            *f = crate::tui::text::ellipsize(f, first_keep.max(4));
+                        }
+                        let used = first_t.as_ref().map_or(0, |f| f.chars().count());
+                        last_t =
+                            crate::tui::text::ellipsize(&last_t, room.saturating_sub(used).max(4));
                     }
-                    let limit = cx(cols.cargo).saturating_sub(1);
-                    at = put(buf, cx(col), y, &first_t, first_style, limit);
-                    at = put(buf, at, y, " \u{2500}\u{25b8}", edge_style, limit);
+                    if let (Some(f), Some((top_hop, look))) = (first_t, first) {
+                        let first_style = if selected_hop == Some(top_hop) {
+                            st.selected
+                        } else if tint == Tint::Normal {
+                            look.style
+                        } else {
+                            style
+                        };
+                        at = put(buf, at, y, &f, first_style, limit);
+                        at = put(buf, at, y, " \u{2500}\u{25b8}", edge_style, limit);
+                    }
                     if let Some(mid) = mid {
-                        at = put(buf, at, y, " ", edge_style, limit);
+                        if merged.is_some() {
+                            at = put(buf, at, y, " ", edge_style, limit);
+                        }
                         let mid_style = if mid_selected { st.selected } else { st.muted };
                         at = put(buf, at, y, &mid, mid_style, limit);
                         at = put(buf, at, y, " \u{2500}\u{25b8}", edge_style, limit);
                     }
+                    // `─▸●` reads as one arrow into the hop; a blank only when
+                    // the previous piece was a name.
                     text = last_t;
                 }
                 let end = put(
@@ -1388,8 +1400,8 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     y,
                     &text,
                     style,
-                    if merged.is_some() {
-                        cx(cols.cargo).saturating_sub(1)
+                    if merged.is_some() || hidden > 0 {
+                        limit
                     } else {
                         sigma_x
                     },
@@ -1403,7 +1415,9 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     if end <= cx(cols.trunk2()) {
                         put(buf, cx(cols.trunk2()), y, "\u{252c}", edge_style, right);
                     }
-                    for x in cx(cols.trunk2()) + 1..cx(cols.cargo).saturating_sub(1) {
+                    // Never over a name that runs past the trunk.
+                    for x in (cx(cols.trunk2()) + 1).max(end + 1)..cx(cols.cargo).saturating_sub(1)
+                    {
                         put(buf, x, y, "\u{2508}", st.dim, right);
                     }
                 } else {
@@ -3195,5 +3209,63 @@ mod tests {
             let cut = row.find("prod").expect("group label");
             assert!(row[..cut].ends_with(' '), "{width}: {row}");
         }
+    }
+
+    /// The tree rows that mention `needle`, frame removed, blanks collapsed.
+    fn tree_rows(app: &App, width: u16, needle: &str) -> Vec<String> {
+        all_text(&render(app, width, 45))
+            .lines()
+            .filter(|l| l.contains(needle) && l.contains('\u{2502}'))
+            .map(|l| {
+                let inner = l.trim().trim_matches('\u{2502}');
+                inner.split_whitespace().collect::<Vec<_>>().join(" ")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn folded_chain_rows_have_exact_text_named_and_raw() {
+        let mut hosts: Vec<MapHost> = (1..=9)
+            .map(|k| host(&format!("g{k}"), "ops", None))
+            .collect();
+        hosts.push(host("t1", "prod", Some("g1,g2,g3,g4,g5")));
+        hosts.push(host("t2", "prod", Some("g1,g2,g3,g4,g5,g6")));
+        hosts.push(host("t3", "prod", Some("g1,g2,g3,g4,g5,g7,g8,g9")));
+        let app = app_with(hosts);
+        // The root row carries the hops folded after it, the deeper row the
+        // ones folded above it: each count is the pass-through hops between
+        // the last hop drawn and the next, `\u{2500}\u{25b8}` on both sides.
+        let rows = tree_rows(&app, 160, "hops");
+        assert_eq!(
+            rows[0],
+            "\u{25c9} you\u{2500}\u{2500}\u{2500}\u{2500}\u{25b8}\u{25cb} g1 \u{2500}\u{25b8} \u{2039} +3 hops \u{203a} \u{2500}\u{25b8}\u{25cb} g5 \u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508} prod \u{25cb} 3"
+        );
+        assert_eq!(
+            rows[1],
+            "\u{2514}\u{2500}\u{25b8}\u{2039} +2 hops \u{203a} \u{2500}\u{25b8}\u{25cb} g9 \u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508}\u{2508} prod \u{25cb} 1"
+        );
+
+        let raw = "ops@127.0.0.61,ops@127.0.0.62,ops@127.0.0.63,ops@127.0.0.64,ops@127.0.0.65";
+        let hosts = vec![
+            host("r1", "prod", Some(raw)),
+            host("r2", "prod", Some(&format!("{raw},ops@127.0.0.66"))),
+            host(
+                "r3",
+                "prod",
+                Some(&format!(
+                    "{raw},ops@127.0.0.67,ops@127.0.0.68,ops@127.0.0.69"
+                )),
+            ),
+        ];
+        let app = app_with(hosts);
+        let rows = tree_rows(&app, 160, "hops");
+        assert_eq!(
+            rows[0],
+            "\u{25c9} you\u{2500}\u{2500}\u{2500}\u{2500}\u{25b8}\u{2506}ops@127.0.0.61\u{2506} \u{2500}\u{25b8} \u{2039} +3 hops \u{203a} \u{2500}\u{25b8}\u{2506}ops@127.0.0.65\u{2506} \u{2508}\u{2508} prod \u{25cb} 3"
+        );
+        assert_eq!(
+            rows[1],
+            "\u{2514}\u{2500}\u{25b8}\u{2039} +2 hops \u{203a} \u{2500}\u{25b8}\u{2506}ops@127.0.\u{2026} prod \u{25cb} 1"
+        );
     }
 }
