@@ -1123,20 +1123,14 @@ impl App {
         self.panel_zoomed = true;
     }
 
-    /// `y`: copy the `ssh -J ...` command of what the cursor is on.
+    /// `y`: copy the real command for the cursor's path, shell-quoted.
     fn map_copy_command(&mut self) {
-        let Some(v) = self.map_view.as_ref() else {
+        let Some(cmd) = self.map_command_line() else {
+            if self.host_notice.is_none() {
+                self.host_notice = Some("no command for this row".into());
+            }
             return;
         };
-        let cmd = match v.selection() {
-            Some(MapSel::Host(h)) => v.map.ssh_command(h),
-            Some(MapSel::Hop(n)) => v.map.node_command(n),
-            _ => String::new(),
-        };
-        if cmd.is_empty() || cmd.starts_with("jump loop") {
-            self.host_notice = Some("no command for this row".into());
-            return;
-        }
         self.host_notice = Some(match write_osc52(&cmd) {
             Ok(()) => format!("copied: {cmd}"),
             Err(e) => format!("clipboard copy failed: {e}"),

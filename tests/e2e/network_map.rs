@@ -456,13 +456,13 @@ fn y_copies_the_command_a_saves_a_raw_hop_and_z_zooms_the_map() {
     press(&mut app, 'y');
     assert_eq!(
         app.host_notice.as_deref(),
-        Some("copied: ssh ops@203.0.113.7:2222")
+        Some("copied: ssh -p 2222 'ops@203.0.113.7'")
     );
     app.handle_key(key(KeyCode::Right)).unwrap();
     press(&mut app, 'y');
     assert_eq!(
         app.host_notice.as_deref(),
-        Some("copied: ssh -J ops@203.0.113.7:2222 legacy")
+        Some("copied: ssh -J 'ops@203.0.113.7:2222' -o 'ForwardAgent=no' legacy.example")
     );
     // a is only for a raw hop.
     press(&mut app, 'a');
@@ -505,4 +505,33 @@ fn pickers_do_not_open_where_the_outline_has_no_room_to_draw_them() {
     let _ = draw(&app, 160, 45);
     press(&mut app, '#');
     assert!(app.map_view.as_ref().unwrap().picker.is_some());
+}
+
+#[test]
+fn y_shell_quotes_every_word_of_the_copied_command() {
+    // Names and addresses come from imports: `;` and `$()` must not run when
+    // the copied line is pasted into a shell.
+    let store = Arc::new(LauncherStore::open_in_memory().unwrap());
+    let mut h = NewHost::launcher("evil", "db;touch /tmp/pwned");
+    h.proxy_jump = Some("ops@bastion;id".into());
+    store.create_host(&h).unwrap();
+    let mut app = App::new_with_deps(
+        AppConfig::default(),
+        AppDeps {
+            resolver: Box::new(EmptyResolver),
+            metadata: Arc::new(MetadataDb::default()),
+            store,
+            password_store: Box::new(sshub::credentials::NoopPasswordStore),
+        },
+    );
+    app.reload_hosts().unwrap();
+    to_map(&mut app);
+    app.handle_key(key(KeyCode::Right)).unwrap(); // the glyph of `evil`
+    press(&mut app, 'y');
+    let copied = app.host_notice.clone().unwrap_or_default();
+    assert!(copied.contains("'ops@bastion;id'"), "{copied}");
+    assert!(copied.contains("'db;touch /tmp/pwned'"), "{copied}");
+    // No bare `;` outside quotes: splitting like a POSIX shell leaves one word each.
+    let words = copied.trim_start_matches("copied: ");
+    assert_eq!(words.matches('\'').count() % 2, 0, "{copied}");
 }

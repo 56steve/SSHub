@@ -328,7 +328,7 @@ fn shell_join(argv: &[String]) -> String {
         .join(" ")
 }
 
-fn shell_quote(s: &str) -> String {
+pub(crate) fn shell_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".into();
     }

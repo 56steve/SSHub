@@ -79,18 +79,11 @@ pub(crate) type TestHop = Option<String>;
 const PROXY_SKIP: &str = "proxy cmd, not tested";
 
 impl App {
-    /// `t` on the map: test the path of what the cursor is on.
-    pub(crate) fn map_start_test(&mut self) {
-        if self.test_run.as_ref().is_some_and(TestRun::running) {
-            self.host_notice = Some("a test is already running (Esc cancels it)".into());
-            return;
-        }
-        let Some(v) = self.map_view.as_ref() else {
-            return;
-        };
-        let Some(sel) = v.selection() else {
-            return;
-        };
+    /// The hops, final target and title for the map cursor's path; sets a
+    /// notice and returns `None` when there is nothing to build.
+    fn map_chain_for_cursor(&mut self) -> Option<(MapSel, Vec<TestHop>, TestTarget, String)> {
+        let v = self.map_view.as_ref()?;
+        let sel = v.selection()?;
         let map = &v.map;
         let hop_name = |k: &HopKey| -> TestHop {
             match k {
@@ -124,16 +117,46 @@ impl App {
                 }
                 Chain::Cycle(_) => {
                     self.host_notice = Some("jump loop: nothing to test, fix the ProxyJump".into());
-                    return;
+                    return None;
                 }
             },
             _ => {
-                self.host_notice = Some("put the cursor on a hop or host to test its path".into());
-                return;
+                self.host_notice = Some("put the cursor on a hop or host to use its path".into());
+                return None;
             }
         };
-        let owner = TestOwner::Map(sel);
-        self.start_test(owner, title, &hops, target);
+        Some((sel, hops, target, title))
+    }
+
+    /// `t` on the map: test the path of what the cursor is on.
+    pub(crate) fn map_start_test(&mut self) {
+        if self.test_run.as_ref().is_some_and(TestRun::running) {
+            self.host_notice = Some("a test is already running (Esc cancels it)".into());
+            return;
+        }
+        let Some((sel, hops, target, title)) = self.map_chain_for_cursor() else {
+            return;
+        };
+        self.start_test(TestOwner::Map(sel), title, &hops, target);
+    }
+
+    /// `y` on the map: the real command for the cursor's path, every word
+    /// shell-quoted (hop and host names come from imports and can hold anything).
+    pub(crate) fn map_command_line(&mut self) -> Option<String> {
+        let (_, hops, target, _) = self.map_chain_for_cursor()?;
+        let steps = self.test_steps(&hops, target);
+        let last = steps.last()?;
+        if let Some(why) = &last.skip {
+            self.host_notice = Some(format!("no command: {why}"));
+            return None;
+        }
+        Some(
+            last.argv
+                .iter()
+                .map(|w| crate::session_log::shell_quote(w))
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
     }
 
     /// `t` in the hop editor: test the chain as it is in the form, ending on
@@ -172,13 +195,7 @@ impl App {
         self.start_test(TestOwner::Editor, title, &hops, TestTarget::Form);
     }
 
-    fn start_test(
-        &mut self,
-        owner: TestOwner,
-        title: String,
-        hops: &[TestHop],
-        target: TestTarget,
-    ) {
+    fn test_steps(&self, hops: &[TestHop], target: TestTarget) -> Vec<TestStep> {
         let mut steps: Vec<TestStep> = Vec::new();
         for i in 0..hops.len() {
             steps.push(self.hop_test_step(hops, i));
@@ -194,6 +211,17 @@ impl App {
                 steps.push(self.form_test_step(prefix));
             }
         }
+        steps
+    }
+
+    fn start_test(
+        &mut self,
+        owner: TestOwner,
+        title: String,
+        hops: &[TestHop],
+        target: TestTarget,
+    ) {
+        let steps = self.test_steps(hops, target);
         if steps.is_empty() {
             self.host_notice = Some("nothing to test".into());
             return;
