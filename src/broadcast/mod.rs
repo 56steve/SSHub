@@ -187,6 +187,13 @@ impl CommandRunner for SshCommandRunner {
         if self.accept_new_host_keys {
             full.push("-o".to_string());
             full.push("StrictHostKeyChecking=accept-new".to_string());
+        } else {
+            // A diagnostic must not touch known_hosts, whatever the user's
+            // ssh_config says: command-line options win over the config.
+            for opt in ["StrictHostKeyChecking=yes", "UpdateHostKeys=no"] {
+                full.push("-o".to_string());
+                full.push(opt.to_string());
+            }
         }
         full.extend(argv[1..].iter().cloned());
         full.push(command.to_string());

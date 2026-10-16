@@ -324,6 +324,33 @@ mod tests {
     }
 
     #[test]
+    fn a_user_config_that_trusts_new_keys_cannot_make_the_test_write_known_hosts() {
+        let Some(sshd) = tempdir_sshd() else {
+            return;
+        };
+        // The user's own config asks for exactly what a diagnostic must not do.
+        let cfg = sshd.dir.path().join("trusting");
+        std::fs::write(
+            &cfg,
+            "Host *\n  StrictHostKeyChecking accept-new\n  UpdateHostKeys yes\n",
+        )
+        .unwrap();
+        let known = sshd.dir.path().join("kh-empty");
+        std::fs::write(&known, "").unwrap();
+        let mut a = argv(&sshd, &sshd.user_key, &known);
+        a[2] = cfg.to_str().unwrap().to_string(); // replaces `-F /dev/null`
+        match run(a) {
+            StepState::Failed { reason, .. } => assert_eq!(reason, "host key unknown"),
+            s => panic!("{s:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&known).unwrap(),
+            "",
+            "known_hosts untouched"
+        );
+    }
+
+    #[test]
     fn oracle_refused_unknown_host_and_timeout_against_real_ssh() {
         if !have_ssh() {
             return;
