@@ -278,3 +278,38 @@ fn the_picker_says_one_host_and_titles_an_inherited_list_as_a_replacement() {
     assert!(!text.contains(" 1 hosts"), "{text}");
     assert!(text.contains(" 1 host "), "{text}");
 }
+
+#[test]
+fn a_hostile_hop_is_refused_in_the_test_result_and_the_form_not_called_ok() {
+    let mut app = app(None);
+    edit(&mut app, "db-1");
+    let hostile = "a$IFS-oProxyCommand=touch$IFS/tmp/x@127.0.0.1:1";
+    app.host_form.as_mut().unwrap().proxy_jump = hostile.into();
+    // No Sigma claim for a hop that would be refused, and nothing spills out
+    // of its border.
+    let text = screen(&app);
+    assert!(text.contains("invalid hop"), "{text}");
+    assert!(!text.contains("stays in a$IFS"), "{text}");
+    press(&mut app, 't');
+    for _ in 0..200 {
+        app.poll_test_run();
+        if app.test_run.as_ref().is_some_and(|r| !r.running()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let text = screen(&app);
+    assert!(text.contains("refused: invalid hop"), "{text}");
+    assert!(
+        !text.contains("steps ok") && !text.contains("every step answered"),
+        "{text}"
+    );
+    assert!(text.contains("not tested"), "{text}");
+    // Card rows: the hostile name is cut inside its card, never spilled.
+    for l in text
+        .lines()
+        .filter(|l| l.contains("\u{2501}\u{2501}\u{25b6}"))
+    {
+        assert!(!l.contains("touch"), "{l}");
+    }
+}

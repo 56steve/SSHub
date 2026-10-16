@@ -184,6 +184,25 @@ fn enter_on_a_cycle_host_refuses_instead_of_connecting() {
         .host_notice
         .as_deref()
         .is_some_and(|n| n.contains("jump loop")));
+    // The hint is inside the form; it does not outlive it on the footer rule.
+    assert_eq!(app.mode, AppMode::HostForm);
+    let text = screen(&draw(&app, 160, 45));
+    let rows: Vec<&str> = text.lines().collect();
+    let hint = rows
+        .iter()
+        .position(|l| l.contains("jump loop, not"))
+        .unwrap();
+    // Inside the form: a border follows the hint, no rule runs through it.
+    let from = &rows[hint][rows[hint].find("jump loop, not").unwrap()..];
+    assert!(from.contains('\u{2502}'), "{from}");
+    assert!(
+        !from.contains('\u{2501}') || from.find('\u{2502}') < from.find('\u{2501}'),
+        "{from}"
+    );
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, AppMode::Normal);
+    assert!(app.host_notice.is_none());
+    assert!(!screen(&draw(&app, 160, 45)).contains("jump loop, not"));
 }
 
 fn press(app: &mut App, c: char) {
