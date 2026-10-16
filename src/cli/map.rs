@@ -16,6 +16,13 @@ pub fn run(ctx: &CliContext, args: &[String]) -> Result<i32> {
     }
     let hosts = crate::map::collect_hosts(&ctx.store, &ctx.hosts)?;
     let map = crate::map::Map::build(hosts);
-    print!("{}", crate::map::dot::to_dot(&map));
-    Ok(0)
+    // `sshub map --dot | head -1` closes the pipe early: that is not an error.
+    use std::io::Write as _;
+    match std::io::stdout()
+        .lock()
+        .write_all(crate::map::dot::to_dot(&map).as_bytes())
+    {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
+        _ => Ok(0),
+    }
 }

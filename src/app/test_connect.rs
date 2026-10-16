@@ -638,4 +638,33 @@ mod tests {
         assert!(app.test_run.is_none());
         assert!(cancel.load(Ordering::Relaxed));
     }
+
+    #[test]
+    fn a_group_form_with_an_invalid_default_jump_is_not_saved() {
+        let mut app = test_app(vec![]);
+        app.enter_group_form(None).unwrap();
+        let form = app.group_form.as_mut().unwrap();
+        form.name = "prod".into();
+        form.default_proxy_jump = "-oProxyCommand=id".into();
+        app.save_group_form().unwrap();
+        assert!(app.group_form.is_some(), "the form stays open");
+        assert!(app
+            .host_notice
+            .as_deref()
+            .is_some_and(|n| n.contains("ProxyJump")));
+        assert!(app
+            .store()
+            .list_groups()
+            .unwrap()
+            .iter()
+            .all(|g| g.name != "prod"));
+        app.group_form.as_mut().unwrap().default_proxy_jump = "bastion-eu".into();
+        app.save_group_form().unwrap();
+        assert!(app
+            .store()
+            .list_groups()
+            .unwrap()
+            .iter()
+            .any(|g| g.name == "prod"));
+    }
 }

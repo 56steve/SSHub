@@ -1171,6 +1171,27 @@ fn map_dot_prints_the_jump_graph_from_ssh_config() {
 }
 
 #[test]
+fn map_dot_into_a_closed_pipe_does_not_panic() {
+    use std::process::{Command, Stdio};
+    let d = dir();
+    let cfg = d.path().join("config");
+    std::fs::write(&cfg, "Host bastion\n  HostName 10.0.0.1\n").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin("sshub"));
+    cmd.env("SSHUB_SSH_CONFIG", &cfg)
+        .env("SSHUB_CONFIG_DIR", d.path())
+        .env("SSHUB_DATA_DIR", d.path())
+        .args(["map", "--dot"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    // The reader goes away before the first byte is written.
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("panicked"), "{err}");
+}
+
+#[test]
 fn map_without_dot_is_a_usage_error() {
     let d = dir();
     sshub(d.path())
