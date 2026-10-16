@@ -213,6 +213,7 @@ SFTP (one-shot):
 
 AUDIT:
     sshub audit list|stats …
+    sshub map --dot
 
 THEMES (headless; no database):
     sshub theme check <file> [--format plain|json]

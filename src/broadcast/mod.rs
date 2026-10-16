@@ -126,6 +126,13 @@ pub trait CommandRunner: Send + Sync {
 pub struct SshCommandRunner {
     pub connect_timeout_secs: u32,
     pub run_timeout: Duration,
+    /// Pass `StrictHostKeyChecking=accept-new` (a first connection writes
+    /// `known_hosts`). A diagnostic such as the map's test connect turns this
+    /// off, so an unknown host key fails instead of being trusted.
+    pub accept_new_host_keys: bool,
+    /// Run ssh in its own process group and kill the whole group on cancel or
+    /// timeout, so the `ssh -W` helper of a `-J` hop dies with it.
+    pub kill_process_group: bool,
 }
 
 impl SshCommandRunner {
@@ -133,6 +140,8 @@ impl SshCommandRunner {
         Self {
             connect_timeout_secs: CONNECT_TIMEOUT_SECS,
             run_timeout: RUN_TIMEOUT,
+            accept_new_host_keys: true,
+            kill_process_group: false,
         }
     }
 }
@@ -172,15 +181,12 @@ impl CommandRunner for SshCommandRunner {
         let connect_timeout = format!("ConnectTimeout={}", self.connect_timeout_secs);
         let mut full: Vec<String> = Vec::with_capacity(argv.len() + 8);
         full.push(argv[0].clone());
-        for opt in [
-            "-o",
-            batchmode,
-            "-o",
-            &connect_timeout,
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-        ] {
+        for opt in ["-o", batchmode, "-o", &connect_timeout] {
             full.push(opt.to_string());
+        }
+        if self.accept_new_host_keys {
+            full.push("-o".to_string());
+            full.push("StrictHostKeyChecking=accept-new".to_string());
         }
         full.extend(argv[1..].iter().cloned());
         full.push(command.to_string());
@@ -190,6 +196,16 @@ impl CommandRunner for SshCommandRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if self.kill_process_group {
+            crate::cli::exec::spawn_group(&mut cmd);
+        }
+        let kill = |child: &mut std::process::Child| {
+            if self.kill_process_group {
+                crate::cli::exec::kill_group(child);
+            } else {
+                let _ = child.kill();
+            }
+        };
 
         // Stage the stored secret through SSH_ASKPASS. The guard owns an
         // owner-only temp file removed on drop, so keep it alive until the child
@@ -222,20 +238,20 @@ impl CommandRunner for SshCommandRunner {
                 Ok(None) => {}
                 Err(e) => {
                     fail_reason = Some(format!("wait ssh: {e}"));
-                    let _ = child.kill();
+                    kill(&mut child);
                     let _ = child.wait();
                     break None;
                 }
             }
             if cancel.load(Ordering::Relaxed) {
                 fail_reason = Some("cancelled".to_string());
-                let _ = child.kill();
+                kill(&mut child);
                 let _ = child.wait();
                 break None;
             }
             if start.elapsed() >= self.run_timeout {
                 fail_reason = Some("timed out".to_string());
-                let _ = child.kill();
+                kill(&mut child);
                 let _ = child.wait();
                 break None;
             }
@@ -919,6 +935,7 @@ mod tests {
         let runner = SshCommandRunner {
             connect_timeout_secs: 1,
             run_timeout: Duration::from_secs(1),
+            ..SshCommandRunner::new()
         };
         let cancel = AtomicBool::new(false);
         let argv = vec![

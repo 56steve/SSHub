@@ -265,7 +265,7 @@ impl LauncherStore {
     /// Every token must parse as `[user@]host[:port]` (leading `-`, whitespace
     /// and control characters are refused): the string reaches `ssh -J`
     /// verbatim and imports write it, so it is untrusted.
-    fn expand_jump(&self, jump: &str) -> Result<String> {
+    pub fn expand_jump(&self, jump: &str) -> Result<String> {
         if crate::map::is_jump_none(jump) {
             return Ok(jump.trim().to_string());
         }

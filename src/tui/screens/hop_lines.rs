@@ -124,6 +124,30 @@ pub fn push_hop_lines(
             help,
         )]);
     }
+    if let Some(t) = &h.test {
+        push(vec![Span::styled(
+            format!("    \u{250c}\u{2500} {} ", t.title),
+            muted,
+        )]);
+        for (glyph, name, text, failed) in &t.rows {
+            push(vec![Span::styled(
+                format!("    \u{2502} {glyph} {name:<20} {text}"),
+                if *failed { err } else { value },
+            )]);
+        }
+        push(vec![Span::styled(
+            format!("    \u{2502} {}", t.result),
+            if t.result.starts_with('\u{2717}') {
+                err
+            } else {
+                muted
+            },
+        )]);
+        push(vec![Span::styled(
+            format!("    \u{2514}\u{2500} {} ", t.hint),
+            help,
+        )]);
+    }
     if let Some(n) = &h.notice {
         push(vec![Span::styled(format!("    {n}"), err)]);
     }

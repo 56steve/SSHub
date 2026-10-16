@@ -1190,6 +1190,20 @@ fn map_footer(app: &App) -> Vec<(String, &'static str)> {
             ("Esc".into(), "close"),
         ];
     }
+    if let Some(run) = app.test_run.as_ref().filter(|r| {
+        matches!(&r.owner, crate::app::test_connect::TestOwner::Map(s) if Some(*s) == v.selection())
+    }) {
+        return if run.running() {
+            vec![("Esc".into(), "cancel test"), ("?".into(), "help")]
+        } else {
+            vec![
+                (key(crate::config::KeyAction::MapTest), "test again"),
+                (key(crate::config::KeyAction::KnownHosts), "known hosts"),
+                ("Esc".into(), "close"),
+                ("?".into(), "help"),
+            ]
+        };
+    }
     if v.use_picker.is_some() {
         return vec![
             ("type".into(), "host"),
@@ -1239,6 +1253,7 @@ fn map_footer(app: &App) -> Vec<(String, &'static str)> {
             (key(crate::config::KeyAction::MapBlast), "blast"),
             (key(crate::config::KeyAction::MapTunnelLens), "tunnels"),
             (key(crate::config::KeyAction::MapUseAsJump), "use as jump"),
+            (key(crate::config::KeyAction::MapTest), "test"),
             ("e".into(), "edit"),
             ("?".into(), "help"),
             ("q".into(), "quit"),

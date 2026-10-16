@@ -6,6 +6,7 @@ mod import;
 mod keyfile;
 pub mod probe;
 mod resolver;
+pub mod test_connect;
 
 pub use export::{
     atomic_write_with_backup, export_launcher_hosts, export_launcher_hosts_to, exported_conf_path,

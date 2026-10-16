@@ -18,6 +18,7 @@
 //! label; its text is never stored or shown.
 
 mod build;
+pub mod dot;
 mod filter;
 pub mod hops;
 

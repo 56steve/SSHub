@@ -23,5 +23,6 @@ mod session_switcher;
 mod snippet_crud;
 mod ssh_config_sync;
 mod termius_import;
+mod test_connect;
 mod theme_picker;
 mod tunnel_form;

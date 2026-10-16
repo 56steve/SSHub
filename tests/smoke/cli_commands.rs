@@ -1147,3 +1147,35 @@ fn host_secret_lookup_round_trips_through_add_edit_and_show() {
             .stderr(predicate::str::contains("secret-lookup"));
     }
 }
+
+#[test]
+fn map_dot_prints_the_jump_graph_from_ssh_config() {
+    let d = dir();
+    let cfg = d.path().join("config");
+    std::fs::write(
+        &cfg,
+        "Host bastion\n  HostName 10.0.0.1\nHost db\n  HostName 10.0.0.2\n  ProxyJump bastion\n\
+         Host lone\n  HostName 10.0.0.3\n",
+    )
+    .unwrap();
+    sshub(d.path())
+        .env("SSHUB_SSH_CONFIG", &cfg)
+        .args(["map", "--dot"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("digraph sshub {"))
+        .stdout(predicate::str::contains("you -> n0"))
+        .stdout(predicate::str::contains("label=\"bastion\\n1 hosts\""))
+        .stdout(predicate::str::contains("label=\"db\""))
+        .stdout(predicate::str::contains("direct-only"));
+}
+
+#[test]
+fn map_without_dot_is_a_usage_error() {
+    let d = dir();
+    sshub(d.path())
+        .arg("map")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--dot"));
+}

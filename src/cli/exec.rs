@@ -364,16 +364,16 @@ fn wait_or_kill(child: &mut Child, timeout: Option<Duration>) -> Result<(ExitSta
 /// stop reaching ssh — an acceptable trade for a run that already declared a
 /// deadline, but not for one that did not.
 #[cfg(unix)]
-fn spawn_group(cmd: &mut Command) {
+pub(crate) fn spawn_group(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
 }
 
 #[cfg(not(unix))]
-fn spawn_group(_cmd: &mut Command) {}
+pub(crate) fn spawn_group(_cmd: &mut Command) {}
 
 #[cfg(unix)]
-fn kill_group(child: &Child) {
+pub(crate) fn kill_group(child: &Child) {
     // SIGKILL the group; the child is its own group leader (`process_group(0)`),
     // so its pid is the group id. Falls back to the single child if the group
     // call fails, which is all a non-group spawn could have killed anyway.
@@ -384,7 +384,7 @@ fn kill_group(child: &Child) {
 }
 
 #[cfg(not(unix))]
-fn kill_group(child: &mut Child) {
+pub(crate) fn kill_group(child: &mut Child) {
     let _ = child.kill();
 }
 

@@ -544,6 +544,8 @@ fn poll_keys_and_watcher(app: &mut App) -> Result<()> {
         app.reload_hosts()?;
     }
 
+    app.poll_test_run();
+
     // Drain ping results from background worker
     if let Some(rx) = app.ping_rx.as_ref() {
         while let Ok(result) = rx.try_recv() {

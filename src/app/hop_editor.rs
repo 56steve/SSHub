@@ -133,6 +133,16 @@ pub struct HopSection {
     pub notice: Option<String>,
     /// The chain is inherited, so the list is shown muted.
     pub inherited: bool,
+    pub test: Option<TestView>,
+}
+
+/// The editor's test-connect result block.
+pub struct TestView {
+    pub title: String,
+    /// (glyph, hop name, outcome text, failed)
+    pub rows: Vec<(char, String, String, bool)>,
+    pub result: String,
+    pub hint: String,
 }
 
 pub struct PickerView {
@@ -243,6 +253,57 @@ impl App {
             raw,
             notice: self.hop_editor.notice.clone(),
             inherited: using_inherited,
+            test: self.test_view(),
+        })
+    }
+
+    fn test_view(&self) -> Option<TestView> {
+        use crate::ssh::test_connect::StepState;
+        let run = self
+            .test_run
+            .as_ref()
+            .filter(|r| r.owner == super::test_connect::TestOwner::Editor)?;
+        let rows = run
+            .steps
+            .iter()
+            .zip(&run.states)
+            .map(|(step, st)| {
+                let (glyph, text) = step_text(st);
+                (glyph, step.label.clone(), text, st.is_failure())
+            })
+            .collect();
+        let result = match run.failure() {
+            Some((i, reason, detail)) => format!(
+                "\u{2717} failed at hop {} ({}): {reason}{}",
+                i + 1,
+                run.steps[i].label,
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(" \u{b7} {detail}")
+                }
+            ),
+            None if run.done
+                && run
+                    .states
+                    .iter()
+                    .all(|s| matches!(s, StepState::Ok { .. } | StepState::Skipped { .. })) =>
+            {
+                "\u{2713} every step answered".to_string()
+            }
+            None if run.done => "cancelled".to_string(),
+            None => "testing\u{2026}".to_string(),
+        };
+        let hint = if run.running() {
+            "Esc cancel"
+        } else {
+            "t test again   Esc close   Save still allowed"
+        };
+        Some(TestView {
+            title: format!("test chain \u{2500} {}", run.headline()),
+            rows,
+            result,
+            hint: hint.to_string(),
         })
     }
 
@@ -427,7 +488,9 @@ impl App {
         let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
         match key.code {
             _ if self.is_save_key(key) => return false,
-            KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => return false,
+            KeyCode::Esc => return self.cancel_or_clear_test(true),
+            KeyCode::Tab | KeyCode::BackTab => return false,
+            KeyCode::Char('t') if plain => self.editor_start_test(),
             KeyCode::Up if key.modifiers.is_empty() => {
                 if sel > 0 {
                     self.hop_editor.selected = sel - 1;
@@ -694,4 +757,17 @@ pub(crate) fn proxy_jump_problem(value: &str) -> Option<String> {
     hops::split(value)
         .into_iter()
         .find_map(|t| hops::token_issue(&t).map(|e| format!("ProxyJump hop {t:?}: {e}")))
+}
+
+/// Glyph and short text of one test step.
+pub(crate) fn step_text(st: &crate::ssh::test_connect::StepState) -> (char, String) {
+    use crate::ssh::test_connect::StepState;
+    match st {
+        StepState::Pending => ('\u{b7}', "waiting".into()),
+        StepState::Running => ('\u{bb}', "testing\u{2026}".into()),
+        StepState::Ok { ms } => ('\u{2713}', format!("ok {ms}ms")),
+        StepState::Failed { reason, .. } => ('\u{2717}', reason.clone()),
+        StepState::Skipped { reason } => ('\u{2013}', reason.clone()),
+        StepState::Cancelled => ('\u{2013}', "cancelled".into()),
+    }
 }

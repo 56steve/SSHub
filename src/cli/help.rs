@@ -18,6 +18,7 @@ pub fn print_command_help(cmd: &str) {
         "tunnel" => print_tunnel(),
         "sftp" => print_sftp(),
         "audit" => print_audit(),
+        "map" => print_map(),
         "tags" => print_tags(),
         "sync" => print_sync(),
         "import" => print_import(),
@@ -216,6 +217,20 @@ USAGE:
                       [--host NAME] [--limit N] [--days N] [--format plain|json]
     sshub audit stats [--days N] [--via all|connect|tunnel|agent|exec|broadcast]
                       [--include-retry] [--format plain|json]"#
+    );
+}
+
+fn print_map() {
+    println!(
+        r#"sshub map - the jump-host map as a Graphviz graph
+
+USAGE:
+    sshub map --dot
+
+Prints a `digraph` of every real jump (own ProxyJump, group default, ssh_config):
+you -> hop -> hop, with hosts hanging off their last hop. Jump loops are red,
+raw hops dashed, a ProxyCommand is one `proxy cmd` box. Pipe it to Graphviz:
+    sshub map --dot | dot -Tsvg -o map.svg"#
     );
 }
 

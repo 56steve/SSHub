@@ -689,6 +689,9 @@ impl App {
                 }
             }
             _ if self.is_action(KeyAction::Cancel, &key) => {
+                if self.cancel_or_clear_test(false) {
+                    return Ok(());
+                }
                 if let Some(v) = self.map_view.as_mut() {
                     // Lens first, then the filter.
                     if !matches!(v.lens, Lens::None) {
@@ -721,6 +724,8 @@ impl App {
             }
             _ if self.is_action(KeyAction::MapToggleTunnel, &key) => self.map_toggle_tunnel()?,
             _ if self.is_action(KeyAction::MapUseAsJump, &key) => self.map_open_use_picker(),
+            _ if self.is_action(KeyAction::MapTest, &key) => self.map_start_test(),
+            _ if self.is_action(KeyAction::KnownHosts, &key) => self.open_known_hosts(),
             _ if self.is_action(KeyAction::MapFold, &key) => {
                 if let Some(v) = self.map_view.as_mut() {
                     v.toggle_fold();

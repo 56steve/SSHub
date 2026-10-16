@@ -31,6 +31,7 @@ mod sftp;
 mod snippets;
 mod suggestions;
 mod tags;
+pub mod test_connect;
 mod theme_picker;
 mod tunnels;
 mod types;
@@ -499,6 +500,8 @@ pub struct App {
     pub map_view: Option<network_map::MapView>,
     /// The structured ProxyJump editor of the host form.
     pub hop_editor: hop_editor::HopEditor,
+    /// The running or last test connect (map or hop editor).
+    pub test_run: Option<test_connect::TestRun>,
     pub audit_scroll: usize,
     pub agent_info: Option<crate::ssh::agent::AgentInfo>,
     agent_info_updated: std::time::Instant,
@@ -1118,6 +1121,7 @@ impl App {
             audit_selected: 0,
             map_view: None,
             hop_editor: hop_editor::HopEditor::default(),
+            test_run: None,
             audit_scroll: 0,
             agent_info: None,
             agent_info_updated: std::time::Instant::now() - std::time::Duration::from_secs(60),

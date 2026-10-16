@@ -14,6 +14,7 @@ use ratatui::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::network_map::{HostTunnel, Lens, MapSel, MapView, Tint, TunnelState, REVEAL_STEP};
+use crate::app::test_connect::{TestOwner, TestRun};
 use crate::app::App;
 use crate::map::{Chain, Hop, HopKey, HopKind, JumpSource, Map, Row, PROXY_CMD_LABEL};
 use crate::theme::catalog::{ColorRole, StyleRole};
@@ -77,6 +78,28 @@ impl Styles {
     }
 }
 
+/// The test run that belongs to what the cursor is on.
+fn map_test(app: &App, sel: Option<MapSel>) -> Option<&TestRun> {
+    let sel = sel?;
+    app.test_run
+        .as_ref()
+        .filter(|r| matches!(&r.owner, TestOwner::Map(s) if *s == sel))
+}
+
+/// Put each step's outcome on the matching ribbon card.
+fn apply_test(cards: &mut [Card], run: &TestRun, st: &Styles) {
+    if cards.len() != run.states.len() {
+        return;
+    }
+    for (c, state) in cards.iter_mut().zip(&run.states) {
+        let (glyph, text) = crate::app::hop_editor::step_text(state);
+        c.line3 = format!("{glyph} {text}");
+        if state.is_failure() {
+            c.border = st.err;
+        }
+    }
+}
+
 /// Everything a frame of the map reads.
 struct Ctx<'a> {
     app: &'a App,
@@ -85,6 +108,7 @@ struct Ctx<'a> {
     /// Tunnels by host index (tunnel lens, facts).
     tunnels: HashMap<usize, Vec<HostTunnel>>,
     max_glyphs: usize,
+    test: Option<&'a TestRun>,
 }
 
 impl Ctx<'_> {
@@ -93,6 +117,9 @@ impl Ctx<'_> {
         let st = self.st;
         let base = host_status(self.app, st, host);
         let dim = ('\u{b7}', st.dim);
+        if let Some(over) = self.test_glyph(host) {
+            return over;
+        }
         if self
             .view
             .matched
@@ -121,6 +148,25 @@ impl Ctx<'_> {
             return (base.glyph, st.dim);
         }
         (base.glyph, base.style)
+    }
+}
+
+impl Ctx<'_> {
+    /// `»` while a test connect runs on this host, `×` after one failed on it.
+    /// A hop is only ever shown down because a test of it failed.
+    fn test_glyph(&self, host: usize) -> Option<(char, Style)> {
+        use crate::ssh::test_connect::StepState;
+        let run = self.test?;
+        let name = &self.view.map.hosts[host].name;
+        run.steps
+            .iter()
+            .zip(&run.states)
+            .find(|(step, _)| step.host.as_deref() == Some(name.as_str()))
+            .and_then(|(_, state)| match state {
+                StepState::Running => Some(('\u{bb}', self.st.warn)),
+                StepState::Failed { .. } => Some(('\u{d7}', self.st.err)),
+                _ => None,
+            })
     }
 }
 
@@ -282,6 +328,7 @@ pub fn render_map(frame: &mut Frame, area: Rect, app: &App) {
         st: &st,
         tunnels: app.map_tunnels(),
         max_glyphs: max_glyphs(area.width),
+        test: map_test(app, view.selection()),
     };
     if area.width < 80 || area.height < 24 {
         draw_outline(frame.buffer_mut(), area, &ctx);
@@ -486,6 +533,13 @@ fn sel_title(view: &MapView, sel: Option<MapSel>) -> String {
 /// The map panel title: the active lens, then the filter.
 fn map_title(ctx: &Ctx) -> String {
     let view = ctx.view;
+    if let Some(run) = ctx.test {
+        return format!(
+            "map \u{2500} testing path to {} \u{b7} {}",
+            run.title,
+            run.headline()
+        );
+    }
     let mut title = match &view.lens {
         Lens::Blast(b) => format!(
             "map \u{2500} blast radius \u{b7} {} hosts depend on {}",
@@ -640,9 +694,10 @@ fn node_look(ctx: &Ctx, cols: &Cols, node: usize, shared: &HashSet<HopKey>) -> N
     match &n.key {
         HopKey::Saved(h) => {
             let s = host_status(app, st, *h);
+            let glyph = ctx.test_glyph(*h).map_or(s.glyph, |(g, _)| g);
             let name =
                 crate::tui::text::ellipsize(&view.map.hosts[*h].name, room.saturating_sub(7));
-            let mut text = format!("{} {}", s.glyph, name);
+            let mut text = format!("{glyph} {name}");
             if cols.latency {
                 if let Some(ms) = s.ms {
                     text.push_str(&format!("  {}", ms_text(Some(ms))));
@@ -1505,6 +1560,9 @@ fn draw_ribbon_full(
         return;
     };
     let (mut cards, is_cycle) = cards_for(view, Some(sel), st);
+    if let Some(run) = map_test(app, Some(sel)) {
+        apply_test(&mut cards, run, st);
+    }
     if cards.is_empty() {
         let msg = match sel {
             MapSel::Direct => format!(
@@ -1703,7 +1761,16 @@ fn draw_ribbon_line(
             }
         }
     }
-    if inner.height > 1 {
+    if let (true, Some(run)) = (inner.height > 1, map_test(app, Some(sel))) {
+        put(
+            buf,
+            inner.x + 1,
+            inner.y + 1,
+            &format!("test: {}", run.headline()),
+            st.muted,
+            right,
+        );
+    } else if inner.height > 1 {
         let note = match sel {
             MapSel::Host(h) | MapSel::Cycle(h) if matches!(sel, MapSel::Host(_)) => {
                 jump_note(&view.map, h)
@@ -1783,6 +1850,47 @@ fn draw_facts(buf: &mut Buffer, inner: Rect, ctx: &Ctx, sel: Option<MapSel>) {
     let (view, st) = (ctx.view, ctx.st);
     let right = inner.x + inner.width;
     let map = &view.map;
+    if let Some(run) = ctx.test {
+        for (i, (step, state)) in run.steps.iter().zip(&run.states).enumerate() {
+            if i >= inner.height.saturating_sub(1) as usize {
+                break;
+            }
+            let (glyph, text) = crate::app::hop_editor::step_text(state);
+            let style = if state.is_failure() { st.err } else { st.text };
+            let cmd = if step.cmd.is_empty() {
+                step.label.clone()
+            } else {
+                crate::tui::text::ellipsize(&step.cmd, 40)
+            };
+            put(
+                buf,
+                inner.x + 1,
+                inner.y + i as u16,
+                &format!("{} {cmd:<40} {glyph} {text}", i + 1),
+                style,
+                right,
+            );
+        }
+        let last = inner.y + inner.height.saturating_sub(1);
+        let note = match run.failure() {
+            Some((i, reason, detail)) => {
+                let h = if reason.starts_with("host key") {
+                    "   H known hosts"
+                } else {
+                    ""
+                };
+                format!(
+                    "\u{2717} hop {} ({}): {reason} {detail}{h}   t again",
+                    i + 1,
+                    run.steps[i].label
+                )
+            }
+            None if run.running() => "Stops at the first failure. Esc cancels.".to_string(),
+            None => "Esc closes. t tests again.".to_string(),
+        };
+        put(buf, inner.x + 1, last, &note, st.muted, right);
+        return;
+    }
     let mut rows: Vec<(&str, String)> = Vec::new();
     let host_rows = |h: usize, rows: &mut Vec<(&str, String)>| {
         let host = &map.hosts[h];
