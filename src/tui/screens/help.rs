@@ -289,11 +289,81 @@ pub const HELP_ITEMS: &[HelpItem] = &[
     },
     HelpItem::Entry {
         key: "Enter",
-        desc: "Connect to the hop or host under the cursor",
+        desc: "Connect to the hop or host (raw hop: ad-hoc); on a cluster, open or fold it",
     },
     HelpItem::Entry {
         key: "e",
         desc: "Edit the host under the cursor",
+    },
+    HelpItem::Entry {
+        key: "/",
+        desc: "Filter: group:x tag:x via:x !name, or fuzzy name; Enter keeps it and opens the matching clusters, Esc clears",
+    },
+    HelpItem::Entry {
+        key: "#",
+        desc: "Tag picker: toggles a tag: term in the filter",
+    },
+    HelpItem::Entry {
+        key: "B",
+        desc: "Blast radius of the hop: every host that depends on it; n / N step through them, b broadcasts to them",
+    },
+    HelpItem::Entry {
+        key: "o",
+        desc: "Tunnel lens; x starts or stops the tunnel of the host under the cursor",
+    },
+    HelpItem::Entry {
+        key: "u",
+        desc: "Use the hop as the jump of another host (Tab: replace or append)",
+    },
+    HelpItem::Entry {
+        key: "t",
+        desc: "Test the path with ssh -J, hop by hop; Esc cancels, H opens known hosts",
+    },
+    HelpItem::Entry {
+        key: "Space",
+        desc: "Fold or unfold a cluster, reveal 20 more hops, expand direct-only",
+    },
+    HelpItem::Entry {
+        key: "Shift+Z",
+        desc: "Fold every cluster; when none is open, expand or fold direct-only",
+    },
+    HelpItem::Entry {
+        key: "Esc",
+        desc: "Cancel a test, then clear the lens, then the filter",
+    },
+    HelpItem::Blank,
+    HelpItem::Section("hop editor (host form, ProxyJump field)"),
+    HelpItem::Entry {
+        key: "a",
+        desc: "Add a saved host (fuzzy picker; routes already in use first, replacing all hops)",
+    },
+    HelpItem::Entry {
+        key: "r",
+        desc: "Add a raw [user@]host[:port] hop (validated as you type)",
+    },
+    HelpItem::Entry {
+        key: "Enter",
+        desc: "Replace the selected hop",
+    },
+    HelpItem::Entry {
+        key: "d",
+        desc: "Remove the selected hop",
+    },
+    HelpItem::Entry {
+        key: "Ctrl+\u{2191}\u{2193}",
+        desc: "Move the selected hop",
+    },
+    HelpItem::Entry {
+        key: "n",
+        desc: "Direct: store none, overriding an inherited jump",
+    },
+    HelpItem::Entry {
+        key: "X",
+        desc: "Clear the own value so the host inherits again",
+    },
+    HelpItem::Entry {
+        key: "t",
+        desc: "Test the chain; Esc cancels. Never blocks saving",
     },
     HelpItem::Blank,
     HelpItem::Section("search & tags"),
