@@ -51,6 +51,15 @@ jobs:
       - name: Install libdbus (Linux keyring backend)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      # The oracle tests run a real sshd on loopback and feed `map --dot` to
+      # Graphviz. With CI set they fail when either tool is missing instead of
+      # skipping silently.
+      - name: Install sshd and Graphviz (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y openssh-server graphviz
+      - name: Install Graphviz (macOS)
+        if: runner.os == 'macOS'
+        run: brew install graphviz
       - name: Build
         run: cargo build --all-targets
       - name: Run tests
