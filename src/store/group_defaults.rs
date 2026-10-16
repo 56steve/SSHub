@@ -301,15 +301,22 @@ impl LauncherStore {
                 .or(r.username)
                 .or_else(|| r.identity.and_then(|i| i.username));
             let port = raw.port.unwrap_or(r.port);
-            out.push(
-                crate::map::RawHop {
-                    user,
-                    ipv6: hop.address.contains(':'),
-                    host: hop.address.clone(),
-                    port: (port != DEFAULT_PORT || hop.address.contains(':')).then_some(port),
-                }
-                .label(),
-            );
+            let label = crate::map::RawHop {
+                user,
+                ipv6: hop.address.contains(':'),
+                host: hop.address.clone(),
+                port: (port != DEFAULT_PORT || hop.address.contains(':')).then_some(port),
+            }
+            .label();
+            // The address and user come from the database, which imports write
+            // verbatim: a comma would add a second hop, a second `@` or
+            // whitespace is no host. Anything that is not one valid hop stays as
+            // the token was written, so ssh meets the same text as before.
+            if crate::map::hops::validate_raw(&label).is_ok() {
+                out.push(label);
+            } else {
+                out.push(token.to_string());
+            }
         }
         Ok(out.join(","))
     }

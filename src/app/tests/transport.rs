@@ -235,3 +235,32 @@ pub(crate) fn a_bad_stored_jump_hop_is_a_notice_not_an_error_that_ends_the_tui()
     let notice = app.host_notice.clone().unwrap_or_default();
     assert!(notice.contains("not a valid"), "{notice}");
 }
+
+#[test]
+pub(crate) fn an_expanded_hop_never_injects_a_second_hop_from_the_database() {
+    // A saved hop whose stored address is `evil,other` would, written verbatim
+    // into `-J`, add a second jump host. The token stays as the user wrote it.
+    let store = test_store();
+    for (name, addr, user) in [
+        ("comma", "evil,other", None),
+        ("space", "a b", None),
+        ("at", "10.0.0.1", Some("a@b")),
+        ("fine", "10.0.0.7", Some("ops")),
+    ] {
+        let mut h = NewHost::launcher(name, addr);
+        h.username = user.map(String::from);
+        store.create_host(&h).unwrap();
+    }
+    for bad in ["comma", "space", "at"] {
+        let mut db = NewHost::launcher(format!("db-{bad}"), "10.0.0.5");
+        db.proxy_jump = Some(bad.into());
+        let managed = store.create_host(&db).unwrap();
+        let r = store.resolve_connection(&managed).unwrap();
+        assert_eq!(r.jump_argv.as_deref(), Some(bad), "{bad} stays as written");
+    }
+    let mut db = NewHost::launcher("db-fine", "10.0.0.5");
+    db.proxy_jump = Some("fine".into());
+    let managed = store.create_host(&db).unwrap();
+    let r = store.resolve_connection(&managed).unwrap();
+    assert_eq!(r.jump_argv.as_deref(), Some("ops@10.0.0.7"));
+}
