@@ -203,9 +203,19 @@ mod tests {
     }
 
     /// Tokens some ssh takes that this parser still refuses, on purpose: an
-    /// empty port (`h:`) is a typo here, not a hop, and OpenSSH only began to
-    /// refuse shell metacharacters in a `-J` user or host in 9.6.
-    const STRICTER: &[&str] = &["h:", "h;id", "h$(id)", "u;x@h"];
+    /// empty port (`h:`) is a typo here, not a hop.
+    const STRICTER: &[&str] = &["h:"];
+
+    /// What older OpenSSH hands to its shell or to its own option parser, and
+    /// newer OpenSSH (9.6 and later) refuses: whitespace, shell metacharacters,
+    /// a leading `-`. Refusing these is the point, whatever the local ssh does.
+    fn unsafe_for_older_ssh(token: &str) -> bool {
+        token
+            .chars()
+            .any(|c| c.is_whitespace() || "\"$&'()/;<>\\`{|}".contains(c))
+            || token.starts_with('-')
+            || token.split('@').any(|p| p.starts_with('-'))
+    }
 
     #[test]
     fn oracle_a_token_we_accept_is_a_token_ssh_dash_j_accepts() {
@@ -250,7 +260,7 @@ mod tests {
             assert!(!ours || theirs, "we accept {token:?}, ssh -J refuses it");
             // ...and refuse only what ssh refuses, bar the deliberate cases.
             assert!(
-                ours || !theirs || STRICTER.contains(&token),
+                ours || !theirs || STRICTER.contains(&token) || unsafe_for_older_ssh(token),
                 "we refuse {token:?}, which ssh -J takes"
             );
         }
