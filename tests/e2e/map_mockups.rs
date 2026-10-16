@@ -2,9 +2,11 @@
 //!
 //! `fleet()` is the fictional fleet of the mockups (bastion-eu, jump-2,
 //! bastion-us, corp-gw, a raw hop, a proxy cmd host, a loop, 188 direct hosts).
-//! The key-row assertions below check what the mockups show; the ignored
-//! `dump_mockup_scenarios` test writes every state as a grid to the directory in
-//! `MAP_DUMP_DIR`, to compare with the `.txt` files by eye or `diff`.
+//! `mockup_key_rows_are_on_the_screen` renders every state and asserts that the
+//! key rows of each mockup (taken from the `.txt` file, whitespace collapsed)
+//! are on the real screen too; a needle that is not in the mockup file fails as
+//! well, so the list cannot drift from the files. With `MAP_DUMP_DIR` set the
+//! test also writes each state as a grid, to `diff` against the `.txt` files.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -411,39 +413,107 @@ fn dump(name: &str, lines: &[String]) {
     std::fs::write(format!("{dir}/{name}.txt"), lines.join("\n") + "\n").unwrap();
 }
 
+/// Rows with runs of blanks collapsed, so a column shifted by the fixture does
+/// not matter, only the words and glyphs and their order.
+fn collapsed(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
+/// Every needle is a row fragment of `docs/network-map/mockups/<mockup>.txt`
+/// and of the screen.
+fn check(name: &str, mockup: &str, screen: &[String], needles: &[&str]) {
+    dump(name, screen);
+    let path = format!(
+        "{}/docs/network-map/mockups/{mockup}.txt",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let file: Vec<String> = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    let (file, screen_rows) = (collapsed(&file), collapsed(screen));
+    for needle in needles {
+        assert!(
+            file.iter().any(|l| l.contains(needle)),
+            "{mockup}: {needle:?} is not in the mockup file"
+        );
+        assert!(
+            screen_rows.iter().any(|l| l.contains(needle)),
+            "{name}: {needle:?} is not on the screen:\n{}",
+            screen.join("\n")
+        );
+    }
+}
+
+const FOOTER_D01: &str = "↑↓ row ←→ along the path ↵ connect / filter B blast o tunnel lens u use as jump t test ␣ fold e edit y copy cmd ? help q quit";
+const LEGEND_EDGE: &str = "─▸ jump edge ┈┈ \"hosts behind\" leader Σ all hosts behind, any depth";
+
 #[test]
-#[ignore = "writes the mockup scenarios to MAP_DUMP_DIR for comparison"]
-fn dump_mockup_scenarios() {
+fn mockup_key_rows_are_on_the_screen() {
     let size = (160, 45);
-    let render = |app: &App, name: &str| dump(name, &grid(app, size.0, size.1));
+    let render = |app: &App| grid(app, size.0, size.1);
+    let tree = "─ map ─ hops as a tree · hosts as glyphs behind their last hop";
 
     // D01 default, D02 selected glyph, D03 blast, D04 filter, D05 tunnel lens.
     let mut f = fleet(188, true);
     to_map(&mut f.app);
-    render(&f.app, "D01Default");
+    check("D01Default", "D01Default", &render(&f.app), &[tree, "─ path ribbon ─ bastion-eu", FOOTER_D01, "→ walks right along the row: hop → its glyphs, one host per step. ↵ connects to bastion-eu.", "─ legend ─", "─ node ─ bastion-eu", "Shift+Z expand into one glyph strip per group (a health board)", LEGEND_EDGE]);
     down(&mut f.app, 1);
     f.app.handle_key(key(KeyCode::Right)).unwrap();
     f.app.handle_key(key(KeyCode::Right)).unwrap();
-    render(&f.app, "D02SelectedDetail");
+    check(
+        "D02SelectedDetail",
+        "D02SelectedDetail",
+        &render(&f.app),
+        &[
+            tree,
+            FOOTER_D01,
+            LEGEND_EDGE,
+            "├─▸● bastion-us 88ms",
+            "Shift+Z expand into one glyph strip per group (a health board)",
+        ],
+    );
 
     let mut f = fleet(188, true);
     to_map(&mut f.app);
     press(&mut f.app, 'B');
-    render(&f.app, "D03BlastRadius");
+    check(
+        "D03BlastRadius",
+        "D03BlastRadius",
+        &render(&f.app),
+        &[
+            "─ path ribbon ─ bastion-eu",
+            "B blast off Esc clear n/N next dependent b broadcast to these y copy list ? help",
+            "─ blast radius ─ bastion-eu",
+            LEGEND_EDGE,
+        ],
+    );
 
     let mut f = fleet(188, true);
     to_map(&mut f.app);
     press(&mut f.app, '/');
     type_str(&mut f.app, "tag:db");
     f.app.handle_key(key(KeyCode::Enter)).unwrap();
-    render(&f.app, "D04Filter");
+    check(
+        "D04Filter",
+        "D04Filter",
+        &render(&f.app),
+        &[
+            "─ map ─ filter · tag:db",
+            "┆raw┆ ‹proxy cmd› ┄┄ ↻ ══ cycle ◇ reused hop",
+        ],
+    );
 
     let mut f = fleet(188, true);
     to_map(&mut f.app);
     down(&mut f.app, 1);
     f.app.handle_key(key(KeyCode::Right)).unwrap();
     press(&mut f.app, 'o');
-    render(&f.app, "D05TunnelLens");
+    check("D05TunnelLens", "D05TunnelLens", &render(&f.app), &["─ map ─ tunnel lens · ⇄ on hops and hosts that carry a tunnel", "╘══↻ loop-a ═════════════════▸↻ loop-b ══▸ loop-a ┈┈┈┈┈┈ lab ·· cycle · not connectable 2", "─ tunnels ─ 5", LEGEND_EDGE]);
 
     // D06: the cursor on the loop row.
     let mut f = fleet(188, true);
@@ -460,14 +530,31 @@ fn dump_mockup_scenarios() {
         }
         down(&mut f.app, 1);
     }
-    render(&f.app, "D06EdgeCases");
+    check("D06EdgeCases", "D06EdgeCases", &render(&f.app), &[tree, "─ path ribbon ─ loop-a · cycle", "Not connectable. Clear ProxyJump on loop-a or loop-b, then t test. ↵ opens the hop editor."]);
 
     // D07 empty, D14 direct-only expanded (Shift+Z).
     let mut f = fleet(214, false);
     to_map(&mut f.app);
-    render(&f.app, "D07Empty");
+    check(
+        "D07Empty",
+        "D07Empty",
+        &render(&f.app),
+        &[
+            tree,
+            "All 214 hosts are reached directly, so there is no hop to hang them behind.",
+            "A row appears when a host, its group, or ~/.ssh/config sets a ProxyJump.",
+            "u on a host: route other hosts through it (fastest first edge)",
+            "Shift+Z show the 214 direct hosts as a per-group health board",
+            "e edit host G groups u use as jump Shift+Z show direct hosts 1 hosts ? help q quit",
+        ],
+    );
     press(&mut f.app, 'Z');
-    render(&f.app, "D14DirectOnlyExpanded");
+    check(
+        "D14DirectOnlyExpanded",
+        "D14DirectOnlyExpanded",
+        &render(&f.app),
+        &["Shift+Z collapse direct ␣ fold ↵ connect / filter ? help"],
+    );
 
     // D09 at 100x30.
     let mut f = fleet(188, true);
@@ -476,19 +563,36 @@ fn dump_mockup_scenarios() {
     down(&mut f.app, 1);
     f.app.handle_key(key(KeyCode::Right)).unwrap();
     f.app.handle_key(key(KeyCode::Right)).unwrap();
-    dump("D09Narrow100x30", &grid(&f.app, 100, 30));
+    check(
+        "D09Narrow100x30",
+        "D09Narrow100x30",
+        &grid(&f.app, 100, 30),
+        &[
+            "you hop 1 hop 2 hosts behind this hop · one glyph each Σ",
+            "↑↓ row ←→ path ↵ connect / filter B blast o lens ? help",
+            "├─▸● bastion-us ─────┬┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈ us ●●● 4",
+        ],
+    );
 
     // D08: 212 jump hosts, 1,840 hosts, clustered.
     let mut f = big_fleet();
     to_map(&mut f.app);
-    render(&f.app, "D08ManyJumpHosts");
+    check("D08ManyJumpHosts", "D08ManyJumpHosts", &render(&f.app), &["you hop 1 · clusters hop 2 hosts behind · one glyph each Σ", "␣ open/close cluster → into cluster Shift+Z fold all / reveal B blast ↵ connect ? help"]);
 
     // D04 while the filter line is still open (the mockup's moment).
     let mut f = fleet(188, true);
     to_map(&mut f.app);
     press(&mut f.app, '/');
     type_str(&mut f.app, "tag:db");
-    render(&f.app, "D04FilterTyping");
+    check(
+        "D04FilterTyping",
+        "D04Filter",
+        &render(&f.app),
+        &[
+            "/ tag:db▏ 5 hosts match · rows without a match are hidden, hops above kept",
+            "type filter Tab complete ↵ keep Esc clear # tags ? help",
+        ],
+    );
 
     // D10 the hop editor with an inherited chain, D11 with the picker open.
     let mut f = fleet(10, true);
@@ -496,13 +600,27 @@ fn dump_mockup_scenarios() {
     set_group_jump(&f.app, "db", Some("jump-2"));
     f.app.reload_hosts().unwrap();
     open_form(&mut f.app, "db-9");
-    render(&f.app, "D10Inherited");
+    check(
+        "D10Inherited",
+        "D10Inherited",
+        &render(&f.app),
+        &["inherited from group \"prod/db\" · add a hop to override"],
+    );
     let mut f = fleet(10, true);
     add_db9(&mut f.app);
     open_form(&mut f.app, "db-9");
     f.app.host_form.as_mut().unwrap().proxy_jump = "bastion-eu,jump-2".into();
     press(&mut f.app, 'a');
-    render(&f.app, "D11PickerOpen");
+    check(
+        "D11PickerOpen",
+        "D11PickerOpen",
+        &render(&f.app),
+        &[
+            "↑↓ choose ↵ add hop / use route End raw hop Esc close",
+            "path ◉ you ━▶ ● bastion-eu ━▶ ● jump-2 ━▶ db-9",
+            "reuse a route (replaces all hops)",
+        ],
+    );
 
     // D12: a map test in progress (a socket that never answers).
     let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -516,7 +634,12 @@ fn dump_mockup_scenarios() {
     press(&mut f.app, 't');
     std::thread::sleep(std::time::Duration::from_millis(300));
     f.app.poll_test_run();
-    render(&f.app, "D12InProgress");
+    check(
+        "D12InProgress",
+        "D12InProgress",
+        &render(&f.app),
+        &["─ steps ─", LEGEND_EDGE],
+    );
 
     // D13: the hop editor after a failed test of its chain.
     let closed = {
@@ -536,7 +659,7 @@ fn dump_mockup_scenarios() {
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    render(&f.app, "D13Failed");
+    check("D13Failed", "D13Failed", &render(&f.app), &["✗ failed"]);
 
     // The same default screen at 155x31, the maintainer's terminal.
     let mut f = fleet(188, true);
@@ -547,5 +670,4 @@ fn dump_mockup_scenarios() {
     f.app.terminal_area = ratatui::layout::Rect::new(0, 0, 155, 31);
     press(&mut f.app, '6');
     dump("T155x31-empty", &grid(&f.app, 155, 31));
-    let _ = text;
 }
