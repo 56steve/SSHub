@@ -55,6 +55,13 @@ pub struct ResolvedConnection {
     pub forward_agent: bool,
 }
 
+/// The `-J` value of an unresolved jump: dropped when any hop is not a valid
+/// `[user@]host[:port]`, so a stored `-o...` can never reach `ssh -J` through a
+/// fallback that skipped [`LauncherStore::resolve_connection`].
+fn valid_jump(jump: Option<String>) -> Option<String> {
+    jump.filter(|j| crate::map::hops::jump_is_valid(j))
+}
+
 impl ResolvedConnection {
     /// The global defaults: the end of every resolution walk.
     pub fn global_default() -> Self {
@@ -94,7 +101,7 @@ impl ResolvedConnection {
             identity: None,
             username,
             port: port.unwrap_or(DEFAULT_PORT),
-            jump_argv: proxy_jump.clone(),
+            jump_argv: valid_jump(proxy_jump.clone()),
             proxy_jump,
             transport: transport.unwrap_or_default(),
             forward_agent: forward_agent.unwrap_or(false),
@@ -111,7 +118,7 @@ impl ResolvedConnection {
             username: host.username.clone(),
             port: host.port.unwrap_or(DEFAULT_PORT),
             proxy_jump: host.proxy_jump.clone(),
-            jump_argv: host.proxy_jump.clone(),
+            jump_argv: valid_jump(host.proxy_jump.clone()),
             transport: host.transport.unwrap_or_default(),
             forward_agent: host.forward_agent.unwrap_or(false),
         }
@@ -400,6 +407,49 @@ mod tests {
         let created = store.create_host(&nh).unwrap();
         store.set_host_groups(created.id, &[group.id]).unwrap();
         store.get_host(created.id).unwrap().unwrap()
+    }
+
+    #[test]
+    fn unresolved_fallbacks_never_carry_an_invalid_hop_into_the_jump_argv() {
+        // `from_stored` and the group walk are what tunnels, broadcast, SFTP,
+        // the CLI and export fall back to when resolving fails.
+        let store = memory();
+        let mut nh = NewHost::launcher("h", "10.0.0.1");
+        nh.proxy_jump = Some("good,-oProxyCommand=id".into());
+        let host = store.create_host(&nh).unwrap();
+        let r = ResolvedConnection::from_stored(&host);
+        assert_eq!(r.jump_argv, None);
+        assert_eq!(
+            r.proxy_jump.as_deref(),
+            Some("good,-oProxyCommand=id"),
+            "display keeps it"
+        );
+
+        let group = HostGroup {
+            id: 1,
+            name: "g".into(),
+            sort_order: 0,
+            default_identity_id: None,
+            default_username: None,
+            default_port: None,
+            default_proxy_jump: Some("-oLocalCommand=id".into()),
+            default_transport: None,
+            default_forward_agent: None,
+            parent_id: None,
+            reserved: false,
+        };
+        assert_eq!(
+            ResolvedConnection::for_group_chain(&[group]).jump_argv,
+            None
+        );
+
+        let mut ok = NewHost::launcher("ok", "10.0.0.2");
+        ok.proxy_jump = Some("bastion,ops@10.0.0.9:2222".into());
+        let ok = store.create_host(&ok).unwrap();
+        assert_eq!(
+            ResolvedConnection::from_stored(&ok).jump_argv.as_deref(),
+            Some("bastion,ops@10.0.0.9:2222")
+        );
     }
 
     #[test]

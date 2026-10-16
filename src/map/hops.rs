@@ -50,6 +50,13 @@ pub fn token_issue(token: &str) -> Option<&'static str> {
         .then_some("not a valid [user@]host[:port]")
 }
 
+/// Whether every hop of a stored ProxyJump value is one valid
+/// `[user@]host[:port]` (`none` and empty are valid). Anything else must not
+/// be handed to `ssh -J`.
+pub fn jump_is_valid(value: &str) -> bool {
+    split(value).iter().all(|t| token_issue(t).is_none())
+}
+
 /// A route already in use: the hops from you to some hop, and how many hosts
 /// sit behind its last hop at any depth.
 #[derive(Debug, Clone, PartialEq, Eq)]
