@@ -1179,3 +1179,43 @@ fn map_without_dot_is_a_usage_error() {
         .code(2)
         .stderr(predicate::str::contains("--dot"));
 }
+
+#[test]
+fn tunnel_start_for_a_host_with_an_invalid_proxy_jump_fails_instead_of_running_direct() {
+    let d = dir();
+    sshub(d.path())
+        .args([
+            "host",
+            "add",
+            "--name",
+            "victim",
+            "--address",
+            "10.0.0.9",
+            "--proxy-jump",
+            "bad hop",
+        ])
+        .assert()
+        .success();
+    sshub(d.path())
+        .args([
+            "tunnel",
+            "create",
+            "--host",
+            "victim",
+            "--type",
+            "local",
+            "--local-port",
+            "18081",
+            "--remote-host",
+            "localhost",
+            "--remote-port",
+            "80",
+        ])
+        .assert()
+        .success();
+    sshub(d.path())
+        .args(["tunnel", "start", "1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not a valid"));
+}

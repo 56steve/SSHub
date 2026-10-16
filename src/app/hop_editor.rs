@@ -769,9 +769,7 @@ fn apply(tokens: &mut Vec<String>, target: PickTarget, token: String) -> usize {
 
 /// Why a form's ProxyJump cannot be saved, if it cannot.
 pub(crate) fn proxy_jump_problem(value: &str) -> Option<String> {
-    hops::split(value)
-        .into_iter()
-        .find_map(|t| hops::token_issue(&t).map(|e| format!("ProxyJump hop {t:?}: {e}")))
+    hops::jump_problem(value)
 }
 
 /// Glyph and short text of one test step.

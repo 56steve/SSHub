@@ -50,6 +50,13 @@ pub fn token_issue(token: &str) -> Option<&'static str> {
         .then_some("not a valid [user@]host[:port]")
 }
 
+/// Why a stored ProxyJump value must not reach `ssh -J`, if it must not.
+pub fn jump_problem(value: &str) -> Option<String> {
+    split(value)
+        .into_iter()
+        .find_map(|t| token_issue(&t).map(|e| format!("ProxyJump hop {t:?}: {e}")))
+}
+
 /// Whether every hop of a stored ProxyJump value is one valid
 /// `[user@]host[:port]` (`none` and empty are valid). Anything else must not
 /// be handed to `ssh -J`.

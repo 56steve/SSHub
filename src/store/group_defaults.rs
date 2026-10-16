@@ -51,6 +51,10 @@ pub struct ResolvedConnection {
     /// host (one `ssh` cannot look up in `~/.ssh/config`) is expanded to
     /// `user@address:port`. Display, export and the form keep `proxy_jump`.
     pub jump_argv: Option<String>,
+    /// Set when `proxy_jump` is not valid hops (so `jump_argv` is `None`): a
+    /// caller that runs ssh must refuse with this message. Connecting without
+    /// the jump would bypass the bastion the user configured.
+    pub jump_error: Option<String>,
     pub transport: SessionTransport,
     pub forward_agent: bool,
 }
@@ -72,6 +76,7 @@ impl ResolvedConnection {
             port: DEFAULT_PORT,
             proxy_jump: None,
             jump_argv: None,
+            jump_error: None,
             transport: SessionTransport::Ssh,
             forward_agent: false,
         }
@@ -102,6 +107,9 @@ impl ResolvedConnection {
             username,
             port: port.unwrap_or(DEFAULT_PORT),
             jump_argv: valid_jump(proxy_jump.clone()),
+            jump_error: proxy_jump
+                .as_deref()
+                .and_then(crate::map::hops::jump_problem),
             proxy_jump,
             transport: transport.unwrap_or_default(),
             forward_agent: forward_agent.unwrap_or(false),
@@ -119,6 +127,10 @@ impl ResolvedConnection {
             port: host.port.unwrap_or(DEFAULT_PORT),
             proxy_jump: host.proxy_jump.clone(),
             jump_argv: valid_jump(host.proxy_jump.clone()),
+            jump_error: host
+                .proxy_jump
+                .as_deref()
+                .and_then(crate::map::hops::jump_problem),
             transport: host.transport.unwrap_or_default(),
             forward_agent: host.forward_agent.unwrap_or(false),
         }
@@ -226,7 +238,10 @@ impl LauncherStore {
         let mut out = self.resolve_fields(host)?;
         out.jump_argv = match out.proxy_jump.as_deref() {
             Some(jump) => match self.expand_jump(jump) {
-                Ok(j) => Some(j),
+                Ok(j) => {
+                    out.jump_error = None;
+                    Some(j)
+                }
                 // An ssh_config row connects by alias: ssh reads the config, the
                 // stored jump is only shown, so a bad token must not stop it.
                 Err(_) if host.source == crate::store::HostSource::SshConfig => {
@@ -259,6 +274,11 @@ impl LauncherStore {
         }
         if host.proxy_jump.is_some() {
             out.proxy_jump = host.proxy_jump.clone();
+            out.jump_argv = valid_jump(out.proxy_jump.clone());
+            out.jump_error = out
+                .proxy_jump
+                .as_deref()
+                .and_then(crate::map::hops::jump_problem);
         }
         if let Some(t) = host.transport {
             out.transport = t;
@@ -479,6 +499,7 @@ mod tests {
                 port: 2222,
                 proxy_jump: Some("direct-bastion".into()),
                 jump_argv: Some("direct-bastion".into()),
+                jump_error: None,
                 transport: SessionTransport::Ssh,
                 forward_agent: false,
             }
@@ -505,6 +526,7 @@ mod tests {
                 port: 2200,
                 proxy_jump: Some("prod-bastion".into()),
                 jump_argv: Some("prod-bastion".into()),
+                jump_error: None,
                 transport: SessionTransport::Mosh,
                 forward_agent: true,
             }
@@ -555,6 +577,7 @@ mod tests {
                 // nearest setter is the root
                 proxy_jump: Some("root-bastion".into()),
                 jump_argv: Some("root-bastion".into()),
+                jump_error: None,
                 // nearest setter is the parent
                 transport: SessionTransport::Ssh,
                 // nearest setter is the root

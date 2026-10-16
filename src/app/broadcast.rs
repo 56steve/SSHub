@@ -229,6 +229,7 @@ impl App {
             preview_selected: 0,
             edit_targets: false,
         });
+        self.host_notice = None;
         self.resolve_broadcast_candidates();
         let any = self
             .broadcast_setup
@@ -238,7 +239,9 @@ impl App {
             self.mode = AppMode::BroadcastCommand;
         } else {
             self.broadcast_setup = None;
-            self.host_notice = Some("No saved hosts to broadcast to.".into());
+            if self.host_notice.is_none() {
+                self.host_notice = Some("No saved hosts to broadcast to.".into());
+            }
         }
     }
 
@@ -293,6 +296,9 @@ impl App {
 
         let pw_store = self.password_store.as_ref();
         let launcher = &self.store;
+        // Hosts whose ProxyJump cannot be resolved are left out: running ssh
+        // without the jump would reach them directly, which nobody asked for.
+        let mut refused: Vec<String> = Vec::new();
         let candidates: Vec<BroadcastCandidate> = self
             .hosts
             .iter()
@@ -309,9 +315,14 @@ impl App {
                 // Resolve a stored password/passphrase now (same path connect +
                 // detect use); threaded into the run so password hosts auth via
                 // SSH_ASKPASS instead of failing under BatchMode.
-                let effective = entry
-                    .managed()
-                    .and_then(|m| launcher.resolve_connection(m).ok());
+                let effective = match entry.managed().map(|m| launcher.resolve_connection(m)) {
+                    Some(Ok(r)) => Some(r),
+                    Some(Err(e)) => {
+                        refused.push(format!("{}: {e:#}", entry.name()));
+                        return None;
+                    }
+                    None => None,
+                };
                 let secret = resolve_pending_secret(
                     entry,
                     effective.as_ref().and_then(|r| r.identity.as_ref()),
@@ -331,6 +342,9 @@ impl App {
             })
             .collect();
 
+        if !refused.is_empty() {
+            self.host_notice = Some(format!("Not included: {}", refused.join("; ")));
+        }
         if let Some(s) = self.broadcast_setup.as_mut() {
             s.candidates = candidates;
             s.target_label = target_label;

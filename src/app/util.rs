@@ -428,7 +428,14 @@ pub(crate) fn sftp_ssh_host(
         // stored values rather than refusing the session.
         HostEntry::Managed(m) => match store.resolve_connection(m) {
             Ok(resolved) => resolved_to_ssh_host(m, &resolved),
-            Err(_) => entry.ssh_host(),
+            Err(_) => {
+                // Not resolvable (a ProxyJump that is not valid hops): keep a
+                // jump on the host so the "no SFTP over ProxyJump" refusal
+                // fires, rather than a direct session past the bastion.
+                let mut h = entry.ssh_host();
+                h.proxy_jump = Some(m.proxy_jump.clone().unwrap_or_else(|| "(invalid)".into()));
+                h
+            }
         },
         HostEntry::Legacy { .. } => entry.ssh_host(),
     };

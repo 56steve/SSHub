@@ -393,6 +393,7 @@ mod tests {
             port: 2222,
             proxy_jump: Some("bastion".into()),
             jump_argv: Some("bastion".into()),
+            jump_error: None,
             transport: crate::session_transport::SessionTransport::Mosh,
             forward_agent: true,
         }

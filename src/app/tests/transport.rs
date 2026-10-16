@@ -264,3 +264,49 @@ pub(crate) fn an_expanded_hop_never_injects_a_second_hop_from_the_database() {
     let r = store.resolve_connection(&managed).unwrap();
     assert_eq!(r.jump_argv.as_deref(), Some("ops@10.0.0.7"));
 }
+
+#[test]
+pub(crate) fn fallback_paths_refuse_a_host_with_an_invalid_jump_instead_of_going_direct() {
+    // Tunnel, broadcast and SFTP all fall back past `resolve_connection` when
+    // it fails. None of them may then connect without the jump.
+    let mut app = crate::app::tests::test_app(vec![]);
+    let mut nh = NewHost::launcher("victim", "10.0.0.9");
+    nh.proxy_jump = Some("-oProxyCommand=id".into());
+    let victim = app.store().create_host(&nh).unwrap();
+    let tunnel_id = app
+        .store()
+        .create_tunnel(&crate::store::NewTunnel {
+            host_id: Some(victim.id),
+            tunnel_type: crate::store::TunnelType::Local,
+            local_port: 18080,
+            remote_host: "localhost".into(),
+            remote_port: 80,
+            label: None,
+            auto_connect: false,
+        })
+        .unwrap();
+    app.reload_hosts().unwrap();
+    app.reload_tunnels().unwrap();
+
+    // Tunnel: refused with the reason, nothing running.
+    app.toggle_tunnel_by_id(tunnel_id).unwrap();
+    let notice = app.tunnel_notice.clone().unwrap_or_default();
+    assert!(notice.contains("not a valid"), "{notice}");
+    assert!(!app.tunnel_manager.is_running(tunnel_id));
+    assert!(!app.tunnel_manager.has_child(tunnel_id));
+
+    // Broadcast: the host is left out, and the user is told why.
+    app.open_broadcast_for_hosts(vec![victim.id], "victim only".into());
+    assert!(app.broadcast_setup.is_none(), "no candidates, no wizard");
+    let notice = app.host_notice.clone().unwrap_or_default();
+    assert!(
+        notice.contains("victim") && notice.contains("not a valid"),
+        "{notice}"
+    );
+
+    // SFTP: the host keeps a jump, so the existing no-SFTP-over-ProxyJump
+    // refusal fires instead of a direct session.
+    let entry = HostEntry::from_managed(victim);
+    let host = crate::app::sftp_ssh_host(app.resolver.as_ref(), app.store(), &entry);
+    assert!(host.proxy_jump.is_some());
+}
