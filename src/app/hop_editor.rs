@@ -913,8 +913,9 @@ impl App {
             {
                 r.text.push(c);
             }
-            KeyCode::Enter => match hops::validate_raw(&r.text) {
-                Ok(token) => {
+            // A bad token stays in the box, which says why under the input.
+            KeyCode::Enter => {
+                if let Ok(token) = hops::validate_raw(&r.text) {
                     let target = r.target;
                     let host_part = crate::map::parse_raw_hop(&token).map(|h| h.host);
                     let edited = self
@@ -934,9 +935,7 @@ impl App {
                     }
                     self.hop_editor.raw = None;
                 }
-                // The box shows why, under the input.
-                Err(_) => {}
-            },
+            }
             _ => {}
         }
     }

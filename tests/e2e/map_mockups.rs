@@ -389,10 +389,6 @@ pub fn grid(app: &App, w: u16, h: u16) -> Vec<String> {
         .collect()
 }
 
-fn text(app: &App, w: u16, h: u16) -> String {
-    grid(app, w, h).join("\n")
-}
-
 fn to_map(app: &mut App) {
     app.terminal_area = ratatui::layout::Rect::new(0, 0, 160, 45);
     press(app, '6');

@@ -202,9 +202,10 @@ mod tests {
             .is_ok_and(|o| o.status.success())
     }
 
-    /// Tokens ssh takes that this parser still refuses, on purpose: an empty
-    /// port (`h:`) is a typo here, not a hop.
-    const STRICTER: &[&str] = &["h:"];
+    /// Tokens some ssh takes that this parser still refuses, on purpose: an
+    /// empty port (`h:`) is a typo here, not a hop, and OpenSSH only began to
+    /// refuse shell metacharacters in a `-J` user or host in 9.6.
+    const STRICTER: &[&str] = &["h:", "h;id", "h$(id)", "u;x@h"];
 
     #[test]
     fn oracle_a_token_we_accept_is_a_token_ssh_dash_j_accepts() {
