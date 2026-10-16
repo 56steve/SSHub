@@ -236,7 +236,7 @@ mod tests {
             &map.chains[i],
             crate::map::Chain::Hops(h) if matches!(h[0].kind, crate::map::HopKind::Invalid(_))
         ));
-        // And connect refuses it outright.
+        // And connect refuses it: an error the app turns into a notice.
         let m = store.get_host_by_name("db-3").unwrap().unwrap();
         assert!(store.resolve_connection(&m).is_err());
     }

@@ -29,7 +29,15 @@ impl App {
         // prompts; an identity-level credential at `Enter passphrase for …`.
         // The interactive askpass channel delivers it only to its prompt class.
         let resolved = match entry.managed() {
-            Some(m) => Some(self.store.resolve_connection(m)?),
+            Some(m) => match self.store.resolve_connection(m) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    // A stored ProxyJump hop ssh must not be handed: tell the
+                    // user, never unwind the event loop.
+                    self.host_notice = Some(format!("{}: {e:#}", entry.name()));
+                    return Ok(());
+                }
+            },
             None => None,
         };
         let effective_identity = resolved.as_ref().and_then(|r| r.identity.as_ref());

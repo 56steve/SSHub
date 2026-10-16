@@ -192,3 +192,46 @@ pub(crate) fn connect_argv_expands_launcher_only_jump_hops() {
         );
     }
 }
+
+#[test]
+pub(crate) fn a_bad_stored_jump_hop_is_a_notice_not_an_error_that_ends_the_tui() {
+    // Regression: `resolve_connection` refuses a hop ssh must not be handed
+    // (leading `-`); connect and push key propagated that with `?` to the event
+    // loop, which ended the TUI. The user must get a notice instead.
+    let mut app = crate::app::tests::test_app(vec![]);
+    let mut nh = NewHost::launcher("victim", "10.0.0.9");
+    nh.proxy_jump = Some("-oProxyCommand=id".into());
+    let managed = app.store().create_host(&nh).unwrap();
+    app.reload_hosts().unwrap();
+    let entry = HostEntry::from_managed(managed);
+
+    assert!(app.connect_host_entry(entry.clone()).is_ok());
+    assert!(app.sessions.is_empty(), "nothing may be spawned");
+    let notice = app.host_notice.clone().unwrap_or_default();
+    assert!(
+        notice.contains("victim") && notice.contains("not a valid"),
+        "{notice}"
+    );
+
+    // Push key: a real (generated) key so the failure is the hop, not the key.
+    app.host_notice = None;
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("id");
+    assert!(std::process::Command::new("ssh-keygen")
+        .args(["-t", "ed25519", "-N", "", "-q", "-f", key.to_str().unwrap()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false));
+    let identity = crate::store::Identity {
+        id: 1,
+        name: "k".into(),
+        username: None,
+        private_key: Some(key),
+        certificate: None,
+        has_password: false,
+    };
+    assert!(app.push_public_key_to_host(&entry, &identity).is_ok());
+    assert!(app.sessions.is_empty());
+    let notice = app.host_notice.clone().unwrap_or_default();
+    assert!(notice.contains("not a valid"), "{notice}");
+}

@@ -218,7 +218,15 @@ impl LauncherStore {
     pub fn resolve_connection(&self, host: &ManagedHost) -> Result<ResolvedConnection> {
         let mut out = self.resolve_fields(host)?;
         out.jump_argv = match out.proxy_jump.as_deref() {
-            Some(jump) => Some(self.expand_jump(jump)?),
+            Some(jump) => match self.expand_jump(jump) {
+                Ok(j) => Some(j),
+                // An ssh_config row connects by alias: ssh reads the config, the
+                // stored jump is only shown, so a bad token must not stop it.
+                Err(_) if host.source == crate::store::HostSource::SshConfig => {
+                    Some(jump.to_string())
+                }
+                Err(e) => return Err(e),
+            },
             None => None,
         };
         Ok(out)

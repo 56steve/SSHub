@@ -235,7 +235,13 @@ impl App {
         );
 
         let resolved = match entry.managed() {
-            Some(m) => Some(self.store.resolve_connection(m)?),
+            Some(m) => match self.store.resolve_connection(m) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    self.host_notice = Some(format!("{}: {e:#}", entry.name()));
+                    return Ok(());
+                }
+            },
             None => None,
         };
         let effective_identity = resolved.as_ref().and_then(|r| r.identity.as_ref());
