@@ -5,6 +5,7 @@ pub mod field_picker;
 pub mod group_form;
 pub mod group_manage;
 pub mod help;
+pub mod hop_lines;
 pub mod host_form;
 pub mod keybind_editor;
 pub mod keychain;

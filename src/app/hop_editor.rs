@@ -1,0 +1,697 @@
+//! The structured hop editor of the host form (issue #79).
+//!
+//! The stored value stays the comma separated ProxyJump string in
+//! `HostFormEdit::proxy_jump`; this module is a list view and editor on top of
+//! it. While the ProxyJump field is focused it takes the keys the list needs
+//! (`a r d n X Enter`, `Ctrl+Up/Down`, arrows inside the list) and lets the
+//! rest of the form (Tab, Esc, save) through.
+
+use std::collections::HashSet;
+
+use nucleo::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo::{Config, Matcher, Utf32Str};
+
+use super::*;
+use crate::map::hops::{self, Route};
+use crate::map::{Map, MapHost};
+
+/// Where a picked hop goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickTarget {
+    /// Insert after hop `n` (or first, when the list is empty).
+    Add(usize),
+    /// Replace hop `n`.
+    Replace(usize),
+}
+
+/// One saved host offered by the picker.
+#[derive(Debug, Clone)]
+pub struct PickHost {
+    pub name: String,
+    pub group: String,
+    /// `via bastion-eu` or `direct`.
+    pub via: String,
+    pub forbidden: bool,
+}
+
+/// A selectable picker row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickRow {
+    /// Index into [`HopPicker::routes`].
+    Route(usize),
+    /// Index into [`HopPicker::hosts`].
+    Host(usize),
+    /// `+ raw user@host:port`.
+    Raw,
+}
+
+pub struct HopPicker {
+    pub query: String,
+    pub selected: usize,
+    pub target: PickTarget,
+    pub routes: Vec<Route>,
+    pub hosts: Vec<PickHost>,
+    pub forbidden: HashSet<String>,
+}
+
+impl HopPicker {
+    /// Rows that survive the query: routes first, then hosts, then raw.
+    pub fn rows(&self) -> Vec<PickRow> {
+        let q = self.query.trim();
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let pattern = Pattern::parse(q, CaseMatching::Smart, Normalization::Smart);
+        let mut buf = Vec::new();
+        let mut fits = |text: &str| {
+            q.is_empty() || {
+                buf.clear();
+                pattern
+                    .score(Utf32Str::new(text, &mut buf), &mut matcher)
+                    .is_some()
+            }
+        };
+        let mut rows = Vec::new();
+        for (i, r) in self.routes.iter().enumerate() {
+            if fits(&r.tokens.join(" ")) {
+                rows.push(PickRow::Route(i));
+            }
+        }
+        for (i, h) in self.hosts.iter().enumerate() {
+            if fits(&format!("{} {}", h.name, h.group)) {
+                rows.push(PickRow::Host(i));
+            }
+        }
+        rows.push(PickRow::Raw);
+        rows
+    }
+}
+
+/// Raw hop input line.
+pub struct RawInput {
+    pub text: String,
+    pub target: PickTarget,
+}
+
+/// Editor state; the value itself lives in the form.
+#[derive(Default)]
+pub struct HopEditor {
+    pub selected: usize,
+    pub picker: Option<HopPicker>,
+    pub raw: Option<RawInput>,
+    /// Last refusal or result, shown under the list.
+    pub notice: Option<String>,
+}
+
+/// One row of the hop list as drawn.
+pub struct HopRowView {
+    pub status: char,
+    pub name: String,
+    pub source: String,
+    pub addr: String,
+    pub latency: String,
+    pub selected: bool,
+    pub dim: bool,
+}
+
+/// One row of the picker as drawn.
+pub struct PickRowView {
+    pub text: String,
+    pub selected: bool,
+    pub dim: bool,
+    pub section: Option<&'static str>,
+}
+
+/// Everything the form screen needs to draw the hop section.
+pub struct HopSection {
+    pub title: String,
+    pub rows: Vec<HopRowView>,
+    pub empty_text: Option<String>,
+    pub hint: String,
+    pub saves_as: String,
+    pub path: String,
+    pub picker: Option<PickerView>,
+    pub raw: Option<(String, Option<&'static str>)>,
+    pub notice: Option<String>,
+    /// The chain is inherited, so the list is shown muted.
+    pub inherited: bool,
+}
+
+pub struct PickerView {
+    pub title: String,
+    pub query: String,
+    pub rows: Vec<PickRowView>,
+    pub preview: String,
+}
+
+/// Rows of the picker shown at once.
+const PICKER_ROWS: usize = 9;
+
+impl App {
+    /// The hop-editor section for the open host form, `None` when the
+    /// ProxyJump field is not focused or the form is read-only (ssh_config).
+    pub fn hop_section(&self, inherited: &crate::store::ResolvedConnection) -> Option<HopSection> {
+        let form = self.host_form.as_ref()?;
+        if form.field != HostFormField::ProxyJump || form.metadata_only {
+            return None;
+        }
+        let own = form.proxy_jump.trim();
+        let direct = hops::split(own).is_empty() && !own.is_empty();
+        let using_inherited = own.is_empty();
+        let inh = inherited
+            .proxy_jump
+            .clone()
+            .filter(|j| !hops::split(j).is_empty());
+        let tokens: Vec<String> = if using_inherited {
+            inh.as_deref().map(hops::split).unwrap_or_default()
+        } else {
+            hops::split(own)
+        };
+        let sel = self.hop_editor.selected.min(tokens.len().saturating_sub(1));
+        let rows: Vec<HopRowView> = tokens
+            .iter()
+            .enumerate()
+            .map(|(i, t)| self.hop_row(t, i == sel && !using_inherited, using_inherited))
+            .collect();
+        let title = if direct {
+            "hops \u{2500} direct (overrides inherited)".to_string()
+        } else if using_inherited {
+            "hops \u{2500} inherited".to_string()
+        } else {
+            "hops \u{2500} own value".to_string()
+        };
+        let empty_text = rows.is_empty().then(|| {
+            if direct {
+                "direct: no jump, even though a group sets one".to_string()
+            } else {
+                "no jump".to_string()
+            }
+        });
+        let hint = if using_inherited {
+            "a saved host  r raw  n direct  (either replaces the inherited chain)".to_string()
+        } else {
+            "a saved host  r raw \u{2502} \u{21b5} replace  d remove  Ctrl+\u{2191}\u{2193} move  n direct  X clear \u{2192} inherit"
+                .to_string()
+        };
+        let saves_as = if direct {
+            "saves as: none".to_string()
+        } else if using_inherited {
+            match &inh {
+                Some(j) => format!("saves as: (empty) \u{2192} inherits \"{j}\""),
+                None => "saves as: (empty)".to_string(),
+            }
+        } else {
+            format!("saves as: {}", hops::join(&tokens))
+        };
+        let path = {
+            let mut p = String::from("\u{25c9} you");
+            for t in &tokens {
+                p.push_str(&format!(" \u{2501}\u{25b6} {}", self.hop_glyph(t)));
+                p.push(' ');
+                p.push_str(t);
+            }
+            let me = if form.name.trim().is_empty() {
+                "(this host)"
+            } else {
+                form.name.trim()
+            };
+            p.push_str(&format!(" \u{2501}\u{25b6} {me}"));
+            p
+        };
+        let picker = self
+            .hop_editor
+            .picker
+            .as_ref()
+            .map(|p| self.picker_view(p, &tokens));
+        let raw = self.hop_editor.raw.as_ref().map(|r| {
+            let err = match hops::validate_raw(&r.text) {
+                Ok(_) => None,
+                Err(e) if r.text.trim().is_empty() => {
+                    let _ = e;
+                    None
+                }
+                Err(e) => Some(e),
+            };
+            (r.text.clone(), err)
+        });
+        Some(HopSection {
+            title,
+            rows,
+            empty_text,
+            hint,
+            saves_as,
+            path,
+            picker,
+            raw,
+            notice: self.hop_editor.notice.clone(),
+            inherited: using_inherited,
+        })
+    }
+
+    /// Status glyph of a hop token from the local ping readings (unknown when
+    /// there is none: ICMP from here says nothing about a hop's SSH).
+    fn hop_glyph(&self, token: &str) -> char {
+        let samples = self.ping_data.get(token).map(Vec::as_slice);
+        match crate::ping::classify_ping(samples) {
+            crate::ping::PingClass::Online | crate::ping::PingClass::Slow => '\u{25cf}',
+            _ => '\u{25cb}',
+        }
+    }
+
+    fn hop_row(&self, token: &str, selected: bool, dim: bool) -> HopRowView {
+        let saved = self.hosts.iter().find(|h| h.name() == token);
+        let samples = self.ping_data.get(token).map(Vec::as_slice);
+        let latency = match (crate::ping::classify_ping(samples), samples) {
+            (crate::ping::PingClass::Online | crate::ping::PingClass::Slow, Some(s)) => {
+                s.last().map(|m| format!("{m}ms")).unwrap_or_default()
+            }
+            _ => String::new(),
+        };
+        match saved {
+            Some(h) => {
+                let (user, addr, port) = match h.managed() {
+                    Some(m) => (m.username.clone(), m.address.clone(), m.port),
+                    None => (None, h.name().to_string(), None),
+                };
+                let user = user.map(|u| format!("{u}@")).unwrap_or_default();
+                let group = h
+                    .managed()
+                    .and_then(|m| m.group.as_ref())
+                    .map(|g| g.name.as_str())
+                    .unwrap_or("_ungrouped");
+                let kind = if h.source() == HostSource::SshConfig {
+                    "ssh_config"
+                } else {
+                    "saved"
+                };
+                HopRowView {
+                    status: self.hop_glyph(token),
+                    name: token.to_string(),
+                    source: format!("{kind} \u{b7} {group}"),
+                    addr: format!("{user}{addr}:{}", port.unwrap_or(22)),
+                    latency,
+                    selected,
+                    dim,
+                }
+            }
+            None => HopRowView {
+                status: ' ',
+                name: format!("\u{2506}{token}\u{2506}"),
+                source: "raw \u{b7} not a saved host".into(),
+                addr: String::new(),
+                latency: String::new(),
+                selected,
+                dim,
+            },
+        }
+    }
+
+    fn picker_view(&self, p: &HopPicker, tokens: &[String]) -> PickerView {
+        let rows = p.rows();
+        let first = p.selected.saturating_sub(PICKER_ROWS - 1);
+        let mut out = Vec::new();
+        let mut last_section = None;
+        for (i, r) in rows.iter().enumerate().skip(first).take(PICKER_ROWS) {
+            let section = match r {
+                PickRow::Route(_) => "reuse a route (replaces all hops)",
+                PickRow::Host(_) => "one saved host",
+                PickRow::Raw => "",
+            };
+            let sect = (last_section != Some(section) && !section.is_empty()).then_some(section);
+            last_section = Some(section);
+            let (text, dim) = match r {
+                PickRow::Route(ri) => {
+                    let route = &p.routes[*ri];
+                    let loops = route.tokens.iter().any(|t| p.forbidden.contains(t));
+                    (
+                        format!(
+                            "you \u{203a} {}   {} hosts{}",
+                            route.tokens.join(" \u{203a} "),
+                            route.hosts,
+                            if loops { "   \u{21bb} would loop" } else { "" }
+                        ),
+                        loops,
+                    )
+                }
+                PickRow::Host(hi) => {
+                    let h = &p.hosts[*hi];
+                    (
+                        format!(
+                            "{:<16} {:<10} {}{}",
+                            crate::tui::text::ellipsize(&h.name, 16),
+                            crate::tui::text::ellipsize(&h.group, 10),
+                            h.via,
+                            if h.forbidden {
+                                "   \u{21bb} would loop"
+                            } else {
+                                ""
+                            }
+                        ),
+                        h.forbidden,
+                    )
+                }
+                PickRow::Raw => ("+ raw user@host:port   End".to_string(), false),
+            };
+            out.push(PickRowView {
+                text,
+                selected: i == p.selected,
+                dim,
+                section: sect,
+            });
+        }
+        let preview = match rows.get(p.selected) {
+            Some(PickRow::Route(ri)) => format!(
+                "preview  you \u{2501}\u{25b6} {}",
+                p.routes[*ri].tokens.join(" \u{2501}\u{25b6} ")
+            ),
+            Some(PickRow::Host(hi)) => {
+                let mut t = tokens.to_vec();
+                apply(&mut t, p.target, p.hosts[*hi].name.clone());
+                format!(
+                    "preview  you \u{2501}\u{25b6} {}",
+                    t.join(" \u{2501}\u{25b6} ")
+                )
+            }
+            _ => String::new(),
+        };
+        let title = match p.target {
+            PickTarget::Add(n) if tokens.is_empty() => {
+                let _ = n;
+                "add the first hop".to_string()
+            }
+            PickTarget::Add(n) => format!("add hop after {}", n + 1),
+            PickTarget::Replace(n) => format!("replace hop {}", n + 1),
+        };
+        PickerView {
+            title,
+            query: p.query.clone(),
+            rows: out,
+            preview,
+        }
+    }
+
+    fn form_hops(&self) -> Vec<String> {
+        self.host_form
+            .as_ref()
+            .map(|f| hops::split(&f.proxy_jump))
+            .unwrap_or_default()
+    }
+
+    fn set_form_hops(&mut self, tokens: &[String]) {
+        if let Some(f) = self.host_form.as_mut() {
+            f.proxy_jump = hops::join(tokens);
+            f.cursor = f.proxy_jump.chars().count();
+            f.dirty = true;
+        }
+    }
+
+    /// Handle a key for the hop editor. `true` = consumed; `false` lets the
+    /// form's own navigation and save keys act.
+    pub(crate) fn handle_key_hop_editor(&mut self, key: &KeyEvent) -> bool {
+        let Some(form) = self.host_form.as_ref() else {
+            return false;
+        };
+        if form.field != HostFormField::ProxyJump || form.metadata_only {
+            return false;
+        }
+        if self.hop_editor.picker.is_some() {
+            self.hop_picker_key(key);
+            return true;
+        }
+        if self.hop_editor.raw.is_some() {
+            self.hop_raw_key(key);
+            return true;
+        }
+        self.hop_editor.notice = None;
+        let tokens = self.form_hops();
+        let len = tokens.len();
+        let sel = self.hop_editor.selected.min(len.saturating_sub(1));
+        let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+        match key.code {
+            _ if self.is_save_key(key) => return false,
+            KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => return false,
+            KeyCode::Up if key.modifiers.is_empty() => {
+                if sel > 0 {
+                    self.hop_editor.selected = sel - 1;
+                    return true;
+                }
+                return false;
+            }
+            KeyCode::Down if key.modifiers.is_empty() => {
+                if sel + 1 < len {
+                    self.hop_editor.selected = sel + 1;
+                    return true;
+                }
+                return false;
+            }
+            _ if self.is_action(KeyAction::MoveHostUp, key) => {
+                if sel > 0 {
+                    let mut t = tokens;
+                    t.swap(sel, sel - 1);
+                    self.set_form_hops(&t);
+                    self.hop_editor.selected = sel - 1;
+                }
+            }
+            _ if self.is_action(KeyAction::MoveHostDown, key) => {
+                if sel + 1 < len {
+                    let mut t = tokens;
+                    t.swap(sel, sel + 1);
+                    self.set_form_hops(&t);
+                    self.hop_editor.selected = sel + 1;
+                }
+            }
+            KeyCode::Enter if plain => {
+                let target = if len == 0 {
+                    PickTarget::Add(0)
+                } else {
+                    PickTarget::Replace(sel)
+                };
+                self.open_hop_picker(target);
+            }
+            KeyCode::Char('a') if plain => {
+                let target = PickTarget::Add(if len == 0 { 0 } else { sel });
+                self.open_hop_picker(target);
+            }
+            KeyCode::Char('r') if plain => {
+                let target = PickTarget::Add(if len == 0 { 0 } else { sel });
+                self.hop_editor.raw = Some(RawInput {
+                    text: String::new(),
+                    target,
+                });
+            }
+            KeyCode::Char('d') | KeyCode::Delete if plain => {
+                if len > 0 {
+                    let mut t = tokens;
+                    t.remove(sel);
+                    self.set_form_hops(&t);
+                    self.hop_editor.selected = sel.saturating_sub(1);
+                }
+            }
+            KeyCode::Char('n') if plain => {
+                if let Some(f) = self.host_form.as_mut() {
+                    f.proxy_jump = "none".into();
+                    f.dirty = true;
+                }
+                self.hop_editor.selected = 0;
+            }
+            KeyCode::Char('X') => {
+                if let Some(f) = self.host_form.as_mut() {
+                    f.proxy_jump.clear();
+                    f.dirty = true;
+                }
+                self.hop_editor.selected = 0;
+            }
+            // Typing must not leak into the value: the list is the editor.
+            KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Left | KeyCode::Right => {}
+            _ => return false,
+        }
+        true
+    }
+
+    fn open_hop_picker(&mut self, target: PickTarget) {
+        let edited = self
+            .host_form
+            .as_ref()
+            .map(|f| f.name.trim().to_string())
+            .unwrap_or_default();
+        let map_hosts: Vec<MapHost> =
+            crate::map::collect_hosts(&self.store, &self.hosts).unwrap_or_default();
+        let map = Map::build(map_hosts);
+        let forbidden = hops::forbidden_hops(&map, &edited);
+        let routes = hops::routes_in_use(&map, 8);
+        let mut hosts: Vec<PickHost> = map
+            .hosts
+            .iter()
+            .enumerate()
+            .map(|(i, h)| PickHost {
+                name: h.name.clone(),
+                group: h.group.clone(),
+                via: match &map.chains[i] {
+                    crate::map::Chain::Hops(c) if !c.is_empty() => format!(
+                        "via {}",
+                        c.iter()
+                            .map(|hop| map.key_label(&hop.key()))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ),
+                    _ => "direct".into(),
+                },
+                forbidden: forbidden.contains(&h.name),
+            })
+            .collect();
+        hosts.sort_by(|a, b| a.forbidden.cmp(&b.forbidden).then(a.name.cmp(&b.name)));
+        self.hop_editor.picker = Some(HopPicker {
+            query: String::new(),
+            selected: 0,
+            target,
+            routes,
+            hosts,
+            forbidden,
+        });
+    }
+
+    fn hop_picker_key(&mut self, key: &KeyEvent) {
+        let Some(p) = self.hop_editor.picker.as_mut() else {
+            return;
+        };
+        let rows = p.rows();
+        match key.code {
+            KeyCode::Esc => self.hop_editor.picker = None,
+            KeyCode::Up => p.selected = p.selected.saturating_sub(1),
+            KeyCode::Down => p.selected = (p.selected + 1).min(rows.len() - 1),
+            KeyCode::End => p.selected = rows.len() - 1,
+            KeyCode::Backspace => {
+                p.query.pop();
+                p.selected = 0;
+            }
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                p.query.push(c);
+                p.selected = 0;
+            }
+            KeyCode::Enter => {
+                let row = rows.get(p.selected).copied();
+                self.hop_picker_choose(row);
+            }
+            _ => {}
+        }
+        if let Some(p) = self.hop_editor.picker.as_mut() {
+            p.selected = p.selected.min(p.rows().len() - 1);
+        }
+    }
+
+    fn hop_picker_choose(&mut self, row: Option<PickRow>) {
+        let Some(p) = self.hop_editor.picker.as_ref() else {
+            return;
+        };
+        let target = p.target;
+        match row {
+            Some(PickRow::Route(i)) => {
+                let route = p.routes[i].tokens.clone();
+                if route.iter().any(|t| p.forbidden.contains(t)) {
+                    self.hop_editor.notice = Some("that route would loop back to this host".into());
+                    return;
+                }
+                self.set_form_hops(&route);
+                self.hop_editor.selected = route.len().saturating_sub(1);
+            }
+            Some(PickRow::Host(i)) => {
+                let h = &p.hosts[i];
+                if h.forbidden {
+                    self.hop_editor.notice =
+                        Some(format!("{} would loop back to this host", h.name));
+                    return;
+                }
+                let name = h.name.clone();
+                self.insert_hop(target, name);
+            }
+            Some(PickRow::Raw) => {
+                let text = p.query.clone();
+                self.hop_editor.picker = None;
+                self.hop_editor.raw = Some(RawInput { text, target });
+                return;
+            }
+            None => return,
+        }
+        self.hop_editor.picker = None;
+    }
+
+    fn hop_raw_key(&mut self, key: &KeyEvent) {
+        let Some(r) = self.hop_editor.raw.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.hop_editor.raw = None,
+            KeyCode::Backspace => {
+                r.text.pop();
+            }
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                r.text.push(c);
+            }
+            KeyCode::Enter => match hops::validate_raw(&r.text) {
+                Ok(token) => {
+                    let target = r.target;
+                    let host_part = crate::map::parse_raw_hop(&token).map(|h| h.host);
+                    let loops = host_part.is_some_and(|h| {
+                        let edited = self
+                            .host_form
+                            .as_ref()
+                            .map(|f| f.name.trim().to_string())
+                            .unwrap_or_default();
+                        let map = Map::build(
+                            crate::map::collect_hosts(&self.store, &self.hosts).unwrap_or_default(),
+                        );
+                        hops::forbidden_hops(&map, &edited).contains(&h)
+                    });
+                    if loops {
+                        self.hop_editor.notice =
+                            Some("that host would loop back to this host".into());
+                    } else {
+                        self.insert_hop(target, token);
+                    }
+                    self.hop_editor.raw = None;
+                }
+                Err(e) => self.hop_editor.notice = Some(e.to_string()),
+            },
+            _ => {}
+        }
+    }
+
+    fn insert_hop(&mut self, target: PickTarget, token: String) {
+        let mut t = self.form_hops();
+        let at = apply(&mut t, target, token);
+        self.set_form_hops(&t);
+        self.hop_editor.selected = at;
+    }
+}
+
+/// Put `token` into `tokens` per `target`; returns the index it now sits at.
+fn apply(tokens: &mut Vec<String>, target: PickTarget, token: String) -> usize {
+    match target {
+        PickTarget::Replace(n) if n < tokens.len() => {
+            tokens[n] = token;
+            n
+        }
+        PickTarget::Add(n) => {
+            let at = if tokens.is_empty() {
+                0
+            } else {
+                (n + 1).min(tokens.len())
+            };
+            tokens.insert(at, token);
+            at
+        }
+        PickTarget::Replace(_) => {
+            tokens.push(token);
+            tokens.len() - 1
+        }
+    }
+}
+
+/// Why a form's ProxyJump cannot be saved, if it cannot.
+pub(crate) fn proxy_jump_problem(value: &str) -> Option<String> {
+    hops::split(value)
+        .into_iter()
+        .find_map(|t| hops::token_issue(&t).map(|e| format!("ProxyJump hop {t:?}: {e}")))
+}

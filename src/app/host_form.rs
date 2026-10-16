@@ -140,6 +140,7 @@ impl App {
         };
 
         self.host_form = Some(form);
+        self.hop_editor = hop_editor::HopEditor::default();
         self.mode = AppMode::HostForm;
         Ok(())
     }
@@ -248,6 +249,11 @@ impl App {
         }
         if name.is_empty() {
             self.host_notice = Some("Name (alias) is required".into());
+            self.host_form = Some(form);
+            return Ok(());
+        }
+        if let Some(problem) = hop_editor::proxy_jump_problem(&form.proxy_jump) {
+            self.host_notice = Some(problem);
             self.host_form = Some(form);
             return Ok(());
         }
@@ -390,6 +396,10 @@ impl App {
             return Ok(());
         }
 
+        if self.handle_key_hop_editor(&key) {
+            return Ok(());
+        }
+
         match key.code {
             KeyCode::Esc => self.cancel_host_form()?,
             _ if self.is_save_key(&key) => self.save_host_form()?,
@@ -455,6 +465,8 @@ impl App {
         };
         // Walking away re-masks (see the identity form).
         form.password_revealed = false;
+        self.hop_editor.picker = None;
+        self.hop_editor.raw = None;
         form.field = form.field.next();
         form.cursor = text_input::char_len(form.active_field());
     }
@@ -465,6 +477,8 @@ impl App {
         };
         // Walking away re-masks (see the identity form).
         form.password_revealed = false;
+        self.hop_editor.picker = None;
+        self.hop_editor.raw = None;
         form.field = form.field.prev();
         form.cursor = text_input::char_len(form.active_field());
     }

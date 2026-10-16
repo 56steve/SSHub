@@ -68,6 +68,30 @@ pub enum Tint {
     Warn,
 }
 
+/// `u`: pick the host that should use a hop as its jump.
+pub struct UsePicker {
+    /// The jump token to apply (host name or `user@host:port`).
+    pub token: String,
+    pub query: String,
+    pub selected: usize,
+    /// Add after the host's own hops instead of replacing them.
+    pub append: bool,
+    /// (host index, would loop), in name order.
+    pub hosts: Vec<(usize, bool)>,
+}
+
+impl UsePicker {
+    /// Hosts that survive the query.
+    pub fn visible(&self, map: &Map) -> Vec<(usize, bool)> {
+        let q = self.query.to_lowercase();
+        self.hosts
+            .iter()
+            .copied()
+            .filter(|(h, _)| q.is_empty() || map.hosts[*h].name.to_lowercase().contains(&q))
+            .collect()
+    }
+}
+
 /// `#` tag picker: feeds `tag:` terms into the filter.
 pub struct TagPicker {
     pub items: Vec<String>,
@@ -93,6 +117,7 @@ pub struct MapView {
     /// The filter line owns the keyboard.
     pub editing: bool,
     pub picker: Option<TagPicker>,
+    pub use_picker: Option<UsePicker>,
     /// Clusters (by name) whose hops are listed.
     pub open_clusters: HashSet<String>,
     /// Extra hops revealed per open cluster, in [`REVEAL_STEP`] units.
@@ -122,6 +147,7 @@ impl MapView {
             query: String::new(),
             editing: false,
             picker: None,
+            use_picker: None,
             open_clusters,
             revealed: HashMap::new(),
             direct_open: false,
@@ -618,6 +644,13 @@ impl App {
     pub(crate) fn handle_key_map(&mut self, key: KeyEvent) -> Result<()> {
         self.host_notice = None;
 
+        if self
+            .map_view
+            .as_ref()
+            .is_some_and(|v| v.use_picker.is_some())
+        {
+            return self.handle_key_map_use(key);
+        }
         // The tag picker and the filter line own the keyboard while open.
         if self.map_view.as_ref().is_some_and(|v| v.picker.is_some()) {
             return self.handle_key_map_picker(key);
@@ -687,6 +720,7 @@ impl App {
                 }
             }
             _ if self.is_action(KeyAction::MapToggleTunnel, &key) => self.map_toggle_tunnel()?,
+            _ if self.is_action(KeyAction::MapUseAsJump, &key) => self.map_open_use_picker(),
             _ if self.is_action(KeyAction::MapFold, &key) => {
                 if let Some(v) = self.map_view.as_mut() {
                     v.toggle_fold();
@@ -761,6 +795,140 @@ impl App {
             _ if up => p.selected = p.selected.saturating_sub(1),
             _ => {}
         }
+        Ok(())
+    }
+
+    /// `u`: pick the host that will use the hop under the cursor as its jump.
+    fn map_open_use_picker(&mut self) {
+        let Some(v) = self.map_view.as_mut() else {
+            return;
+        };
+        let hop = match v.selection() {
+            Some(MapSel::Hop(n)) => v.map.nodes[n].key.clone(),
+            Some(MapSel::Host(h)) => HopKey::Saved(h),
+            _ => {
+                self.host_notice = Some("put the cursor on a hop or host to use as a jump".into());
+                return;
+            }
+        };
+        let (token, own) = match &hop {
+            HopKey::Saved(h) => (v.map.hosts[*h].name.clone(), Some(*h)),
+            HopKey::Raw(r) => (r.label(), None),
+            _ => {
+                self.host_notice = Some("that hop cannot be used as a jump".into());
+                return;
+            }
+        };
+        // A loop forms when the hop itself depends on the target.
+        let depends: HashSet<usize> = own
+            .map(|h| {
+                v.map
+                    .chain_keys(h)
+                    .into_iter()
+                    .filter_map(|k| match k {
+                        HopKey::Saved(s) => Some(s),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut hosts: Vec<(usize, bool)> = (0..v.map.hosts.len())
+            .map(|h| (h, Some(h) == own || depends.contains(&h)))
+            .collect();
+        hosts.sort_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then_with(|| v.map.hosts[a.0].name.cmp(&v.map.hosts[b.0].name))
+        });
+        v.use_picker = Some(UsePicker {
+            token,
+            query: String::new(),
+            selected: 0,
+            append: false,
+            hosts,
+        });
+    }
+
+    fn handle_key_map_use(&mut self, key: KeyEvent) -> Result<()> {
+        let down = self.is_action(KeyAction::MapDown, &key);
+        let up = self.is_action(KeyAction::MapUp, &key);
+        let Some(v) = self.map_view.as_mut() else {
+            return Ok(());
+        };
+        let Some(p) = v.use_picker.as_mut() else {
+            return Ok(());
+        };
+        let visible = p.visible(&v.map);
+        match key.code {
+            KeyCode::Esc => v.use_picker = None,
+            KeyCode::Tab => p.append = !p.append,
+            KeyCode::Backspace => {
+                p.query.pop();
+                p.selected = 0;
+            }
+            KeyCode::Enter => {
+                let Some(&(h, loops)) = visible.get(p.selected) else {
+                    return Ok(());
+                };
+                if loops {
+                    self.host_notice = Some("that would loop: the hop depends on this host".into());
+                    return Ok(());
+                }
+                let token = p.token.clone();
+                let append = p.append;
+                v.use_picker = None;
+                self.map_apply_jump(h, &token, append)?;
+            }
+            _ if down => p.selected = (p.selected + 1).min(visible.len().saturating_sub(1)),
+            _ if up => p.selected = p.selected.saturating_sub(1),
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                p.query.push(c);
+                p.selected = 0;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Set (or append) `token` as a hop of host `h`'s own ProxyJump and save.
+    fn map_apply_jump(&mut self, h: usize, token: &str, append: bool) -> Result<()> {
+        let Some(entry) = self.hosts.get(h) else {
+            return Ok(());
+        };
+        let Some(m) = entry.managed().filter(|m| m.source == HostSource::Launcher) else {
+            self.host_notice =
+                Some("ssh_config hosts are read-only here: edit ~/.ssh/config".into());
+            return Ok(());
+        };
+        let (id, name) = (m.id, m.name.clone());
+        let mut tokens = if append {
+            // Start from what the host uses now, own or inherited.
+            let eff = self
+                .store
+                .resolve_connection(m)
+                .ok()
+                .and_then(|r| r.proxy_jump)
+                .unwrap_or_default();
+            crate::map::hops::split(&eff)
+        } else {
+            Vec::new()
+        };
+        if !tokens.iter().any(|t| t == token) {
+            tokens.push(token.to_string());
+        }
+        let value = crate::map::hops::join(&tokens);
+        self.store.update_host(
+            id,
+            &crate::store::HostUpdate {
+                proxy_jump: Some(Some(value.clone())),
+                ..Default::default()
+            },
+        )?;
+        self.reload_hosts()?;
+        self.host_notice = Some(format!("{name}: ProxyJump = {value}"));
         Ok(())
     }
 

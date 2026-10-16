@@ -1190,6 +1190,14 @@ fn map_footer(app: &App) -> Vec<(String, &'static str)> {
             ("Esc".into(), "close"),
         ];
     }
+    if v.use_picker.is_some() {
+        return vec![
+            ("type".into(), "host"),
+            ("\u{21b5}".into(), "apply"),
+            ("Tab".into(), "replace/append"),
+            ("Esc".into(), "close"),
+        ];
+    }
     if v.editing {
         return vec![
             ("type".into(), "filter"),
@@ -1230,6 +1238,7 @@ fn map_footer(app: &App) -> Vec<(String, &'static str)> {
             (key(crate::config::KeyAction::TagFilter), "tags"),
             (key(crate::config::KeyAction::MapBlast), "blast"),
             (key(crate::config::KeyAction::MapTunnelLens), "tunnels"),
+            (key(crate::config::KeyAction::MapUseAsJump), "use as jump"),
             ("e".into(), "edit"),
             ("?".into(), "help"),
             ("q".into(), "quit"),
@@ -2008,6 +2017,7 @@ fn render_form_popup(frame: &mut Frame, app: &App, kind: FormKind) {
                     &app.groups,
                     &app.identities,
                     &inherited,
+                    app.hop_section(&inherited).as_ref(),
                     &app.save_key_label(),
                     &app.config.keybinds.secret_field_hints(),
                     &app.copy_field_hint(),

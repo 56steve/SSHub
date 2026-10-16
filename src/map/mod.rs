@@ -19,6 +19,7 @@
 
 mod build;
 mod filter;
+pub mod hops;
 
 pub use build::collect_hosts;
 pub use filter::MapFilter;

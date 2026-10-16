@@ -7,6 +7,7 @@ mod config_reload;
 mod connect_managed;
 mod first_run;
 mod group_crud;
+mod hop_editor;
 mod host_crud;
 mod host_detail;
 mod host_sort;

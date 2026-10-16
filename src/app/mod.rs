@@ -7,6 +7,7 @@ mod field_click;
 mod field_picker;
 pub(crate) mod ghost;
 mod groups;
+pub mod hop_editor;
 mod host_crud;
 mod host_detail;
 mod host_form;
@@ -496,6 +497,8 @@ pub struct App {
     /// The network map tab's model and cursor; `None` until the tab is first
     /// opened and after any host change while another tab is on screen.
     pub map_view: Option<network_map::MapView>,
+    /// The structured ProxyJump editor of the host form.
+    pub hop_editor: hop_editor::HopEditor,
     pub audit_scroll: usize,
     pub agent_info: Option<crate::ssh::agent::AgentInfo>,
     agent_info_updated: std::time::Instant,
@@ -1114,6 +1117,7 @@ impl App {
             audit_range: AuditRange::default(),
             audit_selected: 0,
             map_view: None,
+            hop_editor: hop_editor::HopEditor::default(),
             audit_scroll: 0,
             agent_info: None,
             agent_info_updated: std::time::Instant::now() - std::time::Duration::from_secs(60),

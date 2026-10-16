@@ -66,6 +66,7 @@ pub enum KeyAction {
     MapToggleTunnel,
     MapFold,
     MapFoldAll,
+    MapUseAsJump,
     IdentityColumnsInc,
     IdentityColumnsDec,
     AddToAgent,
@@ -118,7 +119,7 @@ pub enum KeyAction {
 
 impl KeyAction {
     /// All editable actions, in display order.
-    pub const ALL: [KeyAction; 105] = [
+    pub const ALL: [KeyAction; 106] = [
         KeyAction::Save,
         KeyAction::Quit,
         KeyAction::Help,
@@ -176,6 +177,7 @@ impl KeyAction {
         KeyAction::MapToggleTunnel,
         KeyAction::MapFold,
         KeyAction::MapFoldAll,
+        KeyAction::MapUseAsJump,
         KeyAction::IdentityColumnsInc,
         KeyAction::IdentityColumnsDec,
         KeyAction::AddToAgent,
@@ -285,6 +287,7 @@ impl KeyAction {
             KeyAction::MapToggleTunnel => "Map: start or stop the tunnel of the host",
             KeyAction::MapFold => "Map: fold or unfold the row",
             KeyAction::MapFoldAll => "Map: fold all clusters, or expand direct-only",
+            KeyAction::MapUseAsJump => "Map: use the hop as the jump of another host",
             KeyAction::IdentityColumnsInc => "More identity columns",
             KeyAction::IdentityColumnsDec => "Fewer identity columns",
             KeyAction::AddToAgent => "Add key to agent",
@@ -398,6 +401,7 @@ pub struct KeybindsConfig {
     pub map_toggle_tunnel: Vec<String>,
     pub map_fold: Vec<String>,
     pub map_fold_all: Vec<String>,
+    pub map_use_as_jump: Vec<String>,
     pub identity_columns_inc: Vec<String>,
     pub identity_columns_dec: Vec<String>,
     pub add_to_agent: Vec<String>,
@@ -508,6 +512,7 @@ impl Default for KeybindsConfig {
             map_toggle_tunnel: vec!["x".into()],
             map_fold: vec!["Space".into()],
             map_fold_all: vec!["Shift+Z".into()],
+            map_use_as_jump: vec!["u".into()],
             identity_columns_inc: vec!["]".into()],
             identity_columns_dec: vec!["[".into()],
             add_to_agent: vec!["p".into()],
@@ -723,6 +728,7 @@ impl KeybindsConfig {
             KeyAction::MapToggleTunnel => &self.map_toggle_tunnel,
             KeyAction::MapFold => &self.map_fold,
             KeyAction::MapFoldAll => &self.map_fold_all,
+            KeyAction::MapUseAsJump => &self.map_use_as_jump,
             KeyAction::IdentityColumnsInc => &self.identity_columns_inc,
             KeyAction::IdentityColumnsDec => &self.identity_columns_dec,
             KeyAction::AddToAgent => &self.add_to_agent,
@@ -833,6 +839,7 @@ impl KeybindsConfig {
             KeyAction::MapToggleTunnel => self.map_toggle_tunnel = binds,
             KeyAction::MapFold => self.map_fold = binds,
             KeyAction::MapFoldAll => self.map_fold_all = binds,
+            KeyAction::MapUseAsJump => self.map_use_as_jump = binds,
             KeyAction::IdentityColumnsInc => self.identity_columns_inc = binds,
             KeyAction::IdentityColumnsDec => self.identity_columns_dec = binds,
             KeyAction::AddToAgent => self.add_to_agent = binds,
