@@ -69,6 +69,7 @@ pub enum KeyAction {
     MapUseAsJump,
     MapTest,
     MapSshLog,
+    MapCopyCmd,
     IdentityColumnsInc,
     IdentityColumnsDec,
     AddToAgent,
@@ -121,7 +122,7 @@ pub enum KeyAction {
 
 impl KeyAction {
     /// All editable actions, in display order.
-    pub const ALL: [KeyAction; 108] = [
+    pub const ALL: [KeyAction; 109] = [
         KeyAction::Save,
         KeyAction::Quit,
         KeyAction::Help,
@@ -182,6 +183,7 @@ impl KeyAction {
         KeyAction::MapUseAsJump,
         KeyAction::MapTest,
         KeyAction::MapSshLog,
+        KeyAction::MapCopyCmd,
         KeyAction::IdentityColumnsInc,
         KeyAction::IdentityColumnsDec,
         KeyAction::AddToAgent,
@@ -294,6 +296,7 @@ impl KeyAction {
             KeyAction::MapUseAsJump => "Map: use the hop as the jump of another host",
             KeyAction::MapTest => "Map: test the selected path",
             KeyAction::MapSshLog => "Map: show the ssh log of the failed hop",
+            KeyAction::MapCopyCmd => "Map: copy the ssh -J command",
             KeyAction::IdentityColumnsInc => "More identity columns",
             KeyAction::IdentityColumnsDec => "Fewer identity columns",
             KeyAction::AddToAgent => "Add key to agent",
@@ -410,6 +413,7 @@ pub struct KeybindsConfig {
     pub map_use_as_jump: Vec<String>,
     pub map_test: Vec<String>,
     pub map_ssh_log: Vec<String>,
+    pub map_copy_cmd: Vec<String>,
     pub identity_columns_inc: Vec<String>,
     pub identity_columns_dec: Vec<String>,
     pub add_to_agent: Vec<String>,
@@ -523,6 +527,7 @@ impl Default for KeybindsConfig {
             map_use_as_jump: vec!["u".into()],
             map_test: vec!["t".into()],
             map_ssh_log: vec!["l".into()],
+            map_copy_cmd: vec!["y".into()],
             identity_columns_inc: vec!["]".into()],
             identity_columns_dec: vec!["[".into()],
             add_to_agent: vec!["p".into()],
@@ -741,6 +746,7 @@ impl KeybindsConfig {
             KeyAction::MapUseAsJump => &self.map_use_as_jump,
             KeyAction::MapTest => &self.map_test,
             KeyAction::MapSshLog => &self.map_ssh_log,
+            KeyAction::MapCopyCmd => &self.map_copy_cmd,
             KeyAction::IdentityColumnsInc => &self.identity_columns_inc,
             KeyAction::IdentityColumnsDec => &self.identity_columns_dec,
             KeyAction::AddToAgent => &self.add_to_agent,
@@ -854,6 +860,7 @@ impl KeybindsConfig {
             KeyAction::MapUseAsJump => self.map_use_as_jump = binds,
             KeyAction::MapTest => self.map_test = binds,
             KeyAction::MapSshLog => self.map_ssh_log = binds,
+            KeyAction::MapCopyCmd => self.map_copy_cmd = binds,
             KeyAction::IdentityColumnsInc => self.identity_columns_inc = binds,
             KeyAction::IdentityColumnsDec => self.identity_columns_dec = binds,
             KeyAction::AddToAgent => self.add_to_agent = binds,

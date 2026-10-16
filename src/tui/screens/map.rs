@@ -310,7 +310,9 @@ pub fn render_map(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let full = area.width >= 120 && area.height >= 36;
-    let (ribbon_h, bottom_h) = if full {
+    let (ribbon_h, bottom_h) = if view.zoomed {
+        (0, 0)
+    } else if full {
         (10, 6)
     } else if area.height >= 18 {
         (4, 0)
@@ -330,7 +332,8 @@ pub fn render_map(frame: &mut Frame, area: Rect, app: &App) {
         max_glyphs: max_glyphs(area.width),
         test: map_test(app, view.selection()),
     };
-    if area.width < 80 || area.height < 24 {
+    view.outline.set(area.width < 80 || area.height < 24);
+    if view.outline.get() {
         draw_outline(frame.buffer_mut(), area, &ctx);
         return;
     }
@@ -1978,14 +1981,14 @@ fn draw_facts(buf: &mut Buffer, inner: Rect, ctx: &Ctx, sel: Option<MapSel>) {
                     rows.push(("carries", format!("{} hosts behind this hop", node.sigma)));
                 }
             }
-            rows.push(("command", ssh_command(map, n_target(map, n))));
+            rows.push(("command", map.node_command(n)));
             if let HopKey::Saved(h) = node.key {
                 tunnel_rows(ctx, h, &mut rows);
             }
         }
         Some(MapSel::Host(h)) => {
             host_rows(h, &mut rows);
-            rows.push(("command", ssh_command(map, Some(h))));
+            rows.push(("command", map.ssh_command(h)));
             tunnel_rows(ctx, h, &mut rows);
         }
         Some(MapSel::Cycle(i)) => {
@@ -2034,39 +2037,6 @@ fn tunnel_rows(ctx: &Ctx, h: usize, rows: &mut Vec<(&'static str, String)>) {
             "tunnels",
             format!("\u{21c4}{} {} {state}", tunnel_letter(t.kind), t.summary),
         ));
-    }
-}
-
-fn n_target(map: &Map, node: usize) -> Option<usize> {
-    match map.nodes[node].key {
-        HopKey::Saved(h) | HopKey::ProxyCmd(h) => Some(h),
-        _ => None,
-    }
-}
-
-/// `ssh -J a,b target`, hop names as the map shows them.
-fn ssh_command(map: &Map, target: Option<usize>) -> String {
-    let Some(h) = target else {
-        return String::new();
-    };
-    match &map.chains[h] {
-        Chain::Hops(hops) if hops.is_empty() => format!("ssh {}", map.hosts[h].name),
-        Chain::Hops(hops) => {
-            let jump: Vec<String> = hops
-                .iter()
-                .filter_map(|hop| match &hop.kind {
-                    HopKind::Saved(s) => Some(map.hosts[*s].name.clone()),
-                    HopKind::Raw(r) => Some(r.label()),
-                    HopKind::ProxyCommand(_) | HopKind::Invalid(_) => None,
-                })
-                .collect();
-            if jump.is_empty() {
-                format!("ssh {}", map.hosts[h].name)
-            } else {
-                format!("ssh -J {} {}", jump.join(","), map.hosts[h].name)
-            }
-        }
-        Chain::Cycle(_) => "jump loop: not connectable".into(),
     }
 }
 

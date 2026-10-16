@@ -117,6 +117,11 @@ pub struct MapView {
     /// The filter line owns the keyboard.
     pub editing: bool,
     pub picker: Option<TagPicker>,
+    /// The map panel takes the whole body (no ribbon, legend or facts).
+    pub zoomed: bool,
+    /// Set by the renderer: the map is drawn as an outline, which has no room
+    /// for the pickers, so they do not open.
+    pub outline: std::cell::Cell<bool>,
     pub use_picker: Option<UsePicker>,
     /// Clusters (by name) whose hops are listed.
     pub open_clusters: HashSet<String>,
@@ -149,6 +154,8 @@ impl MapView {
             query: String::new(),
             editing: false,
             picker: None,
+            zoomed: false,
+            outline: std::cell::Cell::new(false),
             use_picker: None,
             open_clusters,
             revealed: HashMap::new(),
@@ -603,6 +610,7 @@ impl App {
         if let Some(old) = self.map_view.take() {
             view.row = old.row;
             view.pos = old.pos;
+            view.zoomed = old.zoomed;
             view.query = old.query;
             view.editing = old.editing;
             view.apply_filter();
@@ -686,6 +694,11 @@ impl App {
                 }
             }
             _ if self.is_action(KeyAction::TagFilter, &key) => {
+                if self.map_view.as_ref().is_some_and(|v| v.outline.get()) {
+                    self.host_notice =
+                        Some("the tag picker needs a bigger terminal (80x24)".into());
+                    return Ok(());
+                }
                 if let Some(v) = self.map_view.as_mut() {
                     let items = v.all_tags();
                     if items.is_empty() {
@@ -700,6 +713,10 @@ impl App {
                     return Ok(());
                 }
                 if let Some(v) = self.map_view.as_mut() {
+                    if v.zoomed {
+                        v.zoomed = false;
+                        return Ok(());
+                    }
                     // Lens first, then the filter.
                     if !matches!(v.lens, Lens::None) {
                         v.lens = Lens::None;
@@ -732,6 +749,13 @@ impl App {
             _ if self.is_action(KeyAction::MapToggleTunnel, &key) => self.map_toggle_tunnel()?,
             _ if self.is_action(KeyAction::MapUseAsJump, &key) => self.map_open_use_picker(),
             _ if self.is_action(KeyAction::MapTest, &key) => self.map_start_test(),
+            _ if self.is_action(KeyAction::MapCopyCmd, &key) => self.map_copy_command(),
+            _ if self.is_action(KeyAction::TogglePanelZoom, &key) => {
+                if let Some(v) = self.map_view.as_mut() {
+                    v.zoomed = !v.zoomed;
+                }
+            }
+            _ if self.is_action(KeyAction::AddHost, &key) => self.map_save_raw_hop()?,
             _ if self.is_action(KeyAction::KnownHosts, &key) => self.open_known_hosts(),
             _ if self.is_action(KeyAction::PushKey, &key) => self.map_push_key()?,
             _ if self.is_action(KeyAction::MapSshLog, &key) => self.map_show_ssh_log(),
@@ -817,6 +841,10 @@ impl App {
         let Some(v) = self.map_view.as_mut() else {
             return;
         };
+        if v.outline.get() {
+            self.host_notice = Some("use as jump needs a bigger terminal (80x24)".into());
+            return;
+        }
         let hop = match v.selection() {
             Some(MapSel::Hop(n)) => v.map.nodes[n].key.clone(),
             Some(MapSel::Host(h)) => HopKey::Saved(h),
@@ -1093,6 +1121,53 @@ impl App {
         self.active_tab = 0;
         self.focused_panel = PanelId::SshLog;
         self.panel_zoomed = true;
+    }
+
+    /// `y`: copy the `ssh -J ...` command of what the cursor is on.
+    fn map_copy_command(&mut self) {
+        let Some(v) = self.map_view.as_ref() else {
+            return;
+        };
+        let cmd = match v.selection() {
+            Some(MapSel::Host(h)) => v.map.ssh_command(h),
+            Some(MapSel::Hop(n)) => v.map.node_command(n),
+            _ => String::new(),
+        };
+        if cmd.is_empty() || cmd.starts_with("jump loop") {
+            self.host_notice = Some("no command for this row".into());
+            return;
+        }
+        self.host_notice = Some(match write_osc52(&cmd) {
+            Ok(()) => format!("copied: {cmd}"),
+            Err(e) => format!("clipboard copy failed: {e}"),
+        });
+    }
+
+    /// `a` on a raw hop: open the new-host form filled from it.
+    fn map_save_raw_hop(&mut self) -> Result<()> {
+        let raw = self.map_view.as_ref().and_then(|v| match v.selection()? {
+            MapSel::Hop(n) => match &v.map.nodes[n].key {
+                HopKey::Raw(r) => Some(r.clone()),
+                _ => None,
+            },
+            _ => None,
+        });
+        let Some(raw) = raw else {
+            self.host_notice = Some(
+                "a saves a raw hop as a host: put the cursor on one (add hosts on the hosts tab)"
+                    .into(),
+            );
+            return Ok(());
+        };
+        self.enter_host_form(None, false)?;
+        if let Some(f) = self.host_form.as_mut() {
+            f.address = raw.host.clone();
+            f.name = raw.host.clone();
+            f.username = raw.user.unwrap_or_default();
+            f.port = raw.port.map(|p| p.to_string()).unwrap_or_default();
+            f.dirty = true;
+        }
+        Ok(())
     }
 
     /// Wheel over the map: move the cursor row (the view follows it).

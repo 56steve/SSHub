@@ -320,6 +320,26 @@ pub const HELP_ITEMS: &[HelpItem] = &[
         desc: "Test the path with ssh -J, hop by hop; Esc cancels, H opens known hosts",
     },
     HelpItem::Entry {
+        key: "H / P / l",
+        desc: "After a failed test: known hosts, push a key to the failed hop, show its ssh log",
+    },
+    HelpItem::Entry {
+        key: "y",
+        desc: "Copy the ssh -J command of the hop or host",
+    },
+    HelpItem::Entry {
+        key: "a",
+        desc: "On a raw hop: save it as a host (opens the new-host form filled in)",
+    },
+    HelpItem::Entry {
+        key: "z / Alt+Enter",
+        desc: "Zoom the map over the ribbon and legend (Esc unzooms)",
+    },
+    HelpItem::Entry {
+        key: "click",
+        desc: "Select a hop or glyph; double-click connects; the wheel moves the cursor",
+    },
+    HelpItem::Entry {
         key: "Space",
         desc: "Fold or unfold a cluster, reveal 20 more hops, expand direct-only",
     },

@@ -104,6 +104,8 @@ fn tab_six_shows_the_jump_tree_and_the_map_footer() {
         "direct-only",
         "path ribbon",
         "along the path",
+        "copy cmd",
+        "zoom",
     ] {
         assert!(text.contains(needle), "missing {needle:?}:\n{text}");
     }
@@ -430,4 +432,77 @@ fn double_click_connects_through_the_same_path_as_enter() {
         .host_notice
         .as_deref()
         .is_some_and(|n| n.contains("jump loop")));
+}
+
+#[test]
+fn y_copies_the_command_a_saves_a_raw_hop_and_z_zooms_the_map() {
+    let store = Arc::new(LauncherStore::open_in_memory().unwrap());
+    let mut h = NewHost::launcher("legacy", "legacy.example");
+    h.proxy_jump = Some("ops@203.0.113.7:2222".into());
+    store.create_host(&h).unwrap();
+    let mut app = App::new_with_deps(
+        AppConfig::default(),
+        AppDeps {
+            resolver: Box::new(EmptyResolver),
+            metadata: Arc::new(MetadataDb::default()),
+            store,
+            password_store: Box::new(sshub::credentials::NoopPasswordStore),
+        },
+    );
+    app.reload_hosts().unwrap();
+    to_map(&mut app);
+
+    // y on the raw hop copies `ssh <hop>`; on the host behind it, the -J form.
+    press(&mut app, 'y');
+    assert_eq!(
+        app.host_notice.as_deref(),
+        Some("copied: ssh ops@203.0.113.7:2222")
+    );
+    app.handle_key(key(KeyCode::Right)).unwrap();
+    press(&mut app, 'y');
+    assert_eq!(
+        app.host_notice.as_deref(),
+        Some("copied: ssh -J ops@203.0.113.7:2222 legacy")
+    );
+    // a is only for a raw hop.
+    press(&mut app, 'a');
+    assert_eq!(app.mode, AppMode::Normal);
+    app.handle_key(key(KeyCode::Left)).unwrap();
+
+    // z zooms the map over the ribbon, Esc brings it back.
+    press(&mut app, 'z');
+    assert!(app.map_view.as_ref().unwrap().zoomed);
+    assert!(!screen(&draw(&app, 160, 45)).contains("path ribbon"));
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    assert!(!app.map_view.as_ref().unwrap().zoomed);
+    assert!(screen(&draw(&app, 160, 45)).contains("path ribbon"));
+
+    // a on the raw hop: the new-host form, filled from it.
+    press(&mut app, 'a');
+    assert_eq!(app.mode, AppMode::HostForm);
+    let f = app.host_form.as_ref().unwrap();
+    assert_eq!(
+        (f.address.as_str(), f.username.as_str(), f.port.as_str()),
+        ("203.0.113.7", "ops", "2222")
+    );
+}
+
+#[test]
+fn pickers_do_not_open_where_the_outline_has_no_room_to_draw_them() {
+    let mut app = app();
+    to_map(&mut app);
+    let _ = draw(&app, 70, 20); // outline layout
+    press(&mut app, '#');
+    assert!(app.map_view.as_ref().unwrap().picker.is_none());
+    press(&mut app, 'u');
+    assert!(app.map_view.as_ref().unwrap().use_picker.is_none());
+    assert!(app
+        .host_notice
+        .as_deref()
+        .unwrap_or("")
+        .contains("bigger terminal"));
+    // Back at full size they open.
+    let _ = draw(&app, 160, 45);
+    press(&mut app, '#');
+    assert!(app.map_view.as_ref().unwrap().picker.is_some());
 }

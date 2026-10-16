@@ -1221,7 +1221,7 @@ fn map_footer(app: &App) -> Vec<(String, &'static str)> {
             ("Esc".into(), "clear"),
         ];
     }
-    match v.lens {
+    let mut hints = match v.lens {
         Lens::Blast(_) => vec![
             (
                 format!(
@@ -1256,11 +1256,24 @@ fn map_footer(app: &App) -> Vec<(String, &'static str)> {
             (key(crate::config::KeyAction::MapTunnelLens), "tunnels"),
             (key(crate::config::KeyAction::MapUseAsJump), "use as jump"),
             (key(crate::config::KeyAction::MapTest), "test"),
+            (key(crate::config::KeyAction::MapCopyCmd), "copy cmd"),
+            (key(crate::config::KeyAction::TogglePanelZoom), "zoom"),
             ("e".into(), "edit"),
             ("?".into(), "help"),
             ("q".into(), "quit"),
         ],
+    };
+    // `a` only means something on a raw hop.
+    let on_raw_hop = matches!(
+        v.selection(),
+        Some(crate::app::network_map::MapSel::Hop(n))
+            if matches!(v.map.nodes[n].key, crate::map::HopKey::Raw(_))
+    );
+    if on_raw_hop && matches!(v.lens, Lens::None) {
+        let at = hints.len().saturating_sub(3);
+        hints.insert(at, (key(crate::config::KeyAction::AddHost), "save as host"));
     }
+    hints
 }
 
 fn footer_keybinds(

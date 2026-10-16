@@ -508,6 +508,49 @@ impl Map {
         }
     }
 
+    /// `ssh -J a,b target`, hops as the map shows them (names, `user@host:port`
+    /// for raw hops; a ProxyCommand hop is not part of the string).
+    pub fn ssh_command(&self, h: usize) -> String {
+        match &self.chains[h] {
+            Chain::Hops(hops) => {
+                let jump: Vec<&str> = hops
+                    .iter()
+                    .filter(|hop| !matches!(hop.kind, HopKind::ProxyCommand(_)))
+                    .map(|hop| hop.token.as_str())
+                    .collect();
+                if jump.is_empty() {
+                    format!("ssh {}", self.hosts[h].name)
+                } else {
+                    format!("ssh -J {} {}", jump.join(","), self.hosts[h].name)
+                }
+            }
+            Chain::Cycle(_) => "jump loop: not connectable".into(),
+        }
+    }
+
+    /// The command for the hop at trie node `node`: `ssh` to it through the
+    /// hops above it.
+    pub fn node_command(&self, node: usize) -> String {
+        let path = self.node_path(node);
+        let label = |n: usize| match &self.nodes[n].key {
+            HopKey::Saved(h) => Some(self.hosts[*h].name.clone()),
+            HopKey::Raw(r) => Some(r.label()),
+            HopKey::ProxyCmd(_) | HopKey::Invalid(_) => None,
+        };
+        let Some(target) = label(node) else {
+            return String::new();
+        };
+        let above: Vec<String> = path[..path.len() - 1]
+            .iter()
+            .filter_map(|&n| label(n))
+            .collect();
+        if above.is_empty() {
+            format!("ssh {target}")
+        } else {
+            format!("ssh -J {} {target}", above.join(","))
+        }
+    }
+
     /// Trie nodes from the root down to `node`.
     pub fn node_path(&self, node: usize) -> Vec<usize> {
         let mut path = vec![node];
