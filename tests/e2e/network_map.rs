@@ -489,6 +489,16 @@ fn y_copies_the_command_a_saves_a_raw_hop_and_z_zooms_the_map() {
         (f.address.as_str(), f.username.as_str(), f.port.as_str()),
         ("203.0.113.7", "ops", "2222")
     );
+    // Not in whatever group the hosts tab stands on, and the footer is the
+    // form's, not the map's.
+    assert!(f.group_ids.is_empty(), "{:?}", f.group_ids);
+    let text = screen(&draw(&app, 160, 45));
+    let footer = text.lines().last().unwrap();
+    assert!(
+        footer.contains("next field") && footer.contains("save"),
+        "{footer}"
+    );
+    assert!(!footer.contains("blast"), "{footer}");
 }
 
 #[test]
@@ -659,4 +669,41 @@ fn down_from_a_hop_lands_on_the_hop_drawn_on_the_next_row() {
         app.handle_key(key(KeyCode::Down)).unwrap();
     }
     assert!(seen >= 2, "walked {seen} hop rows");
+}
+
+#[test]
+fn one_host_reads_as_one_host_and_a_bare_tag_filters_nothing() {
+    let store = Arc::new(LauncherStore::open_in_memory().unwrap());
+    store
+        .create_host(&NewHost::launcher("solo", "solo.example"))
+        .unwrap();
+    let mut app = App::new_with_deps(
+        AppConfig::default(),
+        AppDeps {
+            resolver: Box::new(EmptyResolver),
+            metadata: Arc::new(MetadataDb::default()),
+            store,
+            password_store: Box::new(sshub::credentials::NoopPasswordStore),
+        },
+    );
+    app.reload_hosts().unwrap();
+    to_map(&mut app);
+    let text = screen(&draw(&app, 160, 45));
+    assert!(
+        !text.contains("1 hosts are") && !text.contains("1 hosts match"),
+        "{text}"
+    );
+    assert!(text.contains("The only host is reached directly"), "{text}");
+
+    // `tag:` with no value yet filters nothing: the map is not blank, and the
+    // count is every host, not zero.
+    let mut app = self::app();
+    to_map(&mut app);
+    press(&mut app, '/');
+    for c in "tag:".chars() {
+        press(&mut app, c);
+    }
+    let text = screen(&draw(&app, 160, 45));
+    assert!(text.contains("5 hosts match"), "{text}");
+    assert!(text.contains("bastion-eu"), "{text}");
 }

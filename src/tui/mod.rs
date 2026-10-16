@@ -1459,6 +1459,20 @@ fn footer_keybinds(
             ("?".into(), "help"),
             ("q".into(), "quit"),
         ],
+        // An overlay opened from the map (host form, broadcast, pickers) has its
+        // own keys: the map's footer would name keys that do nothing there.
+        5 if app.mode != AppMode::Normal => match app.mode {
+            AppMode::HostForm | AppMode::FieldPicker => vec![
+                ("Tab".into(), "next field"),
+                (app.save_key_label(), "save"),
+                ("Esc".into(), "cancel"),
+            ],
+            // The broadcast steps add their own below.
+            AppMode::BroadcastPickTarget
+            | AppMode::BroadcastCommand
+            | AppMode::BroadcastPreview => vec![],
+            _ => vec![("Esc".into(), "close")],
+        },
         5 => map_footer(app),
         3 => vec![
             ("\u{2191}\u{2193}\u{2190}\u{2192}".into(), "move"),
@@ -2179,9 +2193,15 @@ fn render_form_popup(frame: &mut Frame, app: &App, kind: FormKind) {
         .map_or(0, |h| {
             screens::hop_lines::line_count(h, app.theme(), popup_width.saturating_sub(2))
         });
+    // The footer row stays visible below a tall form (the hop editor's footer
+    // lists its keys), so a form never takes the last row.
     let popup_height = (area.height * 70 / 100)
         .max(form_rows_needed(kind) + hop_extra)
-        .min(area.height);
+        .min(
+            area.height
+                .saturating_sub(2)
+                .max(form_rows_needed(kind).min(area.height)),
+        );
     let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);

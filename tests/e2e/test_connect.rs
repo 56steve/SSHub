@@ -118,8 +118,10 @@ fn map_test_stops_at_the_first_failing_hop_and_shows_it_on_the_ribbon() {
     );
     assert_eq!(
         run.states[1],
-        StepState::Cancelled,
-        "no step after a failure"
+        StepState::Skipped {
+            reason: "skipped".into()
+        },
+        "no step after a failure: skipped, not cancelled"
     );
 
     let text = screen(&app, 160, 45);

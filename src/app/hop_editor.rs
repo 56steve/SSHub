@@ -181,8 +181,11 @@ impl App {
     /// ProxyJump field is not focused or the form is read-only (ssh_config).
     pub fn hop_section(&self, inherited: &crate::store::ResolvedConnection) -> Option<HopSection> {
         let form = self.host_form.as_ref()?;
-        if form.field != HostFormField::ProxyJump || form.metadata_only {
+        if form.field != HostFormField::ProxyJump {
             return None;
+        }
+        if form.metadata_only {
+            return Some(self.read_only_section(form));
         }
         let own = form.proxy_jump.trim();
         let direct = hops::split(own).is_empty() && !own.is_empty();
@@ -217,9 +220,9 @@ impl App {
             }
         });
         let hint = if using_inherited {
-            "a saved host  r raw  n direct  (either replaces the inherited chain)".to_string()
+            "+ a saved host  r raw  n direct  (either replaces the inherited chain)".to_string()
         } else {
-            "a saved host  r raw \u{2502} \u{21b5} replace  d remove  Ctrl+\u{2191}\u{2193} move  n direct  X clear \u{2192} inherit"
+            "+ a saved host  r raw \u{2502} \u{21b5} replace  d remove  Ctrl+\u{2191}\u{2193} move  n direct  X clear \u{2192} inherit"
                 .to_string()
         };
         let saves_as = if direct {
@@ -323,8 +326,17 @@ impl App {
                         .iter()
                         .position(|h| h.name == me)
                         .is_some_and(|i| map.host_node[i] == Some(n));
-                    let after = if there { before } else { before + 1 };
-                    format!("\u{3a3} {me} would join {last}'s row on the map ({before} \u{2192} {after} hosts)")
+                    if there {
+                        format!(
+                            "\u{3a3} {me} stays in {last}'s row on the map ({before} host{})",
+                            if before == 1 { "" } else { "s" }
+                        )
+                    } else {
+                        format!(
+                            "\u{3a3} {me} would join {last}'s row on the map ({before} \u{2192} {} hosts)",
+                            before + 1
+                        )
+                    }
                 }
                 None => format!("\u{3a3} {me} would start a new row under {last} on the map"),
             }
@@ -350,6 +362,45 @@ impl App {
             inherited: using_inherited,
             test: self.test_view(),
         })
+    }
+
+    /// An ssh_config host: the chain ssh_config gives it, listed, not editable.
+    fn read_only_section(&self, form: &HostFormEdit) -> HopSection {
+        let tokens = hops::split(form.proxy_jump.trim());
+        let rows: Vec<HopRowView> = tokens
+            .iter()
+            .map(|t| self.hop_row(t, false, true))
+            .collect();
+        let me = if form.name.trim().is_empty() {
+            "(this host)"
+        } else {
+            form.name.trim()
+        };
+        let mut path = String::from("\u{25c9} you");
+        for t in &tokens {
+            path.push_str(&format!(" \u{2501}\u{25b6} {} {t}", self.hop_glyph(t)));
+        }
+        path.push_str(&format!(" \u{2501}\u{25b6} {me}"));
+        HopSection {
+            head: None,
+            join_note: None,
+            name_w: rows
+                .iter()
+                .map(|r| r.name.chars().count())
+                .max()
+                .unwrap_or(0),
+            title: "hops \u{2500} from ssh_config, read-only".to_string(),
+            empty_text: rows.is_empty().then(|| "no jump".to_string()),
+            rows,
+            hint: "ssh_config owns this chain: change it in ~/.ssh/config".to_string(),
+            saves_as: "not stored by sshub".to_string(),
+            path,
+            picker: None,
+            raw: None,
+            notice: None,
+            inherited: true,
+            test: self.test_view(),
+        }
     }
 
     fn test_view(&self) -> Option<TestView> {
@@ -485,10 +536,22 @@ impl App {
             .map(|f| f.name.trim().to_string())
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| "this host".into());
-        let first = p.selected.saturating_sub(PICKER_ROWS - 1);
+        // `+ raw user@host:port` stays on the last line however far the list
+        // has scrolled; the saved routes and hosts scroll above it.
+        let has_raw = matches!(rows.last(), Some(PickRow::Raw));
+        let body = rows.len() - usize::from(has_raw);
+        let visible = PICKER_ROWS - usize::from(has_raw);
+        let first = p
+            .selected
+            .min(body.saturating_sub(1))
+            .saturating_sub(visible - 1);
+        let mut shown: Vec<usize> = (first..(first + visible).min(body)).collect();
+        if has_raw {
+            shown.push(rows.len() - 1);
+        }
         let mut out = Vec::new();
         let mut last_section = None;
-        for (i, r) in rows.iter().enumerate().skip(first).take(PICKER_ROWS) {
+        for (i, r) in shown.into_iter().map(|i| (i, &rows[i])) {
             let section = match r {
                 PickRow::Route(_) => "reuse a route (replaces all hops)",
                 PickRow::Host(_) => "one saved host",
@@ -767,6 +830,7 @@ impl App {
     }
 
     fn hop_picker_key(&mut self, key: &KeyEvent) {
+        self.hop_editor.notice = None;
         let Some(p) = self.hop_editor.picker.as_mut() else {
             return;
         };
@@ -834,6 +898,8 @@ impl App {
     }
 
     fn hop_raw_key(&mut self, key: &KeyEvent) {
+        // Whatever was said before is stale now; a bad token is told in the box.
+        self.hop_editor.notice = None;
         let Some(r) = self.hop_editor.raw.as_mut() else {
             return;
         };
@@ -868,7 +934,8 @@ impl App {
                     }
                     self.hop_editor.raw = None;
                 }
-                Err(e) => self.hop_editor.notice = Some(e.to_string()),
+                // The box shows why, under the input.
+                Err(_) => {}
             },
             _ => {}
         }

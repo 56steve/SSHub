@@ -619,6 +619,9 @@ fn mockup_key_rows_are_on_the_screen() {
             "↑↓ choose ↵ add hop / use route End raw hop Esc close",
             "path ◉ you ━▶ ● bastion-eu ━▶ ● jump-2 ━▶ db-9",
             "reuse a route (replaces all hops)",
+            "+ raw user@host:port End",
+            "↵ add End raw hop Esc close",
+            "+ a saved host r raw │ ↵ replace d remove Ctrl+↑↓ move",
         ],
     );
 
@@ -659,7 +662,12 @@ fn mockup_key_rows_are_on_the_screen() {
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    check("D13Failed", "D13Failed", &render(&f.app), &["✗ failed"]);
+    check(
+        "D13Failed",
+        "D13Failed",
+        &render(&f.app),
+        &["✗ failed", "- skipped"],
+    );
 
     // The same default screen at 155x31, the maintainer's terminal.
     let mut f = fleet(188, true);

@@ -667,7 +667,14 @@ fn draw_empty(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
     } else {
         lines.push(plain("No jump edges yet.".into(), st.bright));
         lines.push(plain(
-            format!("All {n} hosts are reached directly, so there is no hop to hang them behind."),
+            if n == 1 {
+                "The only host is reached directly, so there is no hop to hang it behind."
+                    .to_string()
+            } else {
+                format!(
+                    "All {n} hosts are reached directly, so there is no hop to hang them behind."
+                )
+            },
             st.text,
         ));
     }
@@ -696,7 +703,11 @@ fn draw_empty(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
     ));
     lines.push(action(
         k(crate::config::KeyAction::MapFoldAll),
-        format!("show the {n} direct hosts as a per-group health board"),
+        if n == 1 {
+            "show the direct host as a per-group health board".to_string()
+        } else {
+            format!("show the {n} direct hosts as a per-group health board")
+        },
     ));
     lines.push(plain(String::new(), st.text));
     lines.push(plain(
@@ -976,8 +987,10 @@ fn draw_strip(
             break;
         }
         if !group.is_empty() {
-            x = put(buf, x, y, group, st.muted, max_x);
-            x = put(buf, x, y, " ", st.muted, max_x);
+            // The group label follows the lens: dim when the row is dimmed.
+            let label = if tint == Tint::Dim { st.dim } else { st.muted };
+            x = put(buf, x, y, group, label, max_x);
+            x = put(buf, x, y, " ", label, max_x);
         }
         // Keep the selected glyph on screen when the group is longer than the cap.
         let start = selected
@@ -1002,6 +1015,11 @@ fn draw_strip(
         }
     }
     x
+}
+
+/// `1 host`, `2 hosts`.
+fn hosts_n(n: usize) -> String {
+    format!("{n} host{}", if n == 1 { "" } else { "s" })
 }
 
 /// The folded hops right above `n` (nearest first): they have no row, `n`'s row
@@ -1072,12 +1090,20 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
             st.text,
             cx(cols.cargo),
         );
-        let n = view.matched.as_ref().map_or(0, HashSet::len);
+        // A bare `tag:` has no value yet and filters nothing: every host stays.
+        let n = view
+            .matched
+            .as_ref()
+            .map_or(view.map.hosts.len(), HashSet::len);
         put(
             buf,
             cx(cols.cargo),
             hy,
-            &format!("{n} hosts match \u{b7} rows without a match are hidden, hops above kept"),
+            &format!(
+                "{} {} \u{b7} rows without a match are hidden, hops above kept",
+                hosts_n(n),
+                if n == 1 { "matches" } else { "match" }
+            ),
             st.muted,
             sigma_x,
         );
@@ -1397,6 +1423,8 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
             Row::Cycle(ci) => {
                 let c = &map.cycles[ci];
                 let tint = view.tint(i);
+                // A lens that greys the rest of the map greys the loop too.
+                let err = if tint == Tint::Dim { st.dim } else { st.err };
                 let last = last_top == Some(i);
                 let first = top.first() == Some(&i);
                 if first {
@@ -1415,7 +1443,7 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     cx(cols.trunk1()),
                     y,
                     if last { "\u{2558}" } else { "\u{255e}" },
-                    st.err,
+                    err,
                     right,
                 );
                 put(
@@ -1423,7 +1451,7 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     cx(cols.trunk1() + 1),
                     y,
                     "\u{2550}\u{2550}",
-                    st.err,
+                    err,
                     right,
                 );
                 let style = if row_selected && matches!(sel, Some(MapSel::Cycle(_))) {
@@ -1431,7 +1459,7 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                 } else if tint == Tint::Dim {
                     st.dim
                 } else {
-                    st.err
+                    err
                 };
                 // `loop-a` at the first hop column, `loop-b` at the second, and
                 // the rest of the loop (ending where it began) after it.
@@ -1441,9 +1469,9 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                 if names.len() > 1 {
                     let to = cx(cols.hop2).saturating_sub(1);
                     for x in end + 1..to {
-                        put(buf, x, y, "\u{2550}", st.err, right);
+                        put(buf, x, y, "\u{2550}", err, right);
                     }
-                    put(buf, to, y, "\u{25b8}", st.err, right);
+                    put(buf, to, y, "\u{25b8}", err, right);
                     let mut rest = format!("\u{21bb} {}", names[1]);
                     for n in &names[2..] {
                         rest.push_str(&format!(" \u{2550}\u{2550}\u{25b8} {n}"));
@@ -1478,7 +1506,7 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     end + 3,
                     y,
                     "cycle \u{b7} not connectable",
-                    st.err,
+                    err,
                     sigma_x,
                 );
                 put(
@@ -1588,7 +1616,12 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                         buf,
                         cx(cols.cargo),
                         y,
-                        &format!("{} hosts \u{b7} {} groups ", behind.len(), groups.len()),
+                        &format!(
+                            "{} \u{b7} {} group{} ",
+                            hosts_n(behind.len()),
+                            groups.len(),
+                            if groups.len() == 1 { "" } else { "s" }
+                        ),
                         st.muted,
                         sigma_x,
                     );
@@ -2473,9 +2506,12 @@ fn blast_lines(ctx: &Ctx, b: &crate::app::network_map::BlastLens) -> Vec<String>
         k => format!(" {k} other hops"),
     };
     let split = if behind == 0 {
-        format!("{n} hosts, all directly behind it")
+        format!("{}, all directly behind it", hosts_n(n))
     } else {
-        format!("{n} hosts: {direct} directly behind, {behind} behind{via}")
+        format!(
+            "{}: {direct} directly behind, {behind} behind{via}",
+            hosts_n(n)
+        )
     };
     let sessions = b
         .hosts
@@ -2517,8 +2553,9 @@ fn blast_lines(ctx: &Ctx, b: &crate::app::network_map::BlastLens) -> Vec<String>
             let by = i
                 .checked_sub(1)
                 .map(|j| map.key_label(&keys[j]))
-                .unwrap_or_else(|| "you".into());
-            not_hit.push(format!("{} ({hop} via {by})", map.hosts[h].name));
+                .map(|by| format!("via {by}"))
+                .unwrap_or_else(|| "directly".into());
+            not_hit.push(format!("{} ({hop} {by})", map.hosts[h].name));
         }
     }
     not_hit.sort();
@@ -2549,11 +2586,14 @@ fn draw_facts(buf: &mut Buffer, inner: Rect, ctx: &Ctx, sel: Option<MapSel>) {
             }
             let (glyph, text) = crate::app::hop_editor::step_text(state);
             let style = if state.is_failure() { st.err } else { st.text };
-            let cmd = if step.cmd.is_empty() {
-                step.label.clone()
-            } else {
-                crate::tui::text::ellipsize(&step.cmd, 40)
-            };
+            let cmd = crate::tui::text::ellipsize(
+                if step.shown.is_empty() {
+                    &step.label
+                } else {
+                    &step.shown
+                },
+                40,
+            );
             put(
                 buf,
                 inner.x + 1,
@@ -2660,11 +2700,11 @@ fn facts_rows(ctx: &Ctx, sel: Option<MapSel>, rows: &mut Vec<(&'static str, Stri
                         k => format!(" {k} hops"),
                     };
                     let split = if behind == 0 {
-                        format!("{} hosts", node.sigma)
+                        hosts_n(node.sigma)
                     } else {
                         format!(
-                            "{} hosts ({direct} direct + {behind} behind{via})",
-                            node.sigma
+                            "{} ({direct} direct + {behind} behind{via})",
+                            hosts_n(node.sigma)
                         )
                     };
                     rows.push((
@@ -2683,7 +2723,10 @@ fn facts_rows(ctx: &Ctx, sel: Option<MapSel>, rows: &mut Vec<(&'static str, Stri
                 }
                 other => {
                     rows.push(("hop", map.key_label(other)));
-                    rows.push(("carries", format!("{} hosts behind this hop", node.sigma)));
+                    rows.push((
+                        "carries",
+                        format!("{} behind this hop", hosts_n(node.sigma)),
+                    ));
                 }
             }
         }
@@ -2719,14 +2762,14 @@ fn facts_rows(ctx: &Ctx, sel: Option<MapSel>, rows: &mut Vec<(&'static str, Stri
             ));
         }
         Some(MapSel::Direct) => {
-            rows.push(("direct", format!("{} hosts, no jump", map.direct.len())));
+            rows.push(("direct", format!("{}, no jump", hosts_n(map.direct.len()))));
         }
         Some(MapSel::Cluster(c)) => {
             let cl = &map.clusters[c];
             rows.push(("cluster", cl.name.clone()));
             rows.push((
                 "carries",
-                format!("{} hops, {} hosts behind them", cl.roots.len(), cl.sigma),
+                format!("{} hops, {} behind them", cl.roots.len(), hosts_n(cl.sigma)),
             ));
         }
         Some(MapSel::More(c)) => {

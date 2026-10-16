@@ -221,6 +221,19 @@ impl App {
                 steps.push(self.form_test_step(prefix));
             }
         }
+        // `ssh -J bastion-eu,jump-2 db-2 true`: names as written, for panels.
+        for (i, step) in steps.iter_mut().enumerate() {
+            let via: Vec<&str> = hops[..i.min(hops.len())]
+                .iter()
+                .flatten()
+                .map(String::as_str)
+                .collect();
+            step.shown = if via.is_empty() {
+                format!("ssh {} true", step.label)
+            } else {
+                format!("ssh -J {} {} true", via.join(","), step.label)
+            };
+        }
         steps
     }
 
@@ -494,6 +507,7 @@ fn skipped(label: &str, reason: &str) -> TestStep {
         argv: Vec::new(),
         secret: None,
         cmd: String::new(),
+        shown: String::new(),
         skip: Some(reason.to_string()),
     }
 }
@@ -508,6 +522,7 @@ fn finish(
         label: label.to_string(),
         host,
         cmd: format!("{} true", argv.join(" ")),
+        shown: String::new(),
         argv,
         secret,
         skip: None,

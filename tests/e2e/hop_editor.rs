@@ -250,7 +250,13 @@ fn ssh_config_hosts_get_no_editor_keys() {
     let mut app = app(None);
     edit(&mut app, "db-1");
     app.host_form.as_mut().unwrap().metadata_only = true;
-    assert!(!screen(&app).contains("hops \u{2500}"));
+    // The chain is listed (read-only), with no editing hints.
+    let text = screen(&app);
+    assert!(
+        text.contains("hops \u{2500} from ssh_config, read-only"),
+        "{text}"
+    );
+    assert!(!text.contains("+ a saved host"), "{text}");
     press(&mut app, 'a');
     press(&mut app, 'd');
     assert!(app.hop_editor.picker.is_none());

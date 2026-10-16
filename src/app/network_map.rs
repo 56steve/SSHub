@@ -1319,6 +1319,10 @@ impl App {
             f.name = raw.host.clone();
             f.username = raw.user.unwrap_or_default();
             f.port = raw.port.map(|p| p.to_string()).unwrap_or_default();
+            // The form picks up the group the hosts tab happens to stand on;
+            // nothing says this hop belongs there.
+            f.group_ids.clear();
+            f.group_index = 0;
             f.dirty = true;
         }
         Ok(())

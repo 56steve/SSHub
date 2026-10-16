@@ -36,6 +36,8 @@ pub struct TestStep {
     pub secret: Option<SecretSource>,
     /// The command as shown to the user, e.g. `ssh -J a b true`.
     pub cmd: String,
+    /// The short form for a panel row: hop names as written, not addresses.
+    pub shown: String,
     /// Do not run: why.
     pub skip: Option<String>,
 }
@@ -169,9 +171,19 @@ pub fn spawn_test(
         };
         let mut stopped = false;
         for (i, step) in steps.iter().enumerate() {
-            if stopped || cancel.load(Ordering::Relaxed) {
+            if cancel.load(Ordering::Relaxed) {
                 send(i, StepState::Cancelled);
                 stopped = true;
+                continue;
+            }
+            // After a failure the rest was not tried: skipped, not cancelled.
+            if stopped {
+                send(
+                    i,
+                    StepState::Skipped {
+                        reason: "skipped".into(),
+                    },
+                );
                 continue;
             }
             if let Some(reason) = &step.skip {
@@ -270,6 +282,7 @@ mod tests {
             argv,
             secret: None,
             cmd: String::new(),
+            shown: String::new(),
             skip: None,
         };
         let runner = Arc::new(SshCommandRunner {
@@ -443,6 +456,7 @@ mod tests {
             argv: vec!["ssh".into()],
             secret: None,
             cmd: String::new(),
+            shown: String::new(),
             skip: skip.map(String::from),
         };
         let runner = Arc::new(Fake(
@@ -479,8 +493,10 @@ mod tests {
         assert!(matches!(&states[2], StepState::Failed { reason, .. } if reason == "auth failed"));
         assert_eq!(
             states[3],
-            StepState::Cancelled,
-            "nothing runs after the first failure"
+            StepState::Skipped {
+                reason: "skipped".into()
+            },
+            "nothing runs after the first failure, and it was skipped, not cancelled"
         );
     }
 
