@@ -1347,21 +1347,53 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     } else {
                         style
                     };
-                    at = put(buf, cx(col), y, &first.text, first_style, sigma_x);
                     let chain = folded_chain(map, n);
                     let mid_selected = selected_hop.is_some_and(|h| chain.contains(&h));
-                    if node.depth > 1 {
-                        at = put(buf, at, y, " \u{2500}\u{25b8} ", edge_style, sigma_x);
-                        let mid = format!("\u{2039} +{} hops \u{203a}", node.depth - 1);
-                        let mid_style = if mid_selected { st.selected } else { st.muted };
-                        at = put(buf, at, y, &mid, mid_style, sigma_x);
-                        at = put(buf, at, y, " ", edge_style, sigma_x);
-                    } else {
-                        at = put(buf, at, y, " ", edge_style, sigma_x);
+                    // The columns of a plain row do not apply here: collapse the
+                    // padding, and keep the whole chain inside the hop columns
+                    // (one blank before the cargo), shortening the two names
+                    // before anything runs into the group label.
+                    let squeeze = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let mut first_t = squeeze(&first.text);
+                    let mut last_t = squeeze(&text);
+                    let mid = (node.depth > 1)
+                        .then(|| format!("\u{2039} +{} hops \u{203a}", node.depth - 1));
+                    let budget =
+                        (cx(cols.cargo).saturating_sub(1)).saturating_sub(cx(col)) as usize;
+                    // " \u{2500}\u{25b8} " + mid + " \u{2500}\u{25b8}" or " \u{2500}\u{25b8}".
+                    let glue = 3 + mid.as_ref().map_or(0, |m| m.chars().count() + 4);
+                    let room = budget.saturating_sub(glue);
+                    let (fw, lw) = (first_t.chars().count(), last_t.chars().count());
+                    if fw + lw > room {
+                        let each = room / 2;
+                        let first_keep = fw.min(each.max(room.saturating_sub(lw)));
+                        first_t = crate::tui::text::ellipsize(&first_t, first_keep.max(4));
+                        let last_keep = room.saturating_sub(first_t.chars().count());
+                        last_t = crate::tui::text::ellipsize(&last_t, last_keep.max(4));
                     }
-                    at = put(buf, at, y, "\u{2500}\u{25b8}", edge_style, sigma_x);
+                    let limit = cx(cols.cargo).saturating_sub(1);
+                    at = put(buf, cx(col), y, &first_t, first_style, limit);
+                    at = put(buf, at, y, " \u{2500}\u{25b8}", edge_style, limit);
+                    if let Some(mid) = mid {
+                        at = put(buf, at, y, " ", edge_style, limit);
+                        let mid_style = if mid_selected { st.selected } else { st.muted };
+                        at = put(buf, at, y, &mid, mid_style, limit);
+                        at = put(buf, at, y, " \u{2500}\u{25b8}", edge_style, limit);
+                    }
+                    text = last_t;
                 }
-                let end = put(buf, at, y, &text, style, sigma_x);
+                let end = put(
+                    buf,
+                    at,
+                    y,
+                    &text,
+                    style,
+                    if merged.is_some() {
+                        cx(cols.cargo).saturating_sub(1)
+                    } else {
+                        sigma_x
+                    },
+                );
                 // Edge from the node to the cargo column.
                 if !node.children.is_empty() {
                     for x in end + 1..cx(cols.trunk2()) {
@@ -1852,7 +1884,8 @@ fn draw_child_trunk(
         }
     }
     let x = inner.x + cols.trunk2();
-    for &yj in &ys[row + 1..last] {
+    // Under a filter the children may all be hidden: nothing to draw then.
+    for &yj in ys.get(row + 1..last).unwrap_or_default() {
         let Some(v) = yj.checked_sub(offset) else {
             continue;
         };
@@ -3119,5 +3152,48 @@ mod tests {
         v.move_col(-1);
         v.move_col(-1);
         assert!(matches!(v.selection(), Some(MapSel::Hop(_))));
+    }
+
+    #[test]
+    fn a_filter_that_hides_every_child_row_does_not_panic() {
+        // The match is the parent hop; its children are filtered out, so the
+        // trunk under it has no rows to draw (this sliced `ys[row + 1..row]`).
+        for query in [
+            "bastion-eu",
+            "bastion",
+            "tag:bastion",
+            "jump-2",
+            "!db-1",
+            "zzz",
+        ] {
+            let mut app = app_with(fleet());
+            let v = app.map_view.as_mut().unwrap();
+            v.query = query.into();
+            v.apply_filter();
+            for (w, h) in [(160, 45), (155, 31), (100, 30), (79, 23), (60, 20)] {
+                let _ = render(&app, w, h);
+            }
+        }
+    }
+
+    #[test]
+    fn a_folded_row_keeps_its_arrows_and_never_runs_into_the_group() {
+        // Saved hops with latency, and raw hops: the whole chain stays inside
+        // the hop columns, with a blank before the group label.
+        let raw = "ops@127.0.0.65,u@10.0.0.2,u@10.0.0.3,ops@127.0.0.66";
+        for (name, jump, width) in [("a", raw, 160u16), ("b", raw, 100), ("c", raw, 120)] {
+            let mut hosts = vec![host(&format!("deep-{name}"), "prod", Some(jump))];
+            hosts.push(host(&format!("deep-{name}2"), "prod", Some(jump)));
+            let app = app_with(hosts);
+            let text = all_text(&render(&app, width, 45));
+            let row = text.lines().find(|l| l.contains("+2 hops")).unwrap_or("");
+            assert!(row.contains("\u{203a} \u{2500}\u{25b8}"), "{width}: {row}");
+            assert!(
+                !row.contains("\u{2506}prod") && !row.contains("0prod"),
+                "{width}: {row}"
+            );
+            let cut = row.find("prod").expect("group label");
+            assert!(row[..cut].ends_with(' '), "{width}: {row}");
+        }
     }
 }
