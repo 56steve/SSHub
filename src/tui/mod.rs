@@ -1199,6 +1199,8 @@ fn map_footer(app: &App) -> Vec<(String, &'static str)> {
             vec![
                 (key(crate::config::KeyAction::MapTest), "test again"),
                 (key(crate::config::KeyAction::KnownHosts), "known hosts"),
+                (key(crate::config::KeyAction::PushKey), "push key"),
+                (key(crate::config::KeyAction::MapSshLog), "ssh log"),
                 ("Esc".into(), "close"),
                 ("?".into(), "help"),
             ]

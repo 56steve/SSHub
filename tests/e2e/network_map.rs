@@ -302,3 +302,132 @@ fn tunnel_lens_marks_hosts_with_tunnels() {
     press(&mut app, 'o');
     assert!(matches!(app.map_view.as_ref().unwrap().lens, Lens::None));
 }
+
+fn render_frame(app: &App) {
+    let mut t = Terminal::new(TestBackend::new(160, 45)).unwrap();
+    t.draw(|f| sshub::tui::render(f, app)).unwrap();
+}
+
+fn mouse(app: &mut App, kind: crossterm::event::MouseEventKind, x: u16, y: u16) {
+    app.handle_mouse(crossterm::event::MouseEvent {
+        kind,
+        column: x,
+        row: y,
+        modifiers: KeyModifiers::empty(),
+    })
+    .unwrap();
+}
+
+fn click(app: &mut App, x: u16, y: u16) {
+    use crossterm::event::{MouseButton, MouseEventKind::*};
+    mouse(app, Down(MouseButton::Left), x, y);
+    mouse(app, Up(MouseButton::Left), x, y);
+}
+
+#[test]
+fn clicking_selects_a_hop_or_glyph_and_the_wheel_scrolls() {
+    use sshub::app::ClickHit;
+    let mut app = app();
+    app.terminal_area = ratatui::layout::Rect::new(0, 0, 160, 45);
+    to_map(&mut app);
+    render_frame(&app);
+
+    // Find a glyph cell the frame recorded (a slot past the row's hops).
+    let (area, row, pos) = {
+        let v = app.map_view.as_ref().unwrap();
+        let map = app.click_map.borrow();
+        map.iter()
+            .rev()
+            .find_map(|t| match t.hit {
+                ClickHit::MapCell { row, pos } if pos >= v.hop_count(row) && t.area.width == 1 => {
+                    Some((t.area, row, pos))
+                }
+                _ => None,
+            })
+            .expect("the map records its glyphs")
+    };
+    click(&mut app, area.x, area.y);
+    let v = app.map_view.as_ref().unwrap();
+    assert_eq!((v.row, v.pos), (row, pos));
+    assert!(matches!(v.selection(), Some(MapSel::Host(_))));
+
+    // A click on a row's empty space selects that row's own hop.
+    render_frame(&app);
+    let (r0, y0) = {
+        let map = app.click_map.borrow();
+        let t = map
+            .iter()
+            .find(|t| matches!(t.hit, ClickHit::MapCell { row: 0, .. }) && t.area.width > 1)
+            .unwrap();
+        (t.area.x + 1, t.area.y)
+    };
+    click(&mut app, r0, y0);
+    let v = app.map_view.as_ref().unwrap();
+    assert_eq!(v.row, 0);
+    assert!(matches!(v.selection(), Some(MapSel::Hop(_))));
+
+    // Wheel moves the cursor row.
+    let body_y = 10;
+    mouse(
+        &mut app,
+        crossterm::event::MouseEventKind::ScrollDown,
+        20,
+        body_y,
+    );
+    assert!(app.map_view.as_ref().unwrap().row > 0);
+    mouse(
+        &mut app,
+        crossterm::event::MouseEventKind::ScrollUp,
+        20,
+        body_y,
+    );
+    mouse(
+        &mut app,
+        crossterm::event::MouseEventKind::ScrollUp,
+        20,
+        body_y,
+    );
+    assert_eq!(app.map_view.as_ref().unwrap().row, 0);
+}
+
+#[test]
+fn double_click_connects_through_the_same_path_as_enter() {
+    use sshub::app::ClickHit;
+    // A jump loop is the one target Enter refuses without spawning ssh.
+    let store = Arc::new(LauncherStore::open_in_memory().unwrap());
+    for n in ["loop-a", "loop-b"] {
+        let mut h = NewHost::launcher(n, format!("{n}.example"));
+        h.source = sshub::store::HostSource::SshConfig;
+        store.create_host(&h).unwrap();
+    }
+    let mut app = App::new_with_deps(
+        AppConfig::default(),
+        AppDeps {
+            resolver: Box::new(LoopResolver),
+            metadata: Arc::new(MetadataDb::default()),
+            store,
+            password_store: Box::new(sshub::credentials::NoopPasswordStore),
+        },
+    );
+    app.reload_hosts().unwrap();
+    app.terminal_area = ratatui::layout::Rect::new(0, 0, 160, 45);
+    to_map(&mut app);
+    render_frame(&app);
+    let (x, y) = {
+        let map = app.click_map.borrow();
+        let t = map
+            .iter()
+            .rev()
+            .find(|t| matches!(t.hit, ClickHit::MapCell { .. }) && t.area.width == 1)
+            .expect("a loop host glyph");
+        (t.area.x, t.area.y)
+    };
+    click(&mut app, x, y);
+    assert!(app.host_notice.is_none(), "one click only selects");
+    click(&mut app, x, y);
+    assert!(app.sessions.is_empty());
+    assert!(app
+        .host_notice
+        .as_deref()
+        .is_some_and(|n| n.contains("jump loop")));
+}

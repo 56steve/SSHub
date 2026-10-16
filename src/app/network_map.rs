@@ -726,6 +726,8 @@ impl App {
             _ if self.is_action(KeyAction::MapUseAsJump, &key) => self.map_open_use_picker(),
             _ if self.is_action(KeyAction::MapTest, &key) => self.map_start_test(),
             _ if self.is_action(KeyAction::KnownHosts, &key) => self.open_known_hosts(),
+            _ if self.is_action(KeyAction::PushKey, &key) => self.map_push_key()?,
+            _ if self.is_action(KeyAction::MapSshLog, &key) => self.map_show_ssh_log(),
             _ if self.is_action(KeyAction::MapFold, &key) => {
                 if let Some(v) = self.map_view.as_mut() {
                     v.toggle_fold();
@@ -997,6 +999,98 @@ impl App {
             None => self.host_notice = Some("no tunnel on this host".into()),
         }
         Ok(())
+    }
+
+    /// A click on the map body: select the hop or glyph the last frame drew at
+    /// (`x`, `y`); a double click connects to it.
+    pub(crate) fn map_click(&mut self, x: u16, y: u16, is_double: bool) -> Result<()> {
+        if self
+            .map_view
+            .as_ref()
+            .is_none_or(|v| v.picker.is_some() || v.use_picker.is_some() || v.editing)
+        {
+            return Ok(());
+        }
+        let hit = self
+            .click_map
+            .borrow()
+            .iter()
+            .rev()
+            .find(|t| t.area.contains(ratatui::layout::Position::new(x, y)))
+            .and_then(|t| match t.hit {
+                ClickHit::MapCell { row, pos } => Some((row, pos)),
+                _ => None,
+            });
+        let Some((row, pos)) = hit else {
+            return Ok(());
+        };
+        if let Some(v) = self.map_view.as_mut() {
+            v.row = row;
+            v.pos = pos;
+            v.clamp();
+        }
+        if is_double {
+            self.map_connect()?;
+        }
+        Ok(())
+    }
+
+    /// The host the failed-test actions are about: the hop that failed, else
+    /// what the cursor is on. `None` when neither is a saved host.
+    fn map_failed_host(&self) -> Option<usize> {
+        let by_name = |n: &str| self.hosts.iter().position(|h| h.name() == n);
+        if let Some((i, _, _)) = self.test_run.as_ref().and_then(|r| r.failure()) {
+            let step = &self.test_run.as_ref()?.steps[i];
+            if let Some(h) = step.host.as_deref().and_then(by_name) {
+                return Some(h);
+            }
+        }
+        let v = self.map_view.as_ref()?;
+        let h = match v.selection()? {
+            MapSel::Host(h) => h,
+            MapSel::Hop(n) => match v.map.nodes[n].key {
+                HopKey::Saved(h) => h,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        by_name(&v.map.hosts[h].name)
+    }
+
+    /// `P`: push a public key to the failed hop (or the host under the cursor)
+    /// through the usual identity picker.
+    fn map_push_key(&mut self) -> Result<()> {
+        let Some(h) = self.map_failed_host() else {
+            self.host_notice = Some("no saved host to push a key to here".into());
+            return Ok(());
+        };
+        if self.hosts[h].managed().is_none() {
+            self.host_notice = Some("push key needs a saved host".into());
+            return Ok(());
+        }
+        if !self.reveal_host(h) {
+            return Ok(());
+        }
+        self.trigger_push_key_from_hosts()
+    }
+
+    /// `l`: the ssh log of the failed hop on the hosts tab, zoomed.
+    fn map_show_ssh_log(&mut self) {
+        let Some(h) = self.map_failed_host() else {
+            self.host_notice = Some("no saved host to show a log for here".into());
+            return;
+        };
+        if !self.reveal_host(h) {
+            return;
+        }
+        self.active_tab = 0;
+        self.focused_panel = PanelId::SshLog;
+        self.panel_zoomed = true;
+    }
+
+    /// Wheel over the map: move the cursor row (the view follows it).
+    pub(crate) fn map_wheel(&mut self, delta: isize) {
+        self.map_move_row(delta);
     }
 
     fn map_move_row(&mut self, delta: isize) {

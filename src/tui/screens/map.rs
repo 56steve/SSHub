@@ -15,7 +15,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::network_map::{HostTunnel, Lens, MapSel, MapView, Tint, TunnelState, REVEAL_STEP};
 use crate::app::test_connect::{TestOwner, TestRun};
-use crate::app::App;
+use crate::app::{App, ClickHit};
 use crate::map::{Chain, Hop, HopKey, HopKind, JumpSource, Map, Row, PROXY_CMD_LABEL};
 use crate::theme::catalog::{ColorRole, StyleRole};
 use crate::theme::model::ResolvedTheme;
@@ -744,6 +744,24 @@ fn node_look(ctx: &Ctx, cols: &Cols, node: usize, shared: &HashSet<HopKey>) -> N
 /// Group strip for `hosts` by group: `group \u{25cf}\u{25cf}\u{25cb}   group2 \u{25cf}`.
 /// Returns the x after it and the x range of the selected host's glyph.
 #[allow(clippy::too_many_arguments)]
+/// Record host `h`'s glyph at (`x`, `y`) as a click target.
+fn record_glyph(ctx: &Ctx, x: u16, y: u16, row: usize, h: usize) {
+    let view = ctx.view;
+    let Some(&r) = view.rows.get(row) else {
+        return;
+    };
+    if let Some(k) = view.map.row_hosts(r).iter().position(|&v| v == h) {
+        ctx.app.record_click(
+            Rect::new(x, y, 1, 1),
+            ClickHit::MapCell {
+                row,
+                pos: view.hop_count(row) + k,
+            },
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_strip(
     buf: &mut Buffer,
     mut x: u16,
@@ -753,6 +771,7 @@ fn draw_strip(
     tint: Tint,
     groups: &[(String, Vec<usize>)],
     selected: Option<usize>,
+    row: usize,
 ) -> u16 {
     let st = ctx.st;
     for (gi, (group, hosts)) in groups.iter().enumerate() {
@@ -776,6 +795,9 @@ fn draw_strip(
             } else {
                 gstyle
             };
+            if x < max_x {
+                record_glyph(ctx, x, y, row, h);
+            }
             x = put(buf, x, y, &glyph.to_string(), style, max_x);
         }
         let hidden = hosts.len().saturating_sub(ctx.max_glyphs);
@@ -901,6 +923,14 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
             continue;
         };
         let row_selected = i == view.row;
+        // The whole row selects its own hop; glyphs record themselves on top.
+        ctx.app.record_click(
+            Rect::new(inner.x, y, inner.width, 1),
+            ClickHit::MapCell {
+                row: i,
+                pos: view.hop_count(i) - 1,
+            },
+        );
         match row {
             Row::Node(n) => {
                 let node = &map.nodes[n];
@@ -1003,6 +1033,7 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     tint,
                     &node.cargo,
                     sel_host.filter(|_| row_selected),
+                    i,
                 );
                 if let (true, Some(h)) = (row_selected, sel_host) {
                     put(
@@ -1090,6 +1121,7 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     tint,
                     &groups,
                     sel_host.filter(|_| row_selected),
+                    i,
                 );
                 put(
                     buf,
@@ -1173,6 +1205,9 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     } else {
                         gstyle
                     };
+                    if x < sigma_x {
+                        record_glyph(ctx, x, y, i, h);
+                    }
                     x = put(buf, x, y, &glyph.to_string(), style, sigma_x);
                 }
                 if hops.len() > ctx.max_glyphs {
@@ -1260,6 +1295,7 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     Tint::Normal,
                     &[(String::new(), hosts.clone())],
                     sel_host.filter(|_| row_selected),
+                    i,
                 );
             }
             Row::Direct => {
@@ -1873,18 +1909,11 @@ fn draw_facts(buf: &mut Buffer, inner: Rect, ctx: &Ctx, sel: Option<MapSel>) {
         }
         let last = inner.y + inner.height.saturating_sub(1);
         let note = match run.failure() {
-            Some((i, reason, detail)) => {
-                let h = if reason.starts_with("host key") {
-                    "   H known hosts"
-                } else {
-                    ""
-                };
-                format!(
-                    "\u{2717} hop {} ({}): {reason} {detail}{h}   t again",
-                    i + 1,
-                    run.steps[i].label
-                )
-            }
+            Some((i, reason, detail)) => format!(
+                "\u{2717} hop {} ({}): {reason} {detail}   H known hosts  P push key  l ssh log  t again",
+                i + 1,
+                run.steps[i].label
+            ),
             None if run.running() => "Stops at the first failure. Esc cancels.".to_string(),
             None => "Esc closes. t tests again.".to_string(),
         };

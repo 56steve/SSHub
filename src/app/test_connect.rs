@@ -230,15 +230,45 @@ impl App {
         let Some(run) = self.test_run.as_mut() else {
             return;
         };
+        let mut log: Vec<crate::ssh::probe::SshLogEntry> = Vec::new();
         while let Ok(ev) = run.rx.try_recv() {
             match ev {
                 TestEvent::Step { index, state } => {
+                    // A failed step leaves its command and reason in the ssh
+                    // log of that host, where `l` on the map shows it.
+                    if let (StepState::Failed { reason, detail }, Some(step)) =
+                        (&state, run.steps.get(index))
+                    {
+                        let host = step.host.clone().unwrap_or_else(|| step.label.clone());
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_secs() as i64);
+                        let entry = |line: String, level| crate::ssh::probe::SshLogEntry {
+                            host_name: host.clone(),
+                            line,
+                            level,
+                            timestamp: now,
+                        };
+                        log.push(entry(
+                            format!("$ {}", step.cmd),
+                            crate::ssh::probe::LogLevel::Info,
+                        ));
+                        log.push(entry(
+                            format!("test connect: {reason} {detail}")
+                                .trim_end()
+                                .to_string(),
+                            crate::ssh::probe::LogLevel::Error,
+                        ));
+                    }
                     if let Some(slot) = run.states.get_mut(index) {
                         *slot = state;
                     }
                 }
                 TestEvent::Done => run.done = true,
             }
+        }
+        for e in log {
+            self.push_ssh_log(e);
         }
     }
 

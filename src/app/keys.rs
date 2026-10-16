@@ -1026,7 +1026,7 @@ impl App {
                     state.selected = 0;
                 } else {
                     self.known_hosts = None;
-                    self.mode = AppMode::Normal;
+                    self.mode = self.known_hosts_return.take().unwrap_or(AppMode::Normal);
                 }
             }
             KeyCode::Up => {

@@ -297,7 +297,7 @@ impl App {
         let hint = if run.running() {
             "Esc cancel"
         } else {
-            "t test again   Esc close   Save still allowed"
+            "t test again   H known hosts   Esc close   Save still allowed   (P push key, l ssh log: on the map)"
         };
         Some(TestView {
             title: format!("test chain \u{2500} {}", run.headline()),
@@ -491,6 +491,12 @@ impl App {
             KeyCode::Esc => return self.cancel_or_clear_test(true),
             KeyCode::Tab | KeyCode::BackTab => return false,
             KeyCode::Char('t') if plain => self.editor_start_test(),
+            // The known-hosts manager, then back to this form. Push key and the
+            // ssh log need a saved host and the hosts tab: they are on the map.
+            _ if self.is_action(KeyAction::KnownHosts, key) => {
+                self.known_hosts_return = Some(AppMode::HostForm);
+                self.open_known_hosts();
+            }
             KeyCode::Up if key.modifiers.is_empty() => {
                 if sel > 0 {
                     self.hop_editor.selected = sel - 1;

@@ -188,3 +188,74 @@ fn hop_editor_t_tests_the_chain_as_it_is_in_the_form() {
         .unwrap();
     assert!(app.host_form.is_none());
 }
+
+#[test]
+fn failed_test_offers_known_hosts_push_key_and_ssh_log() {
+    if !have_ssh() {
+        return;
+    }
+    let mut app = app(free_port(), free_port());
+    // A key identity so the push-key picker has something to offer.
+    app.store()
+        .create_identity(&sshub::store::NewIdentity {
+            name: "k".into(),
+            username: Some("u".into()),
+            private_key: Some("/tmp/does-not-matter".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    app.handle_key(key('6')).unwrap();
+    app.handle_key(key('t')).unwrap();
+    wait_done(&mut app);
+    let text = screen(&app, 160, 45);
+    assert!(text.contains("H known hosts"), "{text}");
+    assert!(text.contains("P push key"), "{text}");
+    assert!(text.contains("l ssh log"), "{text}");
+
+    // The failure is in the ssh log of the hop that failed.
+    assert!(app
+        .ssh_log
+        .iter()
+        .any(|e| e.host_name == "jump" && e.line.contains("refused")));
+
+    // l: the hosts tab with that host's log, zoomed.
+    app.handle_key(key('l')).unwrap();
+    assert_eq!(app.active_tab, 0);
+    assert!(app.panel_zoomed);
+    assert_eq!(app.focused_panel, sshub::app::PanelId::SshLog);
+    assert_eq!(app.selected_entry().unwrap().name(), "jump");
+    app.panel_zoomed = false;
+
+    // P: the identity picker, aimed at the failed hop.
+    app.handle_key(key('6')).unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT))
+        .unwrap();
+    assert_eq!(app.mode, sshub::app::AppMode::PushKeyIdentityPicker);
+    assert_eq!(app.selected_entry().unwrap().name(), "jump");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()))
+        .unwrap();
+
+    // H: known hosts, and Esc comes back to the map.
+    app.handle_key(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT))
+        .unwrap();
+    assert_eq!(app.mode, sshub::app::AppMode::KnownHosts);
+}
+
+#[test]
+fn hop_editor_h_opens_known_hosts_and_returns_to_the_form() {
+    if !have_ssh() {
+        return;
+    }
+    let mut app = app(free_port(), free_port());
+    let idx = app.hosts.iter().position(|h| h.name() == "db").unwrap();
+    assert!(app.reveal_host(idx));
+    app.handle_key(key('e')).unwrap();
+    app.host_form.as_mut().unwrap().field = HostFormField::ProxyJump;
+    app.handle_key(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT))
+        .unwrap();
+    assert_eq!(app.mode, sshub::app::AppMode::KnownHosts);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()))
+        .unwrap();
+    assert_eq!(app.mode, sshub::app::AppMode::HostForm);
+    assert_eq!(app.host_form.as_ref().unwrap().proxy_jump, "jump");
+}

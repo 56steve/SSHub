@@ -77,6 +77,9 @@ pub enum ClickHit {
         pane: crate::sftp::model::Focus,
         pos: Option<usize>,
     },
+    /// A hop or host glyph of the network map: `row` indexes the map's visible
+    /// rows, `pos` the cursor slot along it (see `MapView::pos`).
+    MapCell { row: usize, pos: usize },
 }
 
 /// A clickable region recorded by a renderer (#116): always a single row, so

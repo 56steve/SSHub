@@ -502,6 +502,9 @@ pub struct App {
     pub hop_editor: hop_editor::HopEditor,
     /// The running or last test connect (map or hop editor).
     pub test_run: Option<test_connect::TestRun>,
+    /// Where the known-hosts manager returns to when it was opened from a
+    /// form (the hop editor's `H`); `Normal` otherwise.
+    pub known_hosts_return: Option<AppMode>,
     pub audit_scroll: usize,
     pub agent_info: Option<crate::ssh::agent::AgentInfo>,
     agent_info_updated: std::time::Instant,
@@ -1122,6 +1125,7 @@ impl App {
             map_view: None,
             hop_editor: hop_editor::HopEditor::default(),
             test_run: None,
+            known_hosts_return: None,
             audit_scroll: 0,
             agent_info: None,
             agent_info_updated: std::time::Instant::now() - std::time::Duration::from_secs(60),

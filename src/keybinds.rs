@@ -68,6 +68,7 @@ pub enum KeyAction {
     MapFoldAll,
     MapUseAsJump,
     MapTest,
+    MapSshLog,
     IdentityColumnsInc,
     IdentityColumnsDec,
     AddToAgent,
@@ -120,7 +121,7 @@ pub enum KeyAction {
 
 impl KeyAction {
     /// All editable actions, in display order.
-    pub const ALL: [KeyAction; 107] = [
+    pub const ALL: [KeyAction; 108] = [
         KeyAction::Save,
         KeyAction::Quit,
         KeyAction::Help,
@@ -180,6 +181,7 @@ impl KeyAction {
         KeyAction::MapFoldAll,
         KeyAction::MapUseAsJump,
         KeyAction::MapTest,
+        KeyAction::MapSshLog,
         KeyAction::IdentityColumnsInc,
         KeyAction::IdentityColumnsDec,
         KeyAction::AddToAgent,
@@ -291,6 +293,7 @@ impl KeyAction {
             KeyAction::MapFoldAll => "Map: fold all clusters, or expand direct-only",
             KeyAction::MapUseAsJump => "Map: use the hop as the jump of another host",
             KeyAction::MapTest => "Map: test the selected path",
+            KeyAction::MapSshLog => "Map: show the ssh log of the failed hop",
             KeyAction::IdentityColumnsInc => "More identity columns",
             KeyAction::IdentityColumnsDec => "Fewer identity columns",
             KeyAction::AddToAgent => "Add key to agent",
@@ -406,6 +409,7 @@ pub struct KeybindsConfig {
     pub map_fold_all: Vec<String>,
     pub map_use_as_jump: Vec<String>,
     pub map_test: Vec<String>,
+    pub map_ssh_log: Vec<String>,
     pub identity_columns_inc: Vec<String>,
     pub identity_columns_dec: Vec<String>,
     pub add_to_agent: Vec<String>,
@@ -518,6 +522,7 @@ impl Default for KeybindsConfig {
             map_fold_all: vec!["Shift+Z".into()],
             map_use_as_jump: vec!["u".into()],
             map_test: vec!["t".into()],
+            map_ssh_log: vec!["l".into()],
             identity_columns_inc: vec!["]".into()],
             identity_columns_dec: vec!["[".into()],
             add_to_agent: vec!["p".into()],
@@ -735,6 +740,7 @@ impl KeybindsConfig {
             KeyAction::MapFoldAll => &self.map_fold_all,
             KeyAction::MapUseAsJump => &self.map_use_as_jump,
             KeyAction::MapTest => &self.map_test,
+            KeyAction::MapSshLog => &self.map_ssh_log,
             KeyAction::IdentityColumnsInc => &self.identity_columns_inc,
             KeyAction::IdentityColumnsDec => &self.identity_columns_dec,
             KeyAction::AddToAgent => &self.add_to_agent,
@@ -847,6 +853,7 @@ impl KeybindsConfig {
             KeyAction::MapFoldAll => self.map_fold_all = binds,
             KeyAction::MapUseAsJump => self.map_use_as_jump = binds,
             KeyAction::MapTest => self.map_test = binds,
+            KeyAction::MapSshLog => self.map_ssh_log = binds,
             KeyAction::IdentityColumnsInc => self.identity_columns_inc = binds,
             KeyAction::IdentityColumnsDec => self.identity_columns_dec = binds,
             KeyAction::AddToAgent => self.add_to_agent = binds,
