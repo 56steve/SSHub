@@ -89,12 +89,21 @@ impl RawHop {
 /// (leading `-`), or with whitespace or control characters, is refused.
 pub fn parse_raw_hop(token: &str) -> Option<RawHop> {
     let hop = parse_raw_hop_unchecked(token)?;
-    // OpenSSH 9.6+ refuses these in a `-J` user or host; older ones hand them
-    // to a shell. Either way a hop with one is not a hop.
-    const USER_BAD: &str = "\"&'();<>`{|}";
-    const HOST_BAD: &str = "\"$&'()/;<>\\`{|}";
-    let bad = |s: &str, set: &str| s.chars().any(|c| set.contains(c));
-    if hop.user.as_deref().is_some_and(|u| bad(u, USER_BAD)) || bad(&hop.host, HOST_BAD) {
+    // OpenSSH runs the `-J` hop helper (`exec ssh -l <user> ... -W host:port`)
+    // through a shell without quoting the user, and itself accepts `$`, `\`,
+    // `=` and `/` in one: `a$IFS-oProxyCommand=touch\$IFS/x@h` becomes an
+    // injected option. A blocklist cannot keep up with that, so only what a real
+    // login or host name is made of gets through.
+    let user_ok = |u: &str| {
+        !u.starts_with('-')
+            && u.chars()
+                .all(|c| c.is_ascii_alphanumeric() || ".+-_%@".contains(c))
+    };
+    let host_ok = |h: &str, ipv6: bool| {
+        h.chars()
+            .all(|c| c.is_ascii_alphanumeric() || ".-_%".contains(c) || (ipv6 && c == ':'))
+    };
+    if !hop.user.as_deref().is_none_or(user_ok) || !host_ok(&hop.host, hop.ipv6) {
         return None;
     }
     Some(hop)

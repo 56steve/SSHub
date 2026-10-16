@@ -278,7 +278,7 @@ fn chain_rule_matches_what_real_ssh_does() {
         .output()
         .is_err()
     {
-        eprintln!("skipping: no ssh binary");
+        crate::test_support::tool_missing("ssh");
         return;
     }
     let dir = tempfile::tempdir().unwrap();

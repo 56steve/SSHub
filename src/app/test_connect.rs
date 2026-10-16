@@ -35,6 +35,18 @@ impl Drop for TestRun {
     /// helpers instead of letting them run to the step timeout.
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
+        // The worker is detached: it kills the ssh process group when it sees
+        // the flag (within its poll interval) and then sends `Done`. Wait for
+        // that, briefly, so no ssh or `-W` helper outlives sshub.
+        if !self.done {
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+                match self.rx.recv_timeout(left) {
+                    Ok(TestEvent::Done) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }
     }
 }
 
@@ -681,5 +693,117 @@ mod tests {
             .unwrap()
             .iter()
             .any(|g| g.name == "prod"));
+    }
+
+    /// Run `argv` (an ssh command line) for real, bounded and non-interactive.
+    fn run_ssh(argv: &[String]) {
+        let mut cmd = std::process::Command::new(&argv[0]);
+        cmd.args([
+            "-F",
+            "/dev/null",
+            "-o",
+            "ConnectTimeout=2",
+            "-o",
+            "BatchMode=yes",
+        ])
+        .args(&argv[1..])
+        .arg("true")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+        let _ = cmd.status();
+    }
+
+    /// OpenSSH runs the `-J` hop helper through a shell and does not quote the
+    /// user: `a$IFS-oProxyCommand=touch\$IFS/x@h` becomes an injected option.
+    /// No path that builds an ssh argv may let such a hop through.
+    #[test]
+    fn a_shell_injecting_hop_user_never_reaches_ssh_through_any_builder() {
+        if !std::process::Command::new("ssh").arg("-V").output().is_ok() {
+            crate::test_support::tool_missing("ssh");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("pwned");
+        let user = format!("a$IFS-oProxyCommand=touch\\$IFS{}", marker.display());
+        let hostile = format!("{user}@127.0.0.1:1");
+
+        // Control: raw ssh with this -J does run it, so the test is not blind.
+        run_ssh(&[
+            "ssh".into(),
+            "-J".into(),
+            hostile.clone(),
+            "t@127.0.0.1".into(),
+        ]);
+        if !marker.exists() {
+            eprintln!("note: this ssh does not run the injection; refusal asserts still apply");
+        }
+        let _ = std::fs::remove_file(&marker);
+
+        let mut app = crate::app::tests::test_app(vec![]);
+        let group = app
+            .store()
+            .create_group(&crate::store::NewHostGroup {
+                name: "g".into(),
+                default_proxy_jump: Some(hostile.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut own = NewHost::launcher("own", "10.0.0.1");
+        own.proxy_jump = Some(hostile.clone());
+        let mut grouped = NewHost::launcher("grouped", "10.0.0.2");
+        grouped.group_id = Some(group.id);
+        let mut hop = NewHost::launcher("hop", "10.0.0.3");
+        hop.username = Some(user.clone());
+        let mut via_hop = NewHost::launcher("via-hop", "10.0.0.4");
+        via_hop.proxy_jump = Some("hop".into());
+        let mut hosts = Vec::new();
+        for nh in [own, grouped, hop, via_hop] {
+            hosts.push(app.store().create_host(&nh).unwrap());
+        }
+        app.reload_hosts().unwrap();
+
+        for h in [&hosts[0], &hosts[1], &hosts[3]] {
+            // Connect, tunnel, broadcast, SFTP and push key all start here.
+            let refused = match app.store().resolve_connection(h) {
+                Err(_) => true,
+                Ok(r) => {
+                    if r.jump_error.is_none() {
+                        run_ssh(&crate::app::resolved_session_argv(h, &r));
+                    }
+                    r.jump_error.is_some()
+                }
+            };
+            assert!(refused, "{} was not refused", h.name);
+            let entry = HostEntry::from_managed(h.clone());
+            assert!(app.connect_host_entry(entry).is_ok());
+            assert!(app.sessions.is_empty(), "{}: a session was spawned", h.name);
+        }
+        // The display fallback keeps the jump out of argv or flags it.
+        for h in &hosts {
+            let r = crate::store::ResolvedConnection::from_stored(h);
+            if r.jump_error.is_none() {
+                run_ssh(&crate::app::resolved_session_argv(h, &r));
+            }
+        }
+
+        // The map and the hop editor: a hostile token is a skipped step, never
+        // an ssh command; a stored hop with a hostile user is refused too.
+        for hops in [
+            vec![Some(hostile.clone())],
+            vec![Some("hop".to_string())],
+            vec![Some("own".to_string()), Some(hostile.clone())],
+        ] {
+            for step in app.test_steps(&hops, TestTarget::None) {
+                if step.skip.is_none() {
+                    run_ssh(&step.argv);
+                }
+            }
+            let via = app.test_steps(&hops, TestTarget::Host(0));
+            for step in via.iter().filter(|s| s.skip.is_none()) {
+                run_ssh(&step.argv);
+            }
+        }
+        assert!(!marker.exists(), "an injected -oProxyCommand ran");
     }
 }

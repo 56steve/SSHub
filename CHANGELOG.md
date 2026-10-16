@@ -27,6 +27,12 @@ All notable changes to SSHub are documented in this file.
 
 ### Fixed
 
+- **A ProxyJump hop with a shell-active user could run commands** - OpenSSH runs
+  the `-J` hop helper through a shell without quoting the user, so a stored or
+  imported ProxyJump such as `a$IFS-oProxyCommand=touch$IFS/tmp/x@host` ran
+  `touch` on connect, tunnel, broadcast and push-key. A hop must now be a
+  `[user@]host[:port]` of login and host-name characters only, everywhere a
+  jump reaches ssh; anything else is refused with a message.
 - **ProxyJump through a host that only exists in SSHub** - `ssh -J name` looked
   the name up in DNS and `~/.ssh/config`, so a jump host saved only in SSHub
   failed to resolve. The connect, tunnel and broadcast commands now hand ssh

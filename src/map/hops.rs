@@ -204,17 +204,21 @@ mod tests {
 
     /// Tokens some ssh takes that this parser still refuses, on purpose: an
     /// empty port (`h:`) is a typo here, not a hop.
-    const STRICTER: &[&str] = &["h:"];
+    const STRICTER: &[&str] = &["h:", HOSTILE];
 
-    /// What older OpenSSH hands to its shell or to its own option parser, and
-    /// newer OpenSSH (9.6 and later) refuses: whitespace, shell metacharacters,
-    /// a leading `-`. Refusing these is the point, whatever the local ssh does.
-    fn unsafe_for_older_ssh(token: &str) -> bool {
-        token
-            .chars()
-            .any(|c| c.is_whitespace() || "\"$&'()/;<>\\`{|}".contains(c))
-            || token.starts_with('-')
-            || token.split('@').any(|p| p.starts_with('-'))
+    /// ssh takes this, and hands the user to a shell: it splits into `-l a` and
+    /// an injected `-oProxyCommand=...`. We must refuse it whatever ssh says.
+    const HOSTILE: &str = "a$IFS-oProxyCommand=touch\\$IFS/tmp/x@127.0.0.1:1";
+
+    /// Characters outside what a login or host name is made of. ssh takes some
+    /// of them (`$`, `=`, `/`, `\\`) and hands the user to a shell, so we refuse
+    /// them whatever the local ssh says; a leading `-` likewise.
+    fn outside_the_allowlist(token: &str) -> bool {
+        let rest = token.strip_prefix("ssh://").unwrap_or(token);
+        rest.chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || ".+-_%@:[]".contains(c)))
+            || rest.starts_with('-')
+            || rest.split('@').any(|p| p.starts_with('-'))
     }
 
     #[test]
@@ -253,6 +257,11 @@ mod tests {
             "u;x@h",
             "-h",
             "h\tx",
+            HOSTILE,
+            "u@$HOME",
+            "a=b@h",
+            "a/b@h",
+            "ops.dev+x%y@h-1.example:22",
         ] {
             let ours = token_issue(token).is_none();
             let theirs = ssh_takes(token);
@@ -260,10 +269,27 @@ mod tests {
             assert!(!ours || theirs, "we accept {token:?}, ssh -J refuses it");
             // ...and refuse only what ssh refuses, bar the deliberate cases.
             assert!(
-                ours || !theirs || STRICTER.contains(&token) || unsafe_for_older_ssh(token),
+                ours || !theirs || STRICTER.contains(&token) || outside_the_allowlist(token),
                 "we refuse {token:?}, which ssh -J takes"
             );
         }
+    }
+
+    #[test]
+    fn we_refuse_the_shell_injecting_user_even_though_ssh_takes_it() {
+        if std::process::Command::new("ssh")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
+            crate::test_support::tool_missing("ssh");
+            return;
+        }
+        assert!(ssh_takes(HOSTILE), "the oracle is blind: ssh refuses it");
+        assert!(token_issue(HOSTILE).is_some());
+        assert!(validate_raw(HOSTILE).is_err());
+        assert!(!jump_is_valid(&format!("ok,{HOSTILE}")));
+        assert!(jump_problem(HOSTILE).is_some());
     }
 
     #[test]
@@ -275,5 +301,19 @@ mod tests {
         assert!(parse_raw_hop("-x@a@b").is_none());
         assert!(parse_raw_hop("a@b c@d").is_none());
         assert!(parse_raw_hop("a@b@").is_none());
+        // Allowlist: a login or host name, nothing a shell would expand.
+        for bad in [
+            HOSTILE, "u@$HOME", "a=b@h", "a/b@h", "a\\b@h", "u@h$x", "u@h/x", "é@h",
+        ] {
+            assert!(parse_raw_hop(bad).is_none(), "{bad:?}");
+        }
+        for good in [
+            "ops.dev+x%y@h-1.example:22",
+            "john@corp.com@10.0.0.1",
+            "[::1]:22",
+            "a@[fe80::1%eth0]:2",
+        ] {
+            assert!(parse_raw_hop(good).is_some(), "{good:?}");
+        }
     }
 }
