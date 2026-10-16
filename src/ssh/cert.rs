@@ -580,7 +580,7 @@ mod tests {
         validity: &str,
     ) -> (std::path::PathBuf, std::path::PathBuf) {
         if Command::new("ssh-keygen").arg("-V").output().is_err() {
-            eprintln!("skipping: no ssh-keygen binary");
+            crate::test_support::tool_missing("ssh-keygen");
             panic!("ssh-keygen required for cert oracle tests");
         }
         let ca = dir.path().join("ca");

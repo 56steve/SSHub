@@ -373,7 +373,7 @@ mod tests {
         // ssh here dials a closed port, so it never asks.
         use crate::store::{LauncherStore, NewHost};
         if Command::new("ssh").arg("-V").output().is_err() {
-            eprintln!("skipping: no ssh binary");
+            crate::test_support::tool_missing("ssh");
             return;
         }
         let free_port = || {

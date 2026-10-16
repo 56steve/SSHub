@@ -288,6 +288,10 @@ pub const HELP_ITEMS: &[HelpItem] = &[
         desc: "Walk along the row: hop by hop, then its host glyphs",
     },
     HelpItem::Entry {
+        key: "\u{2039} +n hops \u{203a}",
+        desc: "A chain of pass-through hops is one row; \u{2190}\u{2192} still walk the folded hops",
+    },
+    HelpItem::Entry {
         key: "Enter",
         desc: "Connect to the hop or host (raw hop: ad-hoc); on a cluster, open or fold it",
     },
@@ -317,7 +321,7 @@ pub const HELP_ITEMS: &[HelpItem] = &[
     },
     HelpItem::Entry {
         key: "t",
-        desc: "Test the path with ssh -J, hop by hop; Esc cancels, H opens known hosts",
+        desc: "Test the path with ssh -J, hop by hop; steps after a failure read skipped; Esc cancels, H opens known hosts",
     },
     HelpItem::Entry {
         key: "H / P / l",

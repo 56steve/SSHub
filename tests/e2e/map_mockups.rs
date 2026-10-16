@@ -446,10 +446,16 @@ fn check(name: &str, mockup: &str, screen: &[String], needles: &[&str]) {
 }
 
 const FOOTER_D01: &str = "↑↓ row ←→ along the path ↵ connect / filter B blast o tunnel lens u use as jump t test ␣ fold e edit y copy cmd ? help q quit";
+/// The first tree row of the fleet: the root hop and its edge.
+const TREE_ROW: &str = "◉ you──┬─▸● bastion-eu";
 const LEGEND_EDGE: &str = "─▸ jump edge ┈┈ \"hosts behind\" leader Σ all hosts behind, any depth";
 
 #[test]
 fn mockup_key_rows_are_on_the_screen() {
+    // D12 and D13 run real ssh: under an empty HOME and ssh config, or not at all.
+    if !super::support::have_ssh() {
+        return;
+    }
     let size = (160, 45);
     let render = |app: &App| grid(app, size.0, size.1);
     let tree = "─ map ─ hops as a tree · hosts as glyphs behind their last hop";
@@ -457,7 +463,7 @@ fn mockup_key_rows_are_on_the_screen() {
     // D01 default, D02 selected glyph, D03 blast, D04 filter, D05 tunnel lens.
     let mut f = fleet(188, true);
     to_map(&mut f.app);
-    check("D01Default", "D01Default", &render(&f.app), &[tree, "─ path ribbon ─ bastion-eu", FOOTER_D01, "→ walks right along the row: hop → its glyphs, one host per step. ↵ connects to bastion-eu.", "─ legend ─", "─ node ─ bastion-eu", "Shift+Z expand into one glyph strip per group (a health board)", LEGEND_EDGE]);
+    check("D01Default", "D01Default", &render(&f.app), &[TREE_ROW, tree, "─ path ribbon ─ bastion-eu", FOOTER_D01, "→ walks right along the row: hop → its glyphs, one host per step. ↵ connects to bastion-eu.", "─ legend ─", "─ node ─ bastion-eu", "Shift+Z expand into one glyph strip per group (a health board)", LEGEND_EDGE]);
     down(&mut f.app, 1);
     f.app.handle_key(key(KeyCode::Right)).unwrap();
     f.app.handle_key(key(KeyCode::Right)).unwrap();
@@ -466,6 +472,7 @@ fn mockup_key_rows_are_on_the_screen() {
         "D02SelectedDetail",
         &render(&f.app),
         &[
+            TREE_ROW,
             tree,
             FOOTER_D01,
             LEGEND_EDGE,
@@ -482,6 +489,7 @@ fn mockup_key_rows_are_on_the_screen() {
         "D03BlastRadius",
         &render(&f.app),
         &[
+            TREE_ROW,
             "─ path ribbon ─ bastion-eu",
             "B blast off Esc clear n/N next dependent b broadcast to these y copy list ? help",
             "─ blast radius ─ bastion-eu",
@@ -499,6 +507,7 @@ fn mockup_key_rows_are_on_the_screen() {
         "D04Filter",
         &render(&f.app),
         &[
+            TREE_ROW,
             "─ map ─ filter · tag:db",
             "┆raw┆ ‹proxy cmd› ┄┄ ↻ ══ cycle ◇ reused hop",
         ],
@@ -509,7 +518,7 @@ fn mockup_key_rows_are_on_the_screen() {
     down(&mut f.app, 1);
     f.app.handle_key(key(KeyCode::Right)).unwrap();
     press(&mut f.app, 'o');
-    check("D05TunnelLens", "D05TunnelLens", &render(&f.app), &["─ map ─ tunnel lens · ⇄ on hops and hosts that carry a tunnel", "╘══↻ loop-a ═════════════════▸↻ loop-b ══▸ loop-a ┈┈┈┈┈┈ lab ·· cycle · not connectable 2", "─ tunnels ─ 5", LEGEND_EDGE]);
+    check("D05TunnelLens", "D05TunnelLens", &render(&f.app), &[TREE_ROW, "─ map ─ tunnel lens · ⇄ on hops and hosts that carry a tunnel", "╘══↻ loop-a ═════════════════▸↻ loop-b ══▸ loop-a ┈┈┈┈┈┈ lab ·· cycle · not connectable 2", "─ tunnels ─ 5", LEGEND_EDGE]);
 
     // D06: the cursor on the loop row.
     let mut f = fleet(188, true);
@@ -526,7 +535,7 @@ fn mockup_key_rows_are_on_the_screen() {
         }
         down(&mut f.app, 1);
     }
-    check("D06EdgeCases", "D06EdgeCases", &render(&f.app), &[tree, "─ path ribbon ─ loop-a · cycle", "Not connectable. Clear ProxyJump on loop-a or loop-b, then t test. ↵ opens the hop editor."]);
+    check("D06EdgeCases", "D06EdgeCases", &render(&f.app), &[TREE_ROW, tree, "─ path ribbon ─ loop-a · cycle", "Not connectable. Clear ProxyJump on loop-a or loop-b, then t test. ↵ opens the hop editor."]);
 
     // D07 empty, D14 direct-only expanded (Shift+Z).
     let mut f = fleet(214, false);
@@ -631,13 +640,12 @@ fn mockup_key_rows_are_on_the_screen() {
     f.app.handle_key(key(KeyCode::Right)).unwrap();
     f.app.handle_key(key(KeyCode::Right)).unwrap();
     press(&mut f.app, 't');
-    std::thread::sleep(std::time::Duration::from_millis(300));
     f.app.poll_test_run();
     check(
         "D12InProgress",
         "D12InProgress",
         &render(&f.app),
-        &["─ steps ─", LEGEND_EDGE],
+        &[TREE_ROW, "─ steps ─", LEGEND_EDGE],
     );
 
     // D13: the hop editor after a failed test of its chain.
@@ -656,7 +664,7 @@ fn mockup_key_rows_are_on_the_screen() {
         if f.app.test_run.as_ref().is_some_and(|r| !r.running()) {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
     check(
         "D13Failed",

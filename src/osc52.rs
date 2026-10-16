@@ -30,8 +30,9 @@ thread_local! {
 }
 
 /// Run `f` with the clipboard writes of this thread kept in memory instead of
-/// sent to the terminal, and return them. For tests: a copied command must be
+/// sent to the terminal, and return them. For tests (hidden from the docs): a copied command must be
 /// checkable without the escape sequence landing in the developer's clipboard.
+#[doc(hidden)]
 pub fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
     CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
     let out = f();

@@ -605,7 +605,7 @@ mod tests {
         // `-?` is an invalid flag: it prints usage and exits without touching
         // anything. Only a spawn failure means the binary is missing.
         if Command::new("ssh-keygen").arg("-?").output().is_err() {
-            eprintln!("skipping: no ssh-keygen binary");
+            crate::test_support::tool_missing("ssh-keygen");
             return;
         }
         let dir = tempfile::tempdir().unwrap();

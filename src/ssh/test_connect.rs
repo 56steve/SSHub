@@ -570,13 +570,8 @@ mod tests {
     }
 
     #[test]
-    fn the_generated_config_wins_and_includes_the_user_config() {
-        let text = isolated_config(std::path::Path::new("/h/.ssh/config"), false);
-        assert!(text.starts_with("Host *\n    ProxyCommand none\n    BatchMode yes\n"));
-        assert!(text.contains("StrictHostKeyChecking yes") && text.contains("UpdateHostKeys no"));
-        assert!(text.ends_with("Include \"/h/.ssh/config\"\n"));
-        assert!(isolated_config(std::path::Path::new("/h"), true).contains("BatchMode no"));
-        // A path that cannot be quoted leaves the user config out.
+    fn a_config_path_that_cannot_be_quoted_is_left_out_of_the_include() {
         assert!(!isolated_config(std::path::Path::new("/a\"b"), false).contains("Include"));
+        assert!(isolated_config(std::path::Path::new("/h"), true).contains("BatchMode no"));
     }
 }

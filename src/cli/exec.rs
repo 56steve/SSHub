@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn argv_is_understood_by_real_ssh() {
         if Command::new("ssh").arg("-V").output().is_err() {
-            eprintln!("skipping: no ssh binary");
+            crate::test_support::tool_missing("ssh");
             return;
         }
 
@@ -560,7 +560,7 @@ mod tests {
     fn a_config_remote_command_does_not_defeat_the_ad_hoc_command() {
         use std::io::Write;
         if Command::new("ssh").arg("-V").output().is_err() {
-            eprintln!("skipping: no ssh binary");
+            crate::test_support::tool_missing("ssh");
             return;
         }
 

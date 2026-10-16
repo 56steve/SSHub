@@ -352,7 +352,7 @@ mod tests {
     fn an_option_like_address_is_not_read_as_an_ssh_option() {
         use std::process::Command;
         if Command::new("ssh").arg("-V").output().is_err() {
-            eprintln!("skipping: no ssh binary");
+            crate::test_support::tool_missing("ssh");
             return;
         }
 

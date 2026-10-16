@@ -29,8 +29,7 @@ impl HostResolver for EmptyResolver {
 }
 
 fn have_ssh() -> bool {
-    super::support::isolate_home();
-    std::process::Command::new("ssh").arg("-V").output().is_ok()
+    super::support::have_ssh()
 }
 
 fn free_port() -> u16 {

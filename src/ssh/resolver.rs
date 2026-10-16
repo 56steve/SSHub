@@ -466,7 +466,7 @@ remotecommand tmux attach
     fn listed_aliases_round_trip_through_real_ssh() {
         use std::io::Write;
         if Command::new("ssh").arg("-V").output().is_err() {
-            eprintln!("skipping: no ssh binary");
+            crate::test_support::tool_missing("ssh");
             return;
         }
 

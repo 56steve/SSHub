@@ -525,7 +525,8 @@ fn pickers_do_not_open_where_the_outline_has_no_room_to_draw_them() {
 fn y_shell_quotes_every_word_of_the_copied_command() {
     // Names, users and addresses come from imports: `;`, `$()` and a quote must
     // not run or split when the copied line is pasted into a shell.
-    let marker = tempfile::tempdir().unwrap().keep().join("pwned");
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("pwned");
     let address = format!("db$(touch {}) x;y", marker.display());
     let store = Arc::new(LauncherStore::open_in_memory().unwrap());
     store
