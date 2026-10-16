@@ -17,7 +17,16 @@ pub enum MapSel {
     Cycle(usize),
     /// The direct-only bucket.
     Direct,
+    /// A cluster of root hops, by index in [`Map::clusters`].
+    Cluster(usize),
+    /// The folded tail of an open cluster.
+    More(usize),
 }
+
+/// Root hops of an open cluster shown before the tail folds.
+pub const CLUSTER_SHOWN: usize = 12;
+/// Extra hops one reveal step shows.
+pub const REVEAL_STEP: usize = 20;
 
 /// Run state of a tunnel, for the tunnel lens colours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,15 +93,27 @@ pub struct MapView {
     /// The filter line owns the keyboard.
     pub editing: bool,
     pub picker: Option<TagPicker>,
+    /// Clusters (by name) whose hops are listed.
+    pub open_clusters: HashSet<String>,
+    /// Extra hops revealed per open cluster, in [`REVEAL_STEP`] units.
+    pub revealed: HashMap<String, usize>,
+    /// The direct-only bucket is expanded into one strip per group.
+    pub direct_open: bool,
+    /// Per trie node: some host behind it (or on it) matches the filter.
+    match_node: Vec<bool>,
 }
 
 impl MapView {
     pub fn new(map: Map) -> Self {
-        let all_rows = map.rows();
-        Self {
+        let mut open_clusters = HashSet::new();
+        // The biggest cluster starts open so the tree is visible.
+        if let Some(c) = map.clusters.first() {
+            open_clusters.insert(c.name.clone());
+        }
+        let mut view = Self {
             map,
-            rows: all_rows.clone(),
-            all_rows,
+            all_rows: Vec::new(),
+            rows: Vec::new(),
             context: HashSet::new(),
             matched: None,
             row: 0,
@@ -101,7 +122,70 @@ impl MapView {
             query: String::new(),
             editing: false,
             picker: None,
+            open_clusters,
+            revealed: HashMap::new(),
+            direct_open: false,
+            match_node: Vec::new(),
+        };
+        view.all_rows = view.build_rows();
+        view.rows = view.all_rows.clone();
+        view
+    }
+
+    pub fn clustered(&self) -> bool {
+        !self.map.clusters.is_empty()
+    }
+
+    /// Roots of cluster `c` that are listed: the top of the Σ order, every
+    /// root a filter matches, and whatever reveal steps added.
+    fn shown_roots(&self, c: usize) -> Vec<usize> {
+        let cl = &self.map.clusters[c];
+        let extra = self.revealed.get(&cl.name).copied().unwrap_or(0);
+        let top = CLUSTER_SHOWN + extra * REVEAL_STEP;
+        cl.roots
+            .iter()
+            .enumerate()
+            .filter(|(i, &r)| *i < top || self.match_node.get(r).copied().unwrap_or(false))
+            .map(|(_, &r)| r)
+            .collect()
+    }
+
+    /// Every row of the map under the current fold state.
+    fn build_rows(&self) -> Vec<Row> {
+        fn walk(map: &Map, n: usize, out: &mut Vec<Row>) {
+            out.push(Row::Node(n));
+            for &c in &map.nodes[n].children {
+                walk(map, c, out);
+            }
         }
+        let map = &self.map;
+        let mut rows = Vec::new();
+        if map.clusters.is_empty() {
+            for &r in &map.roots {
+                walk(map, r, &mut rows);
+            }
+        } else {
+            for (ci, c) in map.clusters.iter().enumerate() {
+                rows.push(Row::Cluster(ci));
+                if self.open_clusters.contains(&c.name) {
+                    let shown = self.shown_roots(ci);
+                    for &r in &shown {
+                        walk(map, r, &mut rows);
+                    }
+                    if shown.len() < c.roots.len() {
+                        rows.push(Row::More(ci));
+                    }
+                }
+            }
+        }
+        rows.extend((0..map.cycles.len()).map(Row::Cycle));
+        if !map.direct.is_empty() {
+            rows.push(Row::Direct);
+            if self.direct_open {
+                rows.extend((0..map.direct_groups.len()).map(Row::DirectGroup));
+            }
+        }
+        rows
     }
 
     /// Hops on the path to `row`'s node (1 for a loop or the direct bucket).
@@ -116,11 +200,7 @@ impl MapView {
         let Some(&r) = self.rows.get(row) else {
             return 0;
         };
-        self.hop_count(row)
-            + match r {
-                Row::Direct => 0,
-                _ => self.map.row_hosts(r).len(),
-            }
+        self.hop_count(row) + self.map.row_hosts(r).len()
     }
 
     pub fn selection(&self) -> Option<MapSel> {
@@ -141,7 +221,22 @@ impl MapView {
                     MapSel::Host(*self.map.row_hosts(r).get(self.pos - hops)?)
                 }
             }
+            Row::Cluster(i) => {
+                if self.pos < hops {
+                    MapSel::Cluster(i)
+                } else {
+                    MapSel::Host(*self.map.row_hosts(r).get(self.pos - hops)?)
+                }
+            }
+            Row::More(i) => MapSel::More(i),
             Row::Direct => MapSel::Direct,
+            Row::DirectGroup(_) => {
+                if self.pos < hops {
+                    MapSel::Direct
+                } else {
+                    MapSel::Host(*self.map.row_hosts(r).get(self.pos - hops)?)
+                }
+            }
         })
     }
 
@@ -200,18 +295,45 @@ impl MapView {
         }
     }
 
-    /// Re-derive the visible rows from `query`, keeping the cursor on what it
-    /// stood on when that is still shown.
+    /// Re-derive the visible rows from `query` and the fold state, keeping the
+    /// cursor on what it stood on when that is still shown.
     pub fn apply_filter(&mut self) {
         let before = self.selection();
         let filter = crate::map::MapFilter::parse(&self.query);
         self.context.clear();
         if filter.is_empty() {
             self.matched = None;
+            self.match_node.clear();
+            self.all_rows = self.build_rows();
             self.rows = self.all_rows.clone();
         } else {
             let matched: HashSet<usize> = filter.matching(&self.map).into_iter().collect();
+            // A node matches when a host on it or anywhere behind it does, or
+            // when the node is itself a matching host. Parents come before
+            // their children, so one reverse pass lifts matches up the tree.
             let map = &self.map;
+            let mut match_node: Vec<bool> = map
+                .nodes
+                .iter()
+                .map(|n| {
+                    matches!(n.key, HopKey::Saved(h) if matched.contains(&h))
+                        || n.cargo
+                            .iter()
+                            .any(|(_, hs)| hs.iter().any(|h| matched.contains(h)))
+                })
+                .collect();
+            for n in (0..map.nodes.len()).rev() {
+                if match_node[n] {
+                    if let Some(p) = map.nodes[n].parent {
+                        match_node[p] = true;
+                    }
+                }
+            }
+            self.match_node = match_node;
+            self.matched = Some(matched);
+            self.all_rows = self.build_rows();
+            let map = &self.map;
+            let matched = self.matched.as_ref().expect("just set");
             let strong: Vec<bool> = self
                 .all_rows
                 .iter()
@@ -220,11 +342,14 @@ impl MapView {
                         matches!(map.nodes[n].key, HopKey::Saved(h) if matched.contains(&h))
                             || map.row_hosts(r).iter().any(|h| matched.contains(h))
                     }
+                    Row::Cluster(c) => map.clusters[c].roots.iter().any(|&r| self.match_node[r]),
+                    Row::More(_) => false,
                     Row::Cycle(i) => {
                         map.cycles[i].path.iter().any(|h| matched.contains(h))
                             || map.row_hosts(r).iter().any(|h| matched.contains(h))
                     }
                     Row::Direct => map.direct.iter().any(|h| matched.contains(h)),
+                    Row::DirectGroup(_) => map.row_hosts(r).iter().any(|h| matched.contains(h)),
                 })
                 .collect();
             let depth = |r: Row| match r {
@@ -249,7 +374,6 @@ impl MapView {
             }
             self.rows = rows;
             self.context = context;
-            self.matched = Some(matched);
         }
         self.row = self.row.min(self.rows.len().saturating_sub(1));
         match before {
@@ -265,6 +389,55 @@ impl MapView {
         self.clamp();
     }
 
+    /// After a filter is kept (Enter): open only the clusters that hold a
+    /// match and fold the rest.
+    pub fn reveal_matches(&mut self) {
+        if !self.clustered() || self.matched.is_none() {
+            return;
+        }
+        self.open_clusters = self
+            .map
+            .clusters
+            .iter()
+            .filter(|c| c.roots.iter().any(|&r| self.match_node[r]))
+            .map(|c| c.name.clone())
+            .collect();
+        self.apply_filter();
+    }
+
+    /// Space: fold or unfold what the cursor is on.
+    pub fn toggle_fold(&mut self) {
+        match self.selection() {
+            Some(MapSel::Cluster(c)) => {
+                let name = self.map.clusters[c].name.clone();
+                if !self.open_clusters.remove(&name) {
+                    self.open_clusters.insert(name);
+                }
+            }
+            Some(MapSel::More(c)) => {
+                *self
+                    .revealed
+                    .entry(self.map.clusters[c].name.clone())
+                    .or_default() += 1;
+            }
+            Some(MapSel::Direct) => self.direct_open = !self.direct_open,
+            _ => return,
+        }
+        self.apply_filter();
+    }
+
+    /// Shift+Z: fold every cluster, or when none is open, expand the
+    /// direct-only bucket (and fold it again on the next press).
+    pub fn fold_all(&mut self) {
+        if !self.open_clusters.is_empty() {
+            self.open_clusters.clear();
+            self.revealed.clear();
+        } else {
+            self.direct_open = !self.direct_open;
+        }
+        self.apply_filter();
+    }
+
     /// Whether `row` (index into `rows`) lies inside the active blast radius.
     fn row_in_radius(&self, blast: &BlastLens, row: usize) -> bool {
         match self.rows[row] {
@@ -277,8 +450,21 @@ impl MapView {
                 .hosts
                 .iter()
                 .any(|h| blast.hosts.contains(h)),
-            Row::Direct => false,
+            Row::Cluster(c) => self.map.clusters[c]
+                .roots
+                .iter()
+                .any(|&r| self.node_in_radius(blast, r)),
+            Row::More(_) | Row::Direct | Row::DirectGroup(_) => false,
         }
+    }
+
+    /// Whether `node` or anything below it is on the blast radius' path.
+    fn node_in_radius(&self, blast: &BlastLens, node: usize) -> bool {
+        self.map.nodes[node].key == blast.key
+            || self.map.nodes[node]
+                .children
+                .iter()
+                .any(|&c| self.node_in_radius(blast, c))
     }
 
     /// How `row` is drawn under the active lens and filter.
@@ -501,6 +687,16 @@ impl App {
                 }
             }
             _ if self.is_action(KeyAction::MapToggleTunnel, &key) => self.map_toggle_tunnel()?,
+            _ if self.is_action(KeyAction::MapFold, &key) => {
+                if let Some(v) = self.map_view.as_mut() {
+                    v.toggle_fold();
+                }
+            }
+            _ if self.is_action(KeyAction::MapFoldAll, &key) => {
+                if let Some(v) = self.map_view.as_mut() {
+                    v.fold_all();
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -517,7 +713,11 @@ impl App {
                 v.query.clear();
                 v.editing = false;
             }
-            KeyCode::Enter => v.editing = false,
+            KeyCode::Enter => {
+                v.editing = false;
+                v.reveal_matches();
+                return;
+            }
             KeyCode::Backspace => {
                 v.query.pop();
             }
@@ -647,6 +847,12 @@ impl App {
         let Some(sel) = v.selection() else {
             return Ok(());
         };
+        if matches!(sel, MapSel::Cluster(_) | MapSel::More(_)) {
+            if let Some(v) = self.map_view.as_mut() {
+                v.toggle_fold();
+            }
+            return Ok(());
+        }
         let in_loop = |h: usize| matches!(v.map.chains[h], crate::map::Chain::Cycle(_));
         match sel {
             MapSel::Host(h) if in_loop(h) => {
@@ -677,6 +883,7 @@ impl App {
                     v.map.direct.len()
                 ));
             }
+            MapSel::Cluster(_) | MapSel::More(_) => {}
         }
         Ok(())
     }

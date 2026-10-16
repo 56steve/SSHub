@@ -13,14 +13,21 @@ use ratatui::layout::Rect;
 use ratatui::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::network_map::{HostTunnel, Lens, MapSel, MapView, Tint, TunnelState};
+use crate::app::network_map::{HostTunnel, Lens, MapSel, MapView, Tint, TunnelState, REVEAL_STEP};
 use crate::app::App;
 use crate::map::{Chain, Hop, HopKey, HopKind, JumpSource, Map, Row, PROXY_CMD_LABEL};
 use crate::theme::catalog::{ColorRole, StyleRole};
 use crate::theme::model::ResolvedTheme;
 
 /// Most glyphs one group shows before `+n`.
-const MAX_GLYPHS: usize = 10;
+/// Glyphs one group shows before `+n` (6 under 120 columns).
+fn max_glyphs(width: u16) -> usize {
+    if width >= 120 {
+        10
+    } else {
+        6
+    }
+}
 
 /// Terminal cells a string takes.
 fn cells(s: &str) -> u16 {
@@ -77,6 +84,7 @@ struct Ctx<'a> {
     st: &'a Styles,
     /// Tunnels by host index (tunnel lens, facts).
     tunnels: HashMap<usize, Vec<HostTunnel>>,
+    max_glyphs: usize,
 }
 
 impl Ctx<'_> {
@@ -273,7 +281,12 @@ pub fn render_map(frame: &mut Frame, area: Rect, app: &App) {
         view,
         st: &st,
         tunnels: app.map_tunnels(),
+        max_glyphs: max_glyphs(area.width),
     };
+    if area.width < 80 || area.height < 24 {
+        draw_outline(frame.buffer_mut(), area, &ctx);
+        return;
+    }
     let buf = frame.buffer_mut();
     let sel = view.selection();
     let title = map_title(&ctx);
@@ -307,6 +320,120 @@ pub fn render_map(frame: &mut Frame, area: Rect, app: &App) {
         let inner = panel(buf, facts, &facts_title, st.dim, st.bright);
         draw_facts(buf, inner, &ctx, sel);
     }
+}
+
+/// Below 80x24 the tree is an outline: one hop per row, depth as indent, the
+/// selected path on the last line (cut from the left when it is too long).
+fn draw_outline(buf: &mut Buffer, area: Rect, ctx: &Ctx) {
+    let (view, st) = (ctx.view, ctx.st);
+    let right = area.x + area.width;
+    let map = &view.map;
+    let list_h = area.height.saturating_sub(2) as usize;
+    let title = crate::tui::text::ellipsize(&map_title(ctx), area.width as usize - 1);
+    put(buf, area.x, area.y, &title, st.bright, right);
+    let first = (view.row + 1).saturating_sub(list_h);
+    for (k, &row) in view.rows.iter().enumerate().skip(first).take(list_h) {
+        let y = area.y + 1 + (k - first) as u16;
+        let (indent, text, n) = match row {
+            Row::Node(n) => {
+                let node = &map.nodes[n];
+                let label = match &node.key {
+                    HopKey::Saved(h) => {
+                        let g = host_status(ctx.app, st, *h).glyph;
+                        format!("{g} {}", map.hosts[*h].name)
+                    }
+                    other => map.key_label(other),
+                };
+                (node.depth + 1, label, node.sigma)
+            }
+            Row::Cluster(c) => (
+                0,
+                format!(
+                    "{} {}",
+                    if view.open_clusters.contains(&map.clusters[c].name) {
+                        '\u{25be}'
+                    } else {
+                        '\u{25b8}'
+                    },
+                    map.clusters[c].name
+                ),
+                map.clusters[c].sigma,
+            ),
+            Row::More(c) => (1, "\u{2026} more hops".into(), map.clusters[c].roots.len()),
+            Row::Cycle(i) => (
+                0,
+                format!("\u{21bb} loop {}", map.hosts[map.cycles[i].path[0]].name),
+                map.cycles[i].hosts.len(),
+            ),
+            Row::Direct => (0, "\u{22ef} direct-only".into(), map.direct.len()),
+            Row::DirectGroup(g) => (
+                1,
+                map.direct_groups[g].0.clone(),
+                map.direct_groups[g].1.len(),
+            ),
+        };
+        let style = if k == view.row {
+            st.selected
+        } else {
+            match view.tint(k) {
+                Tint::Dim => st.dim,
+                Tint::Warn => st.warn,
+                Tint::Normal => st.text,
+            }
+        };
+        let tree = if indent == 0 {
+            String::new()
+        } else {
+            format!("{}\u{251c} ", "  ".repeat(indent - 1))
+        };
+        let line = format!("{tree}{text}");
+        let room = (area.width as usize).saturating_sub(6);
+        put(
+            buf,
+            area.x,
+            y,
+            &crate::tui::text::ellipsize(&line, room),
+            style,
+            right,
+        );
+        put(
+            buf,
+            right.saturating_sub(5),
+            y,
+            &format!("{n:>4}"),
+            st.bright,
+            right,
+        );
+    }
+    // Selected path, cut from the left.
+    let (cards, _) = cards_for(view, view.selection(), st);
+    let mut path = String::from("you");
+    for c in &cards {
+        path.push_str(" \u{203a} ");
+        path.push_str(&c.name);
+    }
+    let w = area.width as usize;
+    let shown = if path.chars().count() > w {
+        let tail: String = path
+            .chars()
+            .rev()
+            .take(w.saturating_sub(1))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("\u{2026}{tail}")
+    } else {
+        path
+    };
+    put(
+        buf,
+        area.x,
+        area.y + area.height - 1,
+        &shown,
+        st.accent,
+        right,
+    );
 }
 
 /// A bordered panel with a title; returns the inner rect.
@@ -347,6 +474,8 @@ fn sel_title(view: &MapView, sel: Option<MapSel>) -> String {
             view.map.hosts[view.map.cycles[i].path[0]].name
         ),
         Some(MapSel::Direct) => "direct-only".into(),
+        Some(MapSel::Cluster(c)) => format!("cluster {}", view.map.clusters[c].name),
+        Some(MapSel::More(c)) => format!("more hops in {}", view.map.clusters[c].name),
         None => String::new(),
     }
 }
@@ -515,8 +644,8 @@ fn draw_strip(
         // Keep the selected glyph on screen when the group is longer than the cap.
         let start = selected
             .and_then(|s| hosts.iter().position(|&h| h == s))
-            .map_or(0, |p| (p + 1).saturating_sub(MAX_GLYPHS));
-        let shown = hosts.iter().skip(start).take(MAX_GLYPHS);
+            .map_or(0, |p| (p + 1).saturating_sub(ctx.max_glyphs));
+        let shown = hosts.iter().skip(start).take(ctx.max_glyphs);
         for &h in shown {
             let (glyph, gstyle) = ctx.glyph(h, tint);
             let style = if selected == Some(h) {
@@ -526,7 +655,7 @@ fn draw_strip(
             };
             x = put(buf, x, y, &glyph.to_string(), style, max_x);
         }
-        let hidden = hosts.len().saturating_sub(MAX_GLYPHS);
+        let hidden = hosts.len().saturating_sub(ctx.max_glyphs);
         if hidden > 0 {
             x = put(buf, x, y, &format!("+{hidden}"), st.muted, max_x);
         }
@@ -589,21 +718,32 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
         .enumerate()
         .filter(|(_, r)| match r {
             Row::Node(n) => map.nodes[*n].depth == 0,
-            Row::Cycle(_) => true,
-            Row::Direct => false,
+            Row::Cycle(_) | Row::Cluster(_) => true,
+            Row::Direct | Row::More(_) | Row::DirectGroup(_) => false,
         })
         .map(|(i, _)| i)
         .collect();
+    let top_set: HashSet<usize> = top.iter().copied().collect();
+    // In a clustered map the cluster rows own the left trunk and the root
+    // hops sit one step in, under their cluster.
+    let clustered = view.clustered();
+    let top: Vec<usize> = if clustered {
+        top.into_iter()
+            .filter(|&i| !matches!(view.rows[i], Row::Node(_)))
+            .collect()
+    } else {
+        top
+    };
     let last_top = top.last().copied();
 
     // One blank row between top-level items when everything fits.
     let visible = inner.height.saturating_sub(2) as usize;
-    let blanks = top.len().saturating_sub(1) + usize::from(map.rows().last() == Some(&Row::Direct));
+    let blanks = top.len().saturating_sub(1) + usize::from(view.rows.contains(&Row::Direct));
     let spacious = view.rows.len() + blanks <= visible;
     let mut ys: Vec<usize> = Vec::with_capacity(view.rows.len());
     let mut y = 0usize;
     for (i, r) in view.rows.iter().enumerate() {
-        let starts_item = top.contains(&i) || matches!(r, Row::Direct);
+        let starts_item = (top_set.contains(&i) && !clustered) || matches!(r, Row::Direct);
         if spacious && starts_item && i > 0 {
             y += 1;
         }
@@ -652,12 +792,16 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                 };
                 let fill = if look.dashed { "\u{2504}" } else { "\u{2500}" };
                 let col = if node.depth == 0 {
-                    cols.hop1
+                    cols.hop1 + if clustered { 3 } else { 0 }
                 } else {
                     cols.hop2
                 };
                 // Connector into the node.
-                if node.depth == 0 {
+                if node.depth == 0 && clustered {
+                    put(buf, cx(cols.hop1), y, "\u{251c}", edge_style, right);
+                    put(buf, cx(cols.hop1 + 1), y, fill, edge_style, right);
+                    put(buf, cx(cols.hop1 + 2), y, "\u{25b8}", edge_style, right);
+                } else if node.depth == 0 {
                     let first = top.first() == Some(&i);
                     let last = last_top == Some(i);
                     let joint = match (first, last) {
@@ -841,8 +985,173 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     right,
                 );
             }
+            Row::Cluster(c) => {
+                let cl = &map.clusters[c];
+                let open = view.open_clusters.contains(&cl.name);
+                let tint = view.tint(i);
+                let first = top.first() == Some(&i);
+                let last = last_top == Some(i);
+                let edge = if tint == Tint::Warn { st.warn } else { st.dim };
+                if first {
+                    put(
+                        buf,
+                        cx(1),
+                        y,
+                        "\u{25c9} you",
+                        st.accent.add_modifier(Modifier::BOLD),
+                        right,
+                    );
+                    put(buf, cx(7), y, "\u{2500}\u{2500}", edge, right);
+                }
+                let joint = match (first, last) {
+                    (true, true) => "\u{2500}",
+                    (true, false) => "\u{252c}",
+                    (false, true) => "\u{2514}",
+                    _ => "\u{251c}",
+                };
+                put(buf, cx(cols.trunk1()), y, joint, edge, right);
+                put(
+                    buf,
+                    cx(cols.trunk1() + 1),
+                    y,
+                    "\u{2500}\u{25b8}",
+                    edge,
+                    right,
+                );
+                let style = match (
+                    row_selected && matches!(sel, Some(MapSel::Cluster(_))),
+                    tint,
+                ) {
+                    (true, _) => st.selected,
+                    (_, Tint::Dim) => st.dim,
+                    (_, Tint::Warn) => st.warn,
+                    _ => st.text,
+                };
+                let head = format!(
+                    "{} {}  {} hops",
+                    if open { "\u{25be}" } else { "\u{25b8}" },
+                    crate::tui::text::ellipsize(&cl.name, 20),
+                    cl.roots.len()
+                );
+                let end = put(buf, cx(cols.hop1), y, &head, style, cx(cols.cargo));
+                for x in end + 1..cx(cols.cargo).saturating_sub(1) {
+                    put(buf, x, y, "\u{2508}", st.dim, right);
+                }
+                // The strip of the cluster is its hops themselves, one glyph each.
+                put(buf, cx(cols.cargo), y, "hops ", st.muted, sigma_x);
+                let hops = map.row_hosts(row);
+                let mut x = cx(cols.cargo) + 5;
+                let selected = sel_host.filter(|_| row_selected);
+                for (k, &h) in hops.iter().take(ctx.max_glyphs).enumerate() {
+                    let _ = k;
+                    let (glyph, gstyle) = ctx.glyph(h, tint);
+                    let style = if selected == Some(h) {
+                        st.selected
+                    } else {
+                        gstyle
+                    };
+                    x = put(buf, x, y, &glyph.to_string(), style, sigma_x);
+                }
+                if hops.len() > ctx.max_glyphs {
+                    put(
+                        buf,
+                        x,
+                        y,
+                        &format!("+{}", hops.len() - ctx.max_glyphs),
+                        st.muted,
+                        sigma_x,
+                    );
+                }
+                let sigma_style = match tint {
+                    Tint::Dim => st.dim,
+                    Tint::Warn => st.warn,
+                    Tint::Normal => st.bright,
+                };
+                put(
+                    buf,
+                    sigma_x,
+                    y,
+                    &format!("{:>4}", cl.sigma),
+                    sigma_style,
+                    right,
+                );
+            }
+            Row::More(c) => {
+                let cl = &map.clusters[c];
+                let shown = cl
+                    .roots
+                    .iter()
+                    .filter(|&&r| view.rows.contains(&Row::Node(r)))
+                    .count();
+                let hidden = cl.roots.len() - shown;
+                let tail_max = cl.roots[shown.min(cl.roots.len() - 1)..]
+                    .iter()
+                    .map(|&r| map.nodes[r].sigma)
+                    .max()
+                    .unwrap_or(0);
+                put(
+                    buf,
+                    cx(cols.hop1),
+                    y,
+                    "\u{2514}\u{2500}\u{25b8}",
+                    st.dim,
+                    right,
+                );
+                let style = if row_selected { st.selected } else { st.muted };
+                put(
+                    buf,
+                    cx(cols.hop1 + 4),
+                    y,
+                    &format!(
+                        "\u{2026} {hidden} more hops  \u{3a3} \u{2264} {tail_max} each \u{b7} space shows {REVEAL_STEP} more"
+                    ),
+                    style,
+                    sigma_x,
+                );
+            }
+            Row::DirectGroup(g) => {
+                let (name, hosts) = &map.direct_groups[g];
+                let style = if row_selected && matches!(sel, Some(MapSel::Direct)) {
+                    st.selected
+                } else {
+                    st.muted
+                };
+                put(
+                    buf,
+                    cx(3),
+                    y,
+                    &format!(
+                        "{:<12}{:>4}",
+                        crate::tui::text::ellipsize(name, 12),
+                        hosts.len()
+                    ),
+                    style,
+                    cx(cols.cargo),
+                );
+                draw_strip(
+                    buf,
+                    cx(cols.hop1 + 6),
+                    y,
+                    sigma_x,
+                    ctx,
+                    Tint::Normal,
+                    &[(String::new(), hosts.clone())],
+                    sel_host.filter(|_| row_selected),
+                );
+            }
             Row::Direct => {
-                put(buf, cx(1), y, "\u{22ef}", st.muted, right);
+                put(
+                    buf,
+                    cx(1),
+                    y,
+                    if view.direct_open {
+                        "\u{25be}"
+                    } else {
+                        "\u{22ef}"
+                    },
+                    st.muted,
+                    right,
+                );
                 let style = if row_selected { st.selected } else { st.muted };
                 put(
                     buf,
@@ -852,6 +1161,25 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     style,
                     cx(cols.cargo),
                 );
+                if view.direct_open {
+                    put(
+                        buf,
+                        cx(cols.cargo),
+                        y,
+                        &format!("{} hosts, one strip per group", map.direct.len()),
+                        st.muted,
+                        sigma_x,
+                    );
+                    put(
+                        buf,
+                        sigma_x,
+                        y,
+                        &format!("{:>4}", map.direct.len()),
+                        st.bright,
+                        right,
+                    );
+                    continue;
+                }
                 let mut groups: BTreeMap<&str, usize> = BTreeMap::new();
                 for &h in &map.direct {
                     *groups.entry(map.hosts[h].group.as_str()).or_default() += 1;
@@ -1194,7 +1522,9 @@ fn ribbon_hint(sel: MapSel) -> String {
         MapSel::Hop(_) => "\u{2192} walks right along the row: hop, then its glyphs, one host per step.  \u{21b5} connects.".into(),
         MapSel::Host(_) => "\u{21b5} connects through this path.".into(),
         MapSel::Cycle(_) => "jump loop: not connectable. e edits a host in it.".into(),
-        MapSel::Direct => String::new(),
+        MapSel::Cluster(_) => "\u{21b5} or space opens the cluster. Shift+Z folds all.".into(),
+        MapSel::More(_) => "space reveals more hops.".into(),
+        MapSel::Direct => "space expands one strip per group.".into(),
     }
 }
 
@@ -1468,6 +1798,17 @@ fn draw_facts(buf: &mut Buffer, inner: Rect, ctx: &Ctx, sel: Option<MapSel>) {
         Some(MapSel::Direct) => {
             rows.push(("direct", format!("{} hosts, no jump", map.direct.len())));
         }
+        Some(MapSel::Cluster(c)) => {
+            let cl = &map.clusters[c];
+            rows.push(("cluster", cl.name.clone()));
+            rows.push((
+                "carries",
+                format!("{} hops, {} hosts behind them", cl.roots.len(), cl.sigma),
+            ));
+        }
+        Some(MapSel::More(c)) => {
+            rows.push(("more", format!("hops folded in {}", map.clusters[c].name)));
+        }
         None => {}
     }
     for (i, (k, v)) in rows.iter().take(inner.height as usize).enumerate() {
@@ -1668,6 +2009,158 @@ mod tests {
         let buf = render(&app, 160, 45);
         let (x, y) = find_text(&buf, "bastion-eu");
         assert_eq!(buf.cell((x - 2, y)).unwrap().symbol(), "\u{25cb}");
+    }
+
+    /// 212 jump hosts in 4 groups of 53 (a chain of up to 6 hops in the first
+    /// group) and 1,840 hosts in all.
+    fn big_fleet() -> Vec<MapHost> {
+        let mut hosts = Vec::new();
+        for g in 0..4 {
+            for j in 0..53 {
+                let name = format!("jump-{g}-{j}");
+                let jump = if g == 0 && (1..6).contains(&j) {
+                    Some(format!("jump-0-{}", j - 1))
+                } else {
+                    None
+                };
+                let mut h = host(&name, &format!("hops-{g}"), jump.as_deref());
+                h.ssh_config = true;
+                hosts.push(h);
+            }
+        }
+        let jumps = hosts.len();
+        for k in 0..(1840 - jumps) {
+            let via = format!("jump-{}-{}", k % 4, (k / 4) % 53);
+            hosts.push(host(
+                &format!("srv-{k}"),
+                &format!("fleet-{}", k % 9),
+                Some(&via),
+            ));
+        }
+        hosts
+    }
+
+    #[test]
+    fn big_map_is_clustered_sorted_and_tail_folded() {
+        let app = app_with(big_fleet());
+        let v = app.map_view.as_ref().unwrap();
+        assert_eq!(v.map.hosts.len(), 1840);
+        assert_eq!(v.map.clusters.len(), 4);
+        assert!(v.clustered());
+        // Only the biggest cluster starts open; its tail folds after 12 hops.
+        let clusters = v
+            .rows
+            .iter()
+            .filter(|r| matches!(r, Row::Cluster(_)))
+            .count();
+        assert_eq!(clusters, 4);
+        assert_eq!(v.open_clusters.len(), 1);
+        assert!(v.rows.iter().any(|r| matches!(r, Row::More(_))));
+        let buf = render(&app, 160, 45);
+        let text = all_text(&buf);
+        assert!(text.contains("hops-0"), "{text}");
+        assert!(text.contains("more hops"), "{text}");
+        assert!(text.contains("hops-1"), "{text}");
+    }
+
+    #[test]
+    fn cluster_fold_reveal_and_filter_reveal() {
+        let mut app = app_with(big_fleet());
+        let v = app.map_view.as_mut().unwrap();
+        // Cursor on the first cluster row: space folds it, space opens it.
+        assert!(matches!(v.selection(), Some(MapSel::Cluster(_))));
+        let rows_open = v.rows.len();
+        v.toggle_fold();
+        assert!(v.rows.len() < rows_open);
+        v.toggle_fold();
+        assert_eq!(v.rows.len(), rows_open);
+        // Walk to the More row: space reveals 20 more hops.
+        let more = v
+            .rows
+            .iter()
+            .position(|r| matches!(r, Row::More(_)))
+            .unwrap();
+        v.row = more;
+        v.pos = 0;
+        v.toggle_fold();
+        assert!(v.rows.len() > rows_open);
+        // A filter + Enter opens only the clusters that hold the match.
+        v.query = "via:jump-2-7".into();
+        v.apply_filter();
+        v.reveal_matches();
+        let open: Vec<_> = v.open_clusters.iter().cloned().collect();
+        assert_eq!(open, ["hops-2"]);
+        // Shift+Z folds all, the next press expands direct-only (none here).
+        v.fold_all();
+        assert!(v.open_clusters.is_empty());
+    }
+
+    #[test]
+    fn direct_only_expands_into_one_strip_per_group() {
+        let mut hosts = fleet();
+        for k in 0..30 {
+            hosts.push(host(
+                &format!("lone-{k}"),
+                if k % 2 == 0 { "lab" } else { "home" },
+                None,
+            ));
+        }
+        let mut app = app_with(hosts);
+        let v = app.map_view.as_mut().unwrap();
+        let direct = v.rows.iter().position(|r| *r == Row::Direct).unwrap();
+        v.row = direct;
+        v.pos = 0;
+        v.toggle_fold();
+        assert!(v.rows.iter().any(|r| matches!(r, Row::DirectGroup(_))));
+        let text = all_text(&render(&app, 160, 45));
+        assert!(text.contains("one strip per group"), "{text}");
+        assert!(text.contains("lab") && text.contains("home"), "{text}");
+    }
+
+    #[test]
+    fn narrow_modes_render_without_overflow() {
+        let app = app_with(fleet());
+        // 100x30: compact columns, no latency, one-line ribbon.
+        let t = all_text(&render(&app, 100, 30));
+        assert!(t.contains("bastion-eu") && t.contains("path ribbon"), "{t}");
+        // Under 80x24: outline with the selected path on the last line.
+        let buf = render(&app, 70, 20);
+        let last = row_text(&buf, 19);
+        assert!(last.starts_with("you "), "{last:?}");
+        let t = all_text(&buf);
+        assert!(t.contains("\u{251c} "), "{t}");
+        // Under 40x12: the size hint.
+        assert!(all_text(&render(&app, 39, 11)).contains("map needs 40x12"));
+        // Every size draws.
+        for (w, h) in [(40, 12), (79, 23), (80, 24), (99, 29), (200, 60)] {
+            let _ = render(&app, w, h);
+        }
+    }
+
+    #[test]
+    fn the_212_jump_host_fleet_renders_within_one_frame_budget() {
+        let mut app = app_with(big_fleet());
+        // Open everything and walk to the middle: the worst case.
+        let v = app.map_view.as_mut().unwrap();
+        for c in v.map.clusters.clone() {
+            v.open_clusters.insert(c.name);
+        }
+        v.apply_filter();
+        v.row = v.rows.len() / 2;
+        // Warm up, then take the best of a few frames.
+        let _ = render(&app, 160, 45);
+        let best = (0..5)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                let _ = render(&app, 160, 45);
+                t.elapsed()
+            })
+            .min()
+            .unwrap();
+        assert!(
+            best < std::time::Duration::from_millis(50),
+            "frame took {best:?}"
+        );
     }
 
     #[test]

@@ -247,12 +247,46 @@ pub struct Node {
 /// One line of the map, top to bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Row {
+    /// A group of root hops, by index in [`Map::clusters`] (only on big maps).
+    Cluster(usize),
+    /// The folded tail of an open cluster.
+    More(usize),
     /// A hop node (depth-first: a parent, then its children).
     Node(usize),
     /// A jump loop, by index in [`Map::cycles`].
     Cycle(usize),
     /// The hosts with no jump.
     Direct,
+    /// One group of the expanded direct-only bucket, by index in
+    /// [`Map::direct_groups`].
+    DirectGroup(usize),
+}
+
+/// More root hops than this are grouped into clusters.
+pub const CLUSTER_ROOTS: usize = 24;
+
+/// A group of root hops on a big map: the hop's own group, or for ungrouped
+/// ssh_config hops the domain suffix, then the /24.
+#[derive(Debug, Clone)]
+pub struct Cluster {
+    pub name: String,
+    /// Root trie nodes, biggest subtree first.
+    pub roots: Vec<usize>,
+    /// Hosts behind all of them.
+    pub sigma: usize,
+}
+
+/// `10.20.4.0/24` for an IPv4 address, the domain after the first label for a
+/// name (`db.corp.example` -> `*.corp.example`), the whole text otherwise.
+fn address_cluster(address: &str) -> String {
+    if let Ok(ip) = address.parse::<std::net::Ipv4Addr>() {
+        let o = ip.octets();
+        return format!("{}.{}.{}.0/24", o[0], o[1], o[2]);
+    }
+    match address.split_once('.') {
+        Some((_, rest)) if rest.contains('.') => format!("*.{rest}"),
+        _ => address.to_string(),
+    }
 }
 
 /// A jump loop and the hosts stuck behind it.
@@ -271,6 +305,10 @@ pub struct Map {
     /// Hosts with no jump that nothing jumps through.
     pub direct: Vec<usize>,
     pub cycles: Vec<CycleRow>,
+    /// The direct-only hosts by group, biggest group first.
+    pub direct_groups: Vec<(String, Vec<usize>)>,
+    /// Root hops grouped, empty unless there are more than [`CLUSTER_ROOTS`].
+    pub clusters: Vec<Cluster>,
     /// Final trie node of each host's chain (`None`: direct or cyclic).
     pub host_node: Vec<Option<usize>>,
 }
@@ -390,30 +428,57 @@ impl Map {
         map.cycles = loops.into_values().collect();
         map.hosts = hosts;
         map.chains = chains;
+        map.direct_groups = map.group_direct();
+        if map.roots.len() > CLUSTER_ROOTS {
+            map.clusters = map.cluster_roots();
+        }
         map
     }
 
-    /// The map's rows in drawing order: every root subtree depth-first, then the
-    /// jump loops, then the direct-only bucket.
-    pub fn rows(&self) -> Vec<Row> {
-        fn walk(map: &Map, n: usize, out: &mut Vec<Row>) {
-            out.push(Row::Node(n));
-            for &c in &map.nodes[n].children {
-                walk(map, c, out);
-            }
-        }
-        let mut rows = Vec::new();
+    /// Group the root hops: `roots` is already biggest-first, so each cluster's
+    /// members keep that order.
+    fn cluster_roots(&self) -> Vec<Cluster> {
+        let mut by_name: BTreeMap<String, Cluster> = BTreeMap::new();
         for &r in &self.roots {
-            walk(self, r, &mut rows);
+            let name = match &self.nodes[r].key {
+                HopKey::Saved(h) => {
+                    let host = &self.hosts[*h];
+                    if host.group == "_ungrouped" {
+                        address_cluster(&host.address)
+                    } else {
+                        host.group.clone()
+                    }
+                }
+                HopKey::Raw(raw) => address_cluster(&raw.host),
+                HopKey::ProxyCmd(_) => PROXY_CMD_LABEL.to_string(),
+                HopKey::Invalid(_) => "invalid hops".to_string(),
+            };
+            let c = by_name.entry(name.clone()).or_insert_with(|| Cluster {
+                name,
+                roots: Vec::new(),
+                sigma: 0,
+            });
+            c.roots.push(r);
+            c.sigma += self.nodes[r].sigma;
         }
-        rows.extend((0..self.cycles.len()).map(Row::Cycle));
-        if !self.direct.is_empty() {
-            rows.push(Row::Direct);
-        }
-        rows
+        let mut clusters: Vec<Cluster> = by_name.into_values().collect();
+        clusters.sort_by(|a, b| b.sigma.cmp(&a.sigma).then_with(|| a.name.cmp(&b.name)));
+        clusters
     }
 
-    /// Hosts drawn as glyphs on `row`, left to right.
+    fn group_direct(&self) -> Vec<(String, Vec<usize>)> {
+        let mut by: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        for &h in &self.direct {
+            by.entry(self.hosts[h].group.as_str()).or_default().push(h);
+        }
+        let mut groups: Vec<(String, Vec<usize>)> =
+            by.into_iter().map(|(g, h)| (g.to_string(), h)).collect();
+        groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+        groups
+    }
+
+    /// Hosts drawn as glyphs on `row`, left to right. A cluster's strip is its
+    /// hops themselves (hops are hosts too).
     pub fn row_hosts(&self, row: Row) -> Vec<usize> {
         match row {
             Row::Node(n) => self.nodes[n]
@@ -421,8 +486,17 @@ impl Map {
                 .iter()
                 .flat_map(|(_, h)| h.iter().copied())
                 .collect(),
+            Row::Cluster(c) => self.clusters[c]
+                .roots
+                .iter()
+                .filter_map(|&r| match self.nodes[r].key {
+                    HopKey::Saved(h) => Some(h),
+                    _ => None,
+                })
+                .collect(),
             Row::Cycle(i) => self.cycles[i].hosts.clone(),
-            Row::Direct => self.direct.clone(),
+            Row::DirectGroup(i) => self.direct_groups[i].1.clone(),
+            Row::Direct | Row::More(_) => Vec::new(),
         }
     }
 
