@@ -1004,6 +1004,27 @@ fn draw_strip(
     x
 }
 
+/// The folded hops right above `n` (nearest first): they have no row, `n`'s row
+/// speaks for them.
+fn folded_chain(map: &Map, n: usize) -> Vec<usize> {
+    let mut chain = Vec::new();
+    let mut at = map.nodes[n].parent;
+    while let Some(p) = at.filter(|&p| map.folded[p]) {
+        chain.push(p);
+        at = map.nodes[p].parent;
+    }
+    chain
+}
+
+/// The root hop whose own row `n` took over (it is folded and `n` is where its
+/// chain ends): `n`'s row then starts at the left trunk.
+fn folded_top(map: &Map, n: usize) -> Option<usize> {
+    folded_chain(map, n)
+        .last()
+        .copied()
+        .filter(|&t| map.nodes[t].depth == 0)
+}
+
 /// Every host behind the hops of cluster `c`, at any depth.
 fn cluster_hosts(map: &Map, c: usize) -> Vec<usize> {
     let mut out = Vec::new();
@@ -1140,7 +1161,10 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
         .iter()
         .enumerate()
         .filter(|(_, r)| match r {
-            Row::Node(n) => map.nodes[*n].depth == 0 && !in_cluster.contains(n),
+            Row::Node(n) => {
+                (map.nodes[*n].depth == 0 || folded_top(map, *n).is_some())
+                    && !in_cluster.contains(n)
+            }
             Row::Cycle(_) | Row::Cluster(_) => true,
             Row::Direct | Row::More(_) | Row::DirectGroup(_) => false,
         })
@@ -1216,9 +1240,11 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                 };
                 let fill = if look.dashed { "\u{2504}" } else { "\u{2500}" };
                 let under = node.depth == 0 && in_cluster.contains(&n);
+                let merged = folded_top(map, n);
+                let is_top = node.depth == 0 || merged.is_some();
                 let col = if under {
                     cols.hop1 + 4
-                } else if node.depth == 0 {
+                } else if is_top {
                     cols.hop1
                 } else {
                     cols.hop2
@@ -1228,7 +1254,7 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     put(buf, cx(cols.hop1 + 1), y, "\u{251c}", edge_style, right);
                     put(buf, cx(cols.hop1 + 2), y, fill, edge_style, right);
                     put(buf, cx(cols.hop1 + 3), y, "\u{25b8}", edge_style, right);
-                } else if node.depth == 0 {
+                } else if is_top {
                     let first = top.first() == Some(&i);
                     let last = last_top == Some(i);
                     let joint = match (first, last) {
@@ -1263,8 +1289,8 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                 }
                 // Folded middle hops: only two hop columns exist.
                 let mut text = look.text.clone();
-                if node.depth >= 2 {
-                    text = format!("\u{2039}+{}\u{203a} {text}", node.depth - 1);
+                if merged.is_none() && node.depth >= 2 {
+                    text = format!("\u{2039} +{} hops \u{203a} {text}", node.depth - 1);
                 }
                 let mut style = match tint {
                     Tint::Dim => st.dim,
@@ -1272,17 +1298,53 @@ fn draw_map(buf: &mut Buffer, inner: Rect, ctx: &Ctx) {
                     Tint::Normal if on_path => st.accent,
                     Tint::Normal => look.style,
                 };
-                let hop_selected = row_selected && matches!(sel, Some(MapSel::Hop(h)) if h == n);
-                if hop_selected {
+                let selected_hop = if row_selected {
+                    match sel {
+                        Some(MapSel::Hop(h)) => Some(h),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if selected_hop == Some(n) {
                     style = st.selected;
                 }
-                let end = put(buf, cx(col), y, &text, style, sigma_x);
+                let mut at = cx(col);
+                // The root hop and the hops folded after it share this row:
+                // `edge-gw ─▸ ‹ +4 hops › ─▸ vault-core`.
+                if let Some(top_hop) = merged {
+                    let first = node_look(ctx, &cols, top_hop, &shared);
+                    let first_style = if selected_hop == Some(top_hop) {
+                        st.selected
+                    } else if tint == Tint::Normal {
+                        first.style
+                    } else {
+                        style
+                    };
+                    at = put(buf, cx(col), y, &first.text, first_style, sigma_x);
+                    let chain = folded_chain(map, n);
+                    let mid_selected = selected_hop.is_some_and(|h| chain.contains(&h));
+                    if node.depth > 1 {
+                        at = put(buf, at, y, " \u{2500}\u{25b8} ", edge_style, sigma_x);
+                        let mid = format!("\u{2039} +{} hops \u{203a}", node.depth - 1);
+                        let mid_style = if mid_selected { st.selected } else { st.muted };
+                        at = put(buf, at, y, &mid, mid_style, sigma_x);
+                        at = put(buf, at, y, " ", edge_style, sigma_x);
+                    } else {
+                        at = put(buf, at, y, " ", edge_style, sigma_x);
+                    }
+                    at = put(buf, at, y, "\u{2500}\u{25b8}", edge_style, sigma_x);
+                }
+                let end = put(buf, at, y, &text, style, sigma_x);
                 // Edge from the node to the cargo column.
                 if !node.children.is_empty() {
                     for x in end + 1..cx(cols.trunk2()) {
                         put(buf, x, y, fill, edge_style, right);
                     }
-                    put(buf, cx(cols.trunk2()), y, "\u{252c}", edge_style, right);
+                    // A merged row can run past the trunk: no joint then.
+                    if end <= cx(cols.trunk2()) {
+                        put(buf, cx(cols.trunk2()), y, "\u{252c}", edge_style, right);
+                    }
                     for x in cx(cols.trunk2()) + 1..cx(cols.cargo).saturating_sub(1) {
                         put(buf, x, y, "\u{2508}", st.dim, right);
                     }
@@ -2984,5 +3046,35 @@ mod tests {
         let buf = render(&app, 160, 45);
         let t = all_text(&buf);
         assert!(t.contains("No hosts yet."), "{t}");
+    }
+
+    #[test]
+    fn a_long_chain_is_one_row_with_a_fold_marker() {
+        let hops = "u@10.0.0.1,u@10.0.0.2,u@10.0.0.3,u@10.0.0.4,u@10.0.0.5,u@10.0.0.6";
+        let mut hosts = vec![host("deep-1", "vault", Some(hops))];
+        hosts.push(host("deep-2", "vault", Some(hops)));
+        let mut app = app_with(hosts);
+        let v = app.map_view.as_ref().unwrap();
+        // One row for the whole chain (plus the direct-only row, if any).
+        let node_rows = v.rows.iter().filter(|r| matches!(r, Row::Node(_))).count();
+        assert_eq!(node_rows, 1, "{:?}", v.rows);
+        let text = all_text(&render(&app, 160, 45));
+        assert!(
+            text.contains("\u{2039} +4 hops \u{203a}"),
+            "one fold marker with the number of hidden hops:\n{text}"
+        );
+        // The row starts at the left trunk with the first hop, ends with the last.
+        let row = text.lines().find(|l| l.contains("+4 hops")).unwrap();
+        assert!(
+            row.contains("10.0.0.1") && row.contains("10.0.0.6"),
+            "{row}"
+        );
+        assert!(row.contains("\u{25c9} you"), "{row}");
+        // Arrow keys walk the hidden hops without a row of their own: the
+        // ribbon still follows the highlight.
+        let v = app.map_view.as_mut().unwrap();
+        v.move_col(-1);
+        v.move_col(-1);
+        assert!(matches!(v.selection(), Some(MapSel::Hop(_))));
     }
 }

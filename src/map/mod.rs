@@ -356,6 +356,10 @@ pub struct Map {
     pub hop_hosts: HashSet<usize>,
     /// Hops of the longest chain.
     pub max_depth: usize,
+    /// Nodes that are only a step on the way (one child, no host of their own
+    /// ends there): they get no row, the row of the node after them says
+    /// `‹ +n hops ›` instead (design D08). A root inside a cluster keeps its row.
+    pub folded: Vec<bool>,
 }
 
 impl Map {
@@ -479,6 +483,19 @@ impl Map {
             map.clusters = map.cluster_roots();
         }
         map.max_depth = map.nodes.iter().map(|n| n.depth + 1).max().unwrap_or(0);
+        let in_cluster: HashSet<usize> = map
+            .clusters
+            .iter()
+            .flat_map(|c| c.roots.iter().copied())
+            .collect();
+        map.folded = map
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(n, node)| {
+                node.children.len() == 1 && node.cargo.is_empty() && !in_cluster.contains(&n)
+            })
+            .collect();
         map
     }
 

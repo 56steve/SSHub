@@ -208,7 +208,9 @@ impl MapView {
     /// Every row of the map under the current fold state.
     fn build_rows(&self) -> Vec<Row> {
         fn walk(map: &Map, n: usize, out: &mut Vec<Row>) {
-            out.push(Row::Node(n));
+            if !map.folded[n] {
+                out.push(Row::Node(n));
+            }
             for &c in &map.nodes[n].children {
                 walk(map, c, out);
             }
