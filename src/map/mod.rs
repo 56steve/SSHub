@@ -118,6 +118,9 @@ pub enum HopKind {
 pub struct Hop {
     pub kind: HopKind,
     pub source: JumpSource,
+    /// The hop as written in the jump list (`user@host:port` included), what
+    /// `ssh -J` is handed. A ProxyCommand hop carries its fixed label.
+    pub token: String,
 }
 
 impl Hop {
@@ -177,6 +180,7 @@ fn expand(
         return Ok(vec![Hop {
             kind: HopKind::ProxyCommand(idx),
             source: JumpSource::SshConfig,
+            token: PROXY_CMD_LABEL.to_string(),
         }]);
     }
     let Some(jump) = host.jump.as_deref().filter(|j| !is_jump_none(j)) else {
@@ -198,6 +202,7 @@ fn expand(
             out.push(Hop {
                 kind,
                 source: source.clone(),
+                token: token.to_string(),
             });
             continue;
         };
@@ -218,6 +223,7 @@ fn expand(
         out.push(Hop {
             kind: HopKind::Saved(h),
             source: source.clone(),
+            token: token.to_string(),
         });
     }
     Ok(out)

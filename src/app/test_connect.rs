@@ -115,7 +115,9 @@ impl App {
                         .iter()
                         .map(|hop| match &hop.kind {
                             HopKind::ProxyCommand(_) => None,
-                            _ => hop_name(&hop.key()),
+                            // The token as written, so `user@` and `:port`
+                            // reach ssh exactly as a real connect sends them.
+                            _ => Some(hop.token.clone()),
                         })
                         .collect();
                     (hops, TestTarget::Host(h), map.hosts[h].name.clone())
@@ -276,6 +278,10 @@ impl App {
     /// expanded the way connect expands it. `None` when there is none.
     fn test_prefix(&self, hops: &[TestHop], n: usize) -> Result<Option<String>, String> {
         let names: Vec<String> = hops[..n].iter().flatten().cloned().collect();
+        // ssh would run that hop's ProxyCommand to get through it: not tested.
+        if names.iter().any(|t| self.token_has_proxy_command(t)) {
+            return Err(PROXY_SKIP.to_string());
+        }
         if names.is_empty() {
             return Ok(None);
         }
@@ -283,6 +289,21 @@ impl App {
             .expand_jump(&hops::join(&names))
             .map(Some)
             .map_err(|e| format!("{e:#}"))
+    }
+
+    /// The saved host a hop token names (`name`, `user@name`, `name:port`).
+    fn token_host(&self, token: &str) -> Option<usize> {
+        let by_name = |n: &str| self.hosts.iter().position(|h| h.name() == n);
+        by_name(token).or_else(|| {
+            parse_raw_hop(token)
+                .filter(|r| !r.ipv6)
+                .and_then(|r| by_name(&r.host))
+        })
+    }
+
+    fn token_has_proxy_command(&self, token: &str) -> bool {
+        self.token_host(token)
+            .is_some_and(|i| entry_has_proxy_command(&self.hosts[i]))
     }
 
     fn hop_test_step(&self, hops: &[TestHop], i: usize) -> TestStep {
@@ -293,7 +314,7 @@ impl App {
             Ok(p) => p,
             Err(e) => return skipped(token, &e),
         };
-        if let Some(idx) = self.hosts.iter().position(|h| h.name() == token) {
+        if let Some(idx) = self.token_host(token) {
             return self.entry_test_step(idx, Ok(prefix));
         }
         match parse_raw_hop(token) {
@@ -317,14 +338,7 @@ impl App {
             Ok(p) => p,
             Err(e) => return skipped(&name, &e),
         };
-        let has_proxy_command = match entry {
-            HostEntry::Legacy { host, .. } => host.has_proxy_command,
-            HostEntry::Managed(m) => m
-                .ssh_config_hash
-                .as_deref()
-                .is_some_and(crate::ssh::ssh_config_hash_has_proxy_command),
-        };
-        if has_proxy_command {
+        if entry_has_proxy_command(entry) {
             return skipped(&name, PROXY_SKIP);
         }
         let alias = |prefix: &Option<String>| {
@@ -396,6 +410,17 @@ impl App {
     }
 }
 
+/// The host's ssh_config sets a ProxyCommand (presence only).
+fn entry_has_proxy_command(entry: &HostEntry) -> bool {
+    match entry {
+        HostEntry::Legacy { host, .. } => host.has_proxy_command,
+        HostEntry::Managed(m) => m
+            .ssh_config_hash
+            .as_deref()
+            .is_some_and(crate::ssh::ssh_config_hash_has_proxy_command),
+    }
+}
+
 fn skipped(label: &str, reason: &str) -> TestStep {
     TestStep {
         label: label.to_string(),
@@ -420,5 +445,50 @@ fn finish(
         argv,
         secret,
         skip: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::tests::{host, test_app};
+    use crate::store::NewHost;
+
+    #[test]
+    fn a_hop_with_proxy_command_stops_every_step_that_goes_through_it() {
+        let mut edge = host("edge");
+        edge.has_proxy_command = true;
+        let mut app = test_app(vec![("edge", edge), ("tail", host("tail"))]);
+        app.reload_hosts().unwrap();
+        let hops: Vec<TestHop> = vec![Some("edge".into()), Some("tail".into())];
+
+        // The prefix of any step after `edge` must not become `ssh -J edge`.
+        assert_eq!(app.test_prefix(&hops, 1), Err(PROXY_SKIP.to_string()));
+        let steps = [
+            app.hop_test_step(&hops, 0),
+            app.hop_test_step(&hops, 1),
+            app.entry_test_step(1, app.test_prefix(&hops, 2)),
+        ];
+        for (i, step) in steps.iter().enumerate() {
+            assert_eq!(step.skip.as_deref(), Some(PROXY_SKIP), "step {i}");
+            assert!(step.argv.is_empty(), "step {i} must not run ssh");
+        }
+    }
+
+    #[test]
+    fn hop_tokens_keep_their_user_and_port_in_the_prefix() {
+        let mut app = test_app(vec![]);
+        let mut j = NewHost::launcher("jump", "10.0.0.2");
+        j.username = Some("ops".into());
+        app.store().create_host(&j).unwrap();
+        app.reload_hosts().unwrap();
+        let hops: Vec<TestHop> = vec![Some("root@jump:2200".into()), Some("x".into())];
+        // What a real connect sends: the override wins over the stored values.
+        assert_eq!(
+            app.test_prefix(&hops, 1),
+            Ok(Some("root@10.0.0.2:2200".to_string()))
+        );
+        // And the step for that hop finds the saved host behind the token.
+        assert!(app.token_host("root@jump:2200").is_some());
     }
 }
