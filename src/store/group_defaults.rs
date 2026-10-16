@@ -234,7 +234,7 @@ impl LauncherStore {
 
     /// The effective values of [`LauncherStore::resolve_connection`] except the
     /// expanded `-J` string (left equal to the stored one).
-    fn resolve_fields(&self, host: &ManagedHost) -> Result<ResolvedConnection> {
+    pub fn resolve_fields(&self, host: &ManagedHost) -> Result<ResolvedConnection> {
         let chain = self.ordered_default_groups(host)?;
         let mut out = ResolvedConnection::for_group_chain(&chain);
 

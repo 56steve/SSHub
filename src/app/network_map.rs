@@ -124,6 +124,8 @@ pub struct MapView {
     pub revealed: HashMap<String, usize>,
     /// The direct-only bucket is expanded into one strip per group.
     pub direct_open: bool,
+    /// Host index by managed id, built with the map (for the tunnel lens).
+    pub host_by_id: HashMap<i64, usize>,
     /// Per trie node: some host behind it (or on it) matches the filter.
     match_node: Vec<bool>,
 }
@@ -152,6 +154,7 @@ impl MapView {
             revealed: HashMap::new(),
             direct_open: false,
             match_node: Vec::new(),
+            host_by_id: HashMap::new(),
         };
         view.all_rows = view.build_rows();
         view.rows = view.all_rows.clone();
@@ -591,6 +594,12 @@ impl App {
             }
         };
         let mut view = MapView::new(Map::build(hosts));
+        view.host_by_id = self
+            .hosts
+            .iter()
+            .enumerate()
+            .filter_map(|(i, h)| Some((h.managed_id()?, i)))
+            .collect();
         if let Some(old) = self.map_view.take() {
             view.row = old.row;
             view.pos = old.pos;
@@ -610,12 +619,10 @@ impl App {
 
     /// Tunnels by the index of the host they run on, for the map.
     pub fn map_tunnels(&self) -> HashMap<usize, Vec<HostTunnel>> {
-        let by_id: HashMap<i64, usize> = self
-            .hosts
-            .iter()
-            .enumerate()
-            .filter_map(|(i, h)| Some((h.managed_id()?, i)))
-            .collect();
+        // The host-id index is built with the map, not every frame.
+        let Some(by_id) = self.map_view.as_ref().map(|v| &v.host_by_id) else {
+            return HashMap::new();
+        };
         let mut out: HashMap<usize, Vec<HostTunnel>> = HashMap::new();
         for t in &self.tunnels {
             let Some(&idx) = t.host_id.and_then(|id| by_id.get(&id)) else {

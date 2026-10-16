@@ -60,8 +60,10 @@ pub fn collect_hosts(store: &LauncherStore, entries: &[HostEntry]) -> Result<Vec
                 // A stored jump ssh must not parse (leading `-`) makes
                 // resolution fail; the map still shows the host, with the
                 // hop as invalid.
+                // The map reads only the effective values, not the expanded
+                // `-J` string: no per-hop database reads on every rebuild.
                 let resolved = store
-                    .resolve_connection(m)
+                    .resolve_fields(m)
                     .unwrap_or_else(|_| crate::store::ResolvedConnection::from_stored(m));
                 let user = resolved
                     .username
@@ -179,6 +181,56 @@ mod tests {
         }
         assert!(hosts.iter().any(|h| h.name == "db-1" && h.jump.is_some()));
         assert!(hosts.iter().any(|h| h.name == "iot" && h.proxy_command));
+    }
+
+    /// Opening the map (and every host-list reload while it is on screen) reads
+    /// every host once: 1,840 hosts behind 212 jumps must stay far from a stall.
+    #[test]
+    fn collecting_1840_hosts_behind_212_jumps_is_fast() {
+        use crate::store::{NewHost, NewHostGroup};
+        let store = LauncherStore::open_in_memory().unwrap();
+        let group = store
+            .create_group(&NewHostGroup {
+                name: "fleet".into(),
+                default_proxy_jump: Some("jump-0".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        for j in 0..212 {
+            store
+                .create_host(&NewHost::launcher(
+                    format!("jump-{j}"),
+                    format!("10.0.{j}.1"),
+                ))
+                .unwrap();
+        }
+        for k in 0..(1840 - 212) {
+            let mut h =
+                NewHost::launcher(format!("srv-{k}"), format!("10.1.{}.{}", k / 250, k % 250));
+            h.group_id = Some(group.id);
+            if k % 3 != 0 {
+                h.proxy_jump = Some(format!("jump-{}", k % 212));
+            }
+            store.create_host(&h).unwrap();
+        }
+        let entries: Vec<HostEntry> = store
+            .list_hosts()
+            .unwrap()
+            .into_iter()
+            .map(HostEntry::from_managed)
+            .collect();
+        assert_eq!(entries.len(), 1840);
+        let t = std::time::Instant::now();
+        let hosts = collect_hosts(&store, &entries).unwrap();
+        let map = crate::map::Map::build(hosts);
+        let took = t.elapsed();
+        assert_eq!(map.hosts.len(), 1840);
+        assert!(map.roots.len() > 100);
+        assert!(
+            took < std::time::Duration::from_millis(1500),
+            "collect + build took {took:?}"
+        );
+        eprintln!("collect + build, 1840 hosts: {took:?}");
     }
 
     #[test]

@@ -99,6 +99,9 @@ pub struct HopEditor {
     pub raw: Option<RawInput>,
     /// Last refusal or result, shown under the list.
     pub notice: Option<String>,
+    /// The map of every host, built on first use and kept while the form is
+    /// open (the picker and the raw-hop loop check both read it).
+    map_cache: Option<Map>,
 }
 
 /// One row of the hop list as drawn.
@@ -575,15 +578,23 @@ impl App {
         true
     }
 
+    /// The map of every host, built once per open form.
+    fn editor_map(&mut self) -> &Map {
+        if self.hop_editor.map_cache.is_none() {
+            let hosts: Vec<MapHost> =
+                crate::map::collect_hosts(&self.store, &self.hosts).unwrap_or_default();
+            self.hop_editor.map_cache = Some(Map::build(hosts));
+        }
+        self.hop_editor.map_cache.as_ref().expect("just built")
+    }
+
     fn open_hop_picker(&mut self, target: PickTarget) {
         let edited = self
             .host_form
             .as_ref()
             .map(|f| f.name.trim().to_string())
             .unwrap_or_default();
-        let map_hosts: Vec<MapHost> =
-            crate::map::collect_hosts(&self.store, &self.hosts).unwrap_or_default();
-        let map = Map::build(map_hosts);
+        let map = self.editor_map().clone();
         let forbidden = hops::forbidden_hops(&map, &edited);
         let routes = hops::routes_in_use(&map, 8);
         let mut hosts: Vec<PickHost> = map
@@ -702,17 +713,15 @@ impl App {
                 Ok(token) => {
                     let target = r.target;
                     let host_part = crate::map::parse_raw_hop(&token).map(|h| h.host);
-                    let loops = host_part.is_some_and(|h| {
-                        let edited = self
-                            .host_form
-                            .as_ref()
-                            .map(|f| f.name.trim().to_string())
-                            .unwrap_or_default();
-                        let map = Map::build(
-                            crate::map::collect_hosts(&self.store, &self.hosts).unwrap_or_default(),
-                        );
-                        hops::forbidden_hops(&map, &edited).contains(&h)
-                    });
+                    let edited = self
+                        .host_form
+                        .as_ref()
+                        .map(|f| f.name.trim().to_string())
+                        .unwrap_or_default();
+                    let loops = match host_part {
+                        Some(h) => hops::forbidden_hops(self.editor_map(), &edited).contains(&h),
+                        None => false,
+                    };
                     if loops {
                         self.hop_editor.notice =
                             Some("that host would loop back to this host".into());
