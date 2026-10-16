@@ -164,7 +164,7 @@ mod tests {
             .stderr(std::process::Stdio::piped())
             .spawn()
         else {
-            eprintln!("skipping: no graphviz");
+            crate::test_support::tool_missing("graphviz (dot)");
             return;
         };
         use std::io::Write as _;

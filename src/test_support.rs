@@ -1,9 +1,11 @@
 //! Neutral fixtures shared by the renderer tests.
 //!
-//! Everything here is in-memory: themes are parsed from strings beside the
-//! embedded `default`, the app is backed by an in-memory SQLite store and a
+//! The renderer fixtures are in-memory: themes are parsed from strings beside
+//! the embedded `default`, the app is backed by an in-memory SQLite store and a
 //! no-op password store, and buffers come from ratatui's `TestBackend`. No test
-//! using these helpers touches a real HOME, config file, database or keyring.
+//! using them touches a real HOME, config file, database or keyring. The
+//! exception is [`tempdir_sshd`], which starts a real `sshd` on loopback inside
+//! a temp dir (own keys, own `known_hosts`, never `~/.ssh`).
 //!
 //! The helpers live here rather than in one widget's test module because they
 //! belong to no single widget: `panel_box`, `hosts_panel`, `middle_stack`,
@@ -435,6 +437,29 @@ impl Drop for TempdirSshd {
     }
 }
 
+/// A tool an oracle test needs is missing: skip, or fail when `CI` is set, so a
+/// runner without `sshd` or `dot` cannot turn the oracles into silent no-ops.
+pub(crate) fn tool_missing(what: &str) -> bool {
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "{what} is missing on a CI runner: the oracle tests would silently skip"
+    );
+    eprintln!("skipping: no {what}");
+    true
+}
+
+/// The login name of the current uid (`$USER` is often unset in containers).
+pub(crate) fn current_user() -> String {
+    std::process::Command::new("id")
+        .arg("-un")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .or_else(|| std::env::var("USER").ok())
+        .unwrap_or_else(|| "root".into())
+}
+
 pub(crate) fn tempdir_sshd() -> Option<TempdirSshd> {
     use std::process::Command;
     let sshd_bin = ["sshd", "/usr/sbin/sshd", "/usr/bin/sshd"]
@@ -450,7 +475,7 @@ pub(crate) fn tempdir_sshd() -> Option<TempdirSshd> {
         })
         .find(|path| path.starts_with('/'));
     let Some(sshd_bin) = sshd_bin else {
-        eprintln!("skipping: no sshd binary");
+        tool_missing("sshd binary");
         return None;
     };
     for bin in ["ssh", "ssh-keygen"] {
@@ -463,7 +488,7 @@ pub(crate) fn tempdir_sshd() -> Option<TempdirSshd> {
         {
             continue;
         }
-        eprintln!("skipping: no {bin} binary");
+        tool_missing(&format!("{bin} binary"));
         return None;
     }
     let dir = tempfile::tempdir().unwrap();

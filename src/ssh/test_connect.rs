@@ -223,7 +223,10 @@ mod tests {
     use std::process::Command;
 
     fn have_ssh() -> bool {
-        Command::new("ssh").arg("-V").output().is_ok()
+        Command::new("ssh").arg("-V").output().is_ok() || {
+            crate::test_support::tool_missing("ssh");
+            false
+        }
     }
 
     /// `ssh -F /dev/null` args for the tempdir sshd with the given key and
@@ -233,7 +236,7 @@ mod tests {
         key: &std::path::Path,
         known: &std::path::Path,
     ) -> Vec<String> {
-        let user = std::env::var("USER").unwrap_or_else(|_| "root".into());
+        let user = crate::test_support::current_user();
         [
             "ssh",
             "-F",
