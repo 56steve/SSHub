@@ -546,7 +546,7 @@ pub struct App {
     resolver: Box<dyn HostResolver>,
     metadata: Arc<dyn MetadataStore>,
     store: Arc<LauncherStore>,
-    password_store: Box<dyn crate::credentials::PasswordStore>,
+    password_store: Arc<dyn crate::credentials::PasswordStore>,
     search: HostSearch,
 }
 
@@ -1148,7 +1148,7 @@ impl App {
             resolver: deps.resolver,
             metadata: deps.metadata,
             store: deps.store,
-            password_store: deps.password_store,
+            password_store: Arc::from(deps.password_store),
             search: HostSearch::new(),
         }
     }

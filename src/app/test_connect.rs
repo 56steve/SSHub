@@ -8,7 +8,9 @@ use std::sync::Arc;
 use super::network_map::MapSel;
 use super::*;
 use crate::map::{hops, parse_raw_hop, Chain, HopKey, HopKind};
-use crate::ssh::test_connect::{spawn_test, test_runner, StepState, TestEvent, TestStep};
+use crate::ssh::test_connect::{
+    spawn_test, test_runner, SecretSource, StepState, TestEvent, TestStep,
+};
 
 /// Who asked for the run, so only that screen shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +28,14 @@ pub struct TestRun {
     rx: Receiver<TestEvent>,
     cancel: Arc<AtomicBool>,
     pub done: bool,
+}
+
+impl Drop for TestRun {
+    /// Leaving the map, closing the form or quitting stops ssh and its `-W`
+    /// helpers instead of letting them run to the step timeout.
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 impl TestRun {
@@ -257,11 +267,37 @@ impl App {
 
     /// Fold worker events into the run; called every tick.
     pub fn poll_test_run(&mut self) {
+        // The form this test belongs to is gone: stop it.
+        if self.host_form.is_none()
+            && self
+                .test_run
+                .as_ref()
+                .is_some_and(|r| r.owner == TestOwner::Editor)
+        {
+            self.test_run = None;
+            return;
+        }
         let Some(run) = self.test_run.as_mut() else {
             return;
         };
         let mut log: Vec<crate::ssh::probe::SshLogEntry> = Vec::new();
-        while let Ok(ev) = run.rx.try_recv() {
+        loop {
+            let ev = match run.rx.try_recv() {
+                Ok(ev) => ev,
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                // The worker is gone without a `Done`: do not wait for it.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    if !run.done {
+                        for st in &mut run.states {
+                            if matches!(st, StepState::Pending | StepState::Running) {
+                                *st = StepState::Cancelled;
+                            }
+                        }
+                    }
+                    run.done = true;
+                    break;
+                }
+            };
             match ev {
                 TestEvent::Step { index, state } => {
                     // A failed step leaves its command and reason in the ssh
@@ -385,12 +421,14 @@ impl App {
                     .store
                     .resolve_connection(m)
                     .unwrap_or_else(|_| crate::store::ResolvedConnection::from_stored(m));
-                let secret = resolve_pending_secret(
-                    entry,
-                    resolved.identity.as_ref(),
-                    self.password_store.as_ref(),
-                )
-                .0;
+                let secret: SecretSource = {
+                    let entry = entry.clone();
+                    let identity = resolved.identity.clone();
+                    let store = Arc::clone(&self.password_store);
+                    Arc::new(move || {
+                        resolve_pending_secret(&entry, identity.as_ref(), store.as_ref()).0
+                    })
+                };
                 let argv = if m.source == HostSource::SshConfig {
                     alias(&prefix)
                 } else {
@@ -399,7 +437,7 @@ impl App {
                     host.remote_command = None;
                     crate::ssh::build_ssh_argv(&host)
                 };
-                finish(&name, Some(name.clone()), argv, secret)
+                finish(&name, Some(name.clone()), argv, Some(secret))
             }
         }
     }
@@ -464,7 +502,7 @@ fn finish(
     label: &str,
     host: Option<String>,
     argv: Vec<String>,
-    secret: Option<crate::session::PendingSecret>,
+    secret: Option<SecretSource>,
 ) -> TestStep {
     TestStep {
         label: label.to_string(),
@@ -518,5 +556,86 @@ mod tests {
         );
         // And the step for that hop finds the saved host behind the token.
         assert!(app.token_host("root@jump:2200").is_some());
+    }
+
+    struct CountingStore(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl crate::credentials::PasswordStore for CountingStore {
+        fn get(&self, _: &str) -> anyhow::Result<Option<String>> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(Some("pw".into()))
+        }
+        fn set(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn delete(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn building_steps_never_reads_the_keyring_only_running_one_does() {
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut app = crate::app::tests::test_app_with_store(
+            vec![],
+            Box::new(CountingStore(Arc::clone(&reads))),
+        );
+        let mut j = NewHost::launcher("jump", "10.0.0.2");
+        j.has_password = true;
+        app.store().create_host(&j).unwrap();
+        app.reload_hosts().unwrap();
+        let idx = app.hosts.iter().position(|h| h.name() == "jump").unwrap();
+        // `y` builds the steps and prints the command: no secret is needed.
+        let steps = app.test_steps(&[], TestTarget::Host(idx));
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        let fetch = steps[0]
+            .secret
+            .as_ref()
+            .expect("a managed host has a source");
+        // The worker asks right before the step runs.
+        assert!(fetch().is_some());
+        assert!(reads.load(Ordering::Relaxed) > 0);
+    }
+
+    fn run_with(owner: TestOwner, rx: Receiver<TestEvent>, cancel: Arc<AtomicBool>) -> TestRun {
+        TestRun {
+            owner,
+            title: String::new(),
+            steps: vec![skipped("a", "x"), skipped("b", "x")],
+            states: vec![StepState::Running, StepState::Pending],
+            rx,
+            cancel,
+            done: false,
+        }
+    }
+
+    #[test]
+    fn a_dead_worker_ends_the_run_and_dropping_a_run_cancels_it() {
+        let mut app = test_app(vec![]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        app.test_run = Some(run_with(
+            TestOwner::Map(MapSel::Hop(0)),
+            rx,
+            Arc::clone(&cancel),
+        ));
+        drop(tx);
+        app.poll_test_run();
+        let run = app.test_run.as_ref().unwrap();
+        assert!(run.done && !run.running());
+        assert_eq!(run.states, vec![StepState::Cancelled; 2]);
+        assert!(!cancel.load(Ordering::Relaxed));
+        // Esc clears it, which cancels the (already finished) worker flag.
+        app.test_run = None;
+        assert!(cancel.load(Ordering::Relaxed));
+
+        // Closing the form that owns a running test stops the test.
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        app.test_run = Some(run_with(TestOwner::Editor, rx, Arc::clone(&cancel)));
+        assert!(app.host_form.is_none());
+        app.poll_test_run();
+        assert!(app.test_run.is_none());
+        assert!(cancel.load(Ordering::Relaxed));
     }
 }

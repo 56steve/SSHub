@@ -18,6 +18,9 @@ use crate::broadcast::{CommandRunner, SshCommandRunner};
 pub const STEP_CONNECT_TIMEOUT_SECS: u32 = 10;
 pub const STEP_RUN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A stored secret to fetch at the moment a step runs.
+pub type SecretSource = Arc<dyn Fn() -> Option<crate::session::PendingSecret> + Send + Sync>;
+
 /// What to run for one hop.
 #[derive(Clone)]
 pub struct TestStep {
@@ -27,7 +30,10 @@ pub struct TestStep {
     pub host: Option<String>,
     /// `argv[0] == "ssh"`, ending in the target; `true` is appended.
     pub argv: Vec<String>,
-    pub secret: Option<crate::session::PendingSecret>,
+    /// Looks the stored secret up when the step is about to run, so nothing
+    /// touches the keyring before then (or at all, for `y`) and no secret sits
+    /// in the run afterwards.
+    pub secret: Option<SecretSource>,
     /// The command as shown to the user, e.g. `ssh -J a b true`.
     pub cmd: String,
     /// Do not run: why.
@@ -123,7 +129,29 @@ pub fn test_runner() -> SshCommandRunner {
         run_timeout: STEP_RUN_TIMEOUT,
         accept_new_host_keys: false,
         kill_process_group: true,
+        isolated_config: Some(
+            crate::ssh::ssh_config_path()
+                .unwrap_or_else(|_| crate::ssh::expand_tilde("~/.ssh/config")),
+        ),
     }
+}
+
+/// The `-F` file of a test step: first-match-wins, so these come before the
+/// user's own config, which is `Include`d after them. `ProxyCommand none` is
+/// what keeps a wildcard `ProxyCommand` of the user's from running in the `-W`
+/// helper of a `-J` hop. With a stored secret the hops may prompt (askpass
+/// answers them); without one nothing may.
+pub fn isolated_config(user_config: &std::path::Path, askpass: bool) -> String {
+    let mut text = format!(
+        "Host *\n    ProxyCommand none\n    BatchMode {}\n    StrictHostKeyChecking yes\n    UpdateHostKeys no\n",
+        if askpass { "no" } else { "yes" }
+    );
+    let path = user_config.to_string_lossy();
+    // No way to quote these in ssh_config: leave the user's config out.
+    if !path.contains(['"', '\n', '\r']) {
+        text.push_str(&format!("Include \"{path}\"\n"));
+    }
+    text
 }
 
 /// Run `steps` in order on a worker thread; `cancel` stops it and kills the
@@ -157,7 +185,9 @@ pub fn spawn_test(
             }
             send(i, StepState::Running);
             let started = Instant::now();
-            let result = runner.run(&step.argv, "true", step.secret.as_ref(), &cancel);
+            let secret = step.secret.as_ref().and_then(|fetch| fetch());
+            let result = runner.run(&step.argv, "true", secret.as_ref(), &cancel);
+            drop(secret);
             let state = match result {
                 Ok((0, _, _)) => StepState::Ok {
                     ms: started.elapsed().as_millis() as u64,
@@ -244,6 +274,7 @@ mod tests {
             run_timeout: Duration::from_secs(15),
             accept_new_host_keys: false,
             kill_process_group: true,
+            isolated_config: None,
         });
         let rx = spawn_test(vec![step], runner, Arc::new(AtomicBool::new(false)));
         let mut last = StepState::Pending;
@@ -459,5 +490,58 @@ mod tests {
             "proxy cmd failed"
         );
         assert_eq!(classify_failure(1, "weird").0, "failed (exit 1)");
+    }
+
+    /// Run `ssh [-F user] -J u@127.0.0.1:1 t@127.0.0.1` the way a test step does
+    /// (nothing listens on port 1) and say whether the user config's wildcard
+    /// `ProxyCommand` ran.
+    fn wildcard_proxy_command_ran(isolated: bool) -> bool {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let user = dir.path().join("user.conf");
+        std::fs::write(
+            &user,
+            format!("Host *\n    ProxyCommand touch {}\n", marker.display()),
+        )
+        .unwrap();
+        let mut argv = vec!["ssh".to_string()];
+        if !isolated {
+            argv.extend(["-F".into(), user.to_string_lossy().into_owned()]);
+        }
+        argv.extend(["-J", "u@127.0.0.1:1", "t@127.0.0.1"].map(String::from));
+        let runner = SshCommandRunner {
+            connect_timeout_secs: 2,
+            run_timeout: Duration::from_secs(15),
+            accept_new_host_keys: false,
+            kill_process_group: true,
+            isolated_config: isolated.then(|| user.clone()),
+        };
+        let cancel = AtomicBool::new(false);
+        let _ = runner.run(&argv, "true", None, &cancel);
+        marker.exists()
+    }
+
+    #[test]
+    fn oracle_a_wildcard_proxy_command_never_runs_through_a_jump_hop() {
+        if !have_ssh() {
+            return;
+        }
+        // The control: without the generated -F, the -W helper of the hop runs it.
+        assert!(wildcard_proxy_command_ran(false), "the oracle is blind");
+        assert!(
+            !wildcard_proxy_command_ran(true),
+            "a test step ran the user's ProxyCommand"
+        );
+    }
+
+    #[test]
+    fn the_generated_config_wins_and_includes_the_user_config() {
+        let text = isolated_config(std::path::Path::new("/h/.ssh/config"), false);
+        assert!(text.starts_with("Host *\n    ProxyCommand none\n    BatchMode yes\n"));
+        assert!(text.contains("StrictHostKeyChecking yes") && text.contains("UpdateHostKeys no"));
+        assert!(text.ends_with("Include \"/h/.ssh/config\"\n"));
+        assert!(isolated_config(std::path::Path::new("/h"), true).contains("BatchMode no"));
+        // A path that cannot be quoted leaves the user config out.
+        assert!(!isolated_config(std::path::Path::new("/a\"b"), false).contains("Include"));
     }
 }

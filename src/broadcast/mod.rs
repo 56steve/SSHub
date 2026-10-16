@@ -133,6 +133,12 @@ pub struct SshCommandRunner {
     /// Run ssh in its own process group and kill the whole group on cancel or
     /// timeout, so the `ssh -W` helper of a `-J` hop dies with it.
     pub kill_process_group: bool,
+    /// Run ssh with a generated `-F` file that wins over the user's config
+    /// (which it `Include`s): no `ProxyCommand`, no prompts, no `known_hosts`
+    /// writes. ssh hands `-F` to the `-W` helper of every `-J` hop, so the
+    /// helpers obey it too, which a command-line `-o` does not reach. The path
+    /// is the user's own ssh config.
+    pub isolated_config: Option<std::path::PathBuf>,
 }
 
 impl SshCommandRunner {
@@ -142,6 +148,7 @@ impl SshCommandRunner {
             run_timeout: RUN_TIMEOUT,
             accept_new_host_keys: true,
             kill_process_group: false,
+            isolated_config: None,
         }
     }
 }
@@ -194,6 +201,20 @@ impl CommandRunner for SshCommandRunner {
                 full.push("-o".to_string());
                 full.push(opt.to_string());
             }
+        }
+        // Kept alive until the child has exited: ssh re-reads it for each hop.
+        let mut _config = None;
+        if let Some(user_config) = &self.isolated_config {
+            let text = crate::ssh::test_connect::isolated_config(user_config, secret.is_some());
+            let file = tempfile::Builder::new()
+                .prefix("sshub-test-")
+                .suffix(".conf")
+                .tempfile()
+                .map_err(|e| format!("temp ssh config: {e}"))?;
+            std::fs::write(file.path(), text).map_err(|e| format!("temp ssh config: {e}"))?;
+            full.push("-F".to_string());
+            full.push(file.path().to_string_lossy().into_owned());
+            _config = Some(file);
         }
         full.extend(argv[1..].iter().cloned());
         full.push(command.to_string());
