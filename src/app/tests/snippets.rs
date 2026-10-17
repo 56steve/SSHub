@@ -33,6 +33,7 @@ fn app_with_session_and_snippets() -> App {
         .unwrap();
 
     let config = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec!["cat".into()],
         display_name: "edge".into(),
         meta: crate::session::SessionMeta::default(),
@@ -164,6 +165,7 @@ fn ctrl_n_is_inert_over_a_connecting_session() {
         })
         .unwrap();
     let config = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec!["cat".into()],
         display_name: "edge".into(),
         meta: crate::session::SessionMeta::default(),

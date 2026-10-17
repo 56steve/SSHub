@@ -313,17 +313,20 @@ pub fn import_csv_export(
             None => {
                 let identity_id = resolve_key_hint(&row.ssh_key, &key_by_hint);
                 let username = (!row.username.is_empty()).then(|| row.username.clone());
-                let created = store.create_host(&NewHost {
-                    name: name.clone(),
-                    address: row.host.clone(),
-                    port: Some(row.port),
-                    username,
-                    identity_id,
-                    os_icon: os_icon_for(&row.os),
-                    source: HostSource::Launcher,
-                    has_password,
-                    ..Default::default()
-                });
+                let created =
+                    super::check_destination(&row.host, username.as_deref()).and_then(|()| {
+                        store.create_host(&NewHost {
+                            name: name.clone(),
+                            address: row.host.clone(),
+                            port: Some(row.port),
+                            username,
+                            identity_id,
+                            os_icon: os_icon_for(&row.os),
+                            source: HostSource::Launcher,
+                            has_password,
+                            ..Default::default()
+                        })
+                    });
                 // A row the store refuses (a field ssh would read as an option,
                 // issue #101) is dropped on its own; the rest of the CSV lands.
                 let host = match created {

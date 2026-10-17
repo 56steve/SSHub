@@ -7,6 +7,7 @@ mod field_click;
 mod field_picker;
 pub(crate) mod ghost;
 mod groups;
+pub mod hop_editor;
 mod host_crud;
 mod host_detail;
 mod host_form;
@@ -18,6 +19,7 @@ mod keys;
 mod local_shell;
 mod log_browser;
 mod mouse;
+pub mod network_map;
 pub(crate) mod panes;
 mod profile_manager;
 pub(crate) mod profile_transfer;
@@ -29,6 +31,7 @@ mod sftp;
 mod snippets;
 mod suggestions;
 mod tags;
+pub mod test_connect;
 mod theme_picker;
 mod tunnels;
 mod types;
@@ -37,7 +40,7 @@ mod util;
 mod workspaces;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use theme_picker::{ThemePickerState, ThemeRecordSummary, ThemeRow, ThemeRowStatus};
 pub use types::*;
@@ -213,6 +216,8 @@ pub struct App {
     pub detail_edit: Option<HostDetailEdit>,
     pub identities: Vec<Identity>,
     pub identity_selected: usize,
+    /// Fuzzy filter typed on the Identities tab (`/`); empty = show all.
+    pub identity_filter: String,
     pub identity_form: Option<IdentityFormEdit>,
     pub identity_notice: Option<String>,
     pub keygen_form: Option<KeygenFormEdit>,
@@ -326,6 +331,9 @@ pub struct App {
     /// Tab shown on the previous poll tick, so a change can be detected centrally
     /// (many code paths set `active_tab`) and turned into a slide animation (#35).
     pub anim_prev_tab: usize,
+    /// Terminal size at the last poll tick; a change drops `zoom_anim`, whose
+    /// rects were fixed in absolute cells at key-press.
+    pub anim_prev_area: ratatui::layout::Rect,
     /// In-flight tab-switch slide, or `None` at rest / under reduced motion.
     pub tab_switch: Option<TabSwitch>,
     /// When the current `mode` was entered, so popups can animate their open
@@ -492,6 +500,19 @@ pub struct App {
     pub audit_filter: AuditFilter,
     pub audit_range: AuditRange,
     pub audit_selected: usize,
+    /// The network map tab's model and cursor; `None` until the tab is first
+    /// opened and after any host change while another tab is on screen.
+    pub map_view: Option<network_map::MapView>,
+    /// Why the last map rebuild failed; shown until a rebuild succeeds (the
+    /// map's own keys clear `host_notice`).
+    pub map_error: Option<String>,
+    /// The structured ProxyJump editor of the host form.
+    pub hop_editor: hop_editor::HopEditor,
+    /// The running or last test connect (map or hop editor).
+    pub test_run: Option<test_connect::TestRun>,
+    /// Where the known-hosts manager returns to when it was opened from a
+    /// form (the hop editor's `H`); `Normal` otherwise.
+    pub known_hosts_return: Option<AppMode>,
     pub audit_scroll: usize,
     pub agent_info: Option<crate::ssh::agent::AgentInfo>,
     agent_info_updated: std::time::Instant,
@@ -505,6 +526,10 @@ pub struct App {
     cert_probed_path: String,
     pub tunnels: Vec<crate::store::Tunnel>,
     pub tunnel_selected: usize,
+    /// Fuzzy filter typed on the Tunnels tab (`/`); empty = show all.
+    pub tunnel_filter: String,
+    /// True while keystrokes on the Tunnels / Identities tab go to its filter.
+    pub list_filter_editing: bool,
     pub tunnel_form: Option<TunnelFormEdit>,
     pub tunnel_notice: Option<String>,
     pub tunnel_manager: crate::tunnel::TunnelManager,
@@ -533,7 +558,7 @@ pub struct App {
     resolver: Box<dyn HostResolver>,
     metadata: Arc<dyn MetadataStore>,
     store: Arc<LauncherStore>,
-    password_store: Box<dyn crate::credentials::PasswordStore>,
+    password_store: Arc<dyn crate::credentials::PasswordStore>,
     search: HostSearch,
 }
 
@@ -599,12 +624,28 @@ impl App {
     /// Notice a tab change (from any of the many code paths that set
     /// `active_tab`) and arm the body slide (#35). Called once per poll tick.
     pub(crate) fn detect_tab_switch(&mut self) {
+        if self.terminal_area != self.anim_prev_area {
+            self.zoom_anim = None;
+            self.anim_prev_area = self.terminal_area;
+        }
         if self.active_tab != self.anim_prev_tab {
             if self.motion_enabled() {
+                let now = std::time::Instant::now();
+                let mut at = now;
+                // Reversing a switch still in flight resumes from where it
+                // stands instead of jumping to the endpoint: solve
+                // `ease_out(p') = 1 - ease_out(p)` for the new progress `p'`.
+                if let Some(prev) = self.tab_switch {
+                    let p = crate::tui::tween::progress(prev.at, crate::tui::TAB_ANIM, now);
+                    if p < 1.0 && prev.from == self.active_tab && prev.to == self.anim_prev_tab {
+                        let back = 1.0 - (1.0 - (1.0 - p).powi(3)).cbrt();
+                        at = now - crate::tui::TAB_ANIM.mul_f32(back);
+                    }
+                }
                 self.tab_switch = Some(TabSwitch {
                     from: self.anim_prev_tab,
                     to: self.active_tab,
-                    at: std::time::Instant::now(),
+                    at,
                 });
             }
             self.anim_prev_tab = self.active_tab;
@@ -976,6 +1017,7 @@ impl App {
             detail_edit: None,
             identities: Vec::new(),
             identity_selected: 0,
+            identity_filter: String::new(),
             identity_form: None,
             identity_notice: None,
             keygen_form: None,
@@ -1033,6 +1075,7 @@ impl App {
             tunnel_reconnect_selected: 0,
             active_tab: 0,
             anim_prev_tab: 0,
+            anim_prev_area: ratatui::layout::Rect::default(),
             tab_switch: None,
             // Start "settled" in the past so the initial mode never counts as
             // just-entered: popups animate only after a real mode change stamps
@@ -1109,6 +1152,11 @@ impl App {
             audit_filter: AuditFilter::default(),
             audit_range: AuditRange::default(),
             audit_selected: 0,
+            map_view: None,
+            map_error: None,
+            hop_editor: hop_editor::HopEditor::default(),
+            test_run: None,
+            known_hosts_return: None,
             audit_scroll: 0,
             agent_info: None,
             agent_info_updated: std::time::Instant::now() - std::time::Duration::from_secs(60),
@@ -1116,6 +1164,8 @@ impl App {
             cert_probed_path: String::new(),
             tunnels: Vec::new(),
             tunnel_selected: 0,
+            tunnel_filter: String::new(),
+            list_filter_editing: false,
             tunnel_form: None,
             tunnel_notice: None,
             tunnel_manager: crate::tunnel::TunnelManager::new(),
@@ -1131,7 +1181,7 @@ impl App {
             resolver: deps.resolver,
             metadata: deps.metadata,
             store: deps.store,
-            password_store: deps.password_store,
+            password_store: Arc::from(deps.password_store),
             search: HostSearch::new(),
         }
     }
@@ -1247,6 +1297,13 @@ impl App {
             self.metadata.as_ref(),
         )?;
         self.load_groups()?;
+        // The map is derived from the host list: rebuild it in place when it is
+        // on screen, otherwise drop it and let the next visit build it.
+        if self.active_tab == 5 {
+            self.rebuild_map();
+        } else {
+            self.map_view = None;
+        }
         self.rebuild_filter();
         if let Some(name) = selected_name {
             self.restore_selection_by_name(&name);

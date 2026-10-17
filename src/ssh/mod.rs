@@ -6,6 +6,7 @@ mod import;
 mod keyfile;
 pub mod probe;
 mod resolver;
+pub mod test_connect;
 
 pub use export::{
     atomic_write_with_backup, export_launcher_hosts, export_launcher_hosts_to, exported_conf_path,
@@ -13,11 +14,12 @@ pub use export::{
 };
 pub use host::{
     build_mosh_alias_argv, build_mosh_argv, build_ssh_alias_argv, build_ssh_argv,
-    inject_mosh_ssh_accept_new, safe_ssh_target, SshHost,
+    destination_problem, inject_mosh_ssh_accept_new, safe_ssh_target, without_remote_command,
+    SshHost,
 };
 pub use import::{
-    compute_ssh_config_hash, import_ssh_config, materialize_ssh_config_host, sync_ssh_config_hosts,
-    ImportReport,
+    compute_ssh_config_hash, import_ssh_config, materialize_ssh_config_host,
+    ssh_config_hash_has_proxy_command, sync_ssh_config_hosts, ImportReport,
 };
 pub use keyfile::{
     generate_key_pair, key_is_encrypted, looks_like_private_key, passphrase_matches,

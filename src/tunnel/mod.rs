@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use crate::config::{tunnel_backoff_delay, tunnel_failure_attempt, TunnelReconnectConfig};
+use crate::session::hop_auth::HopSecret;
 use crate::session::PendingSecret;
 use crate::store::{ManagedHost, ResolvedConnection, Tunnel};
 
@@ -117,20 +118,25 @@ impl TunnelManager {
         host: &ManagedHost,
         resolved: &ResolvedConnection,
         secret: Option<&PendingSecret>,
+        hops: &[HopSecret],
     ) -> Result<()> {
         if self.processes.contains_key(&tunnel.id) {
             self.stop_process(tunnel.id)?;
         }
 
-        let args = build_tunnel_argv(tunnel, host, resolved, secret.is_some())?;
+        let mut args =
+            build_tunnel_argv(tunnel, host, resolved, secret.is_some() || !hops.is_empty())?;
+        let staged = stage_tunnel_askpass(&mut args, secret, hops)?;
 
         let mut cmd = Command::new(&args[0]);
         cmd.args(&args[1..])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
-
-        let askpass = stage_tunnel_askpass(&mut cmd, secret)?;
+        let askpass = staged.map(|(guard, env)| {
+            cmd.envs(env);
+            guard
+        });
 
         let mut child = cmd.spawn()?;
 
@@ -390,7 +396,10 @@ impl TunnelManager {
         tunnels: &[Tunnel],
         cfg: &TunnelReconnectConfig,
         resolve_host: impl Fn(i64) -> Option<(ManagedHost, ResolvedConnection)>,
-        resolve_secret: impl Fn(&ManagedHost) -> Option<PendingSecret>,
+        resolve_secret: impl Fn(
+            &ManagedHost,
+            &ResolvedConnection,
+        ) -> (Option<PendingSecret>, Vec<HopSecret>),
     ) -> Vec<ReconnectEvent> {
         let now = Instant::now();
         let live_ids: std::collections::HashSet<i64> = tunnels.iter().map(|t| t.id).collect();
@@ -432,10 +441,10 @@ impl TunnelManager {
             }
 
             let hosted = tunnel.host_id.and_then(&resolve_host);
-            let secret = hosted
+            let (secret, hops) = hosted
                 .as_ref()
-                .map(|(host, _)| host)
-                .and_then(&resolve_secret);
+                .map(|(host, resolved)| resolve_secret(host, resolved))
+                .unwrap_or_default();
             let Some((host, resolved)) = hosted.as_ref() else {
                 events.extend(self.record_tunnel_failure(
                     tunnel_id,
@@ -445,7 +454,7 @@ impl TunnelManager {
                 ));
                 continue;
             };
-            match self.start(tunnel, host, resolved, secret.as_ref()) {
+            match self.start(tunnel, host, resolved, secret.as_ref(), &hops) {
                 Ok(()) => {}
                 Err(e) => {
                     let err = format!("{e:#}");

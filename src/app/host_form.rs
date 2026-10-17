@@ -140,6 +140,7 @@ impl App {
         };
 
         self.host_form = Some(form);
+        self.hop_editor = hop_editor::HopEditor::default();
         self.mode = AppMode::HostForm;
         Ok(())
     }
@@ -154,6 +155,15 @@ impl App {
     }
 
     pub(crate) fn discard_host_form(&mut self) -> Result<()> {
+        // The loop hint belongs to the form it opened with; leaving it behind
+        // would sit on the footer rule of the map.
+        if self
+            .host_notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("jump loop"))
+        {
+            self.host_notice = None;
+        }
         self.host_form = None;
         self.mode = AppMode::Normal;
         Ok(())
@@ -251,6 +261,11 @@ impl App {
             self.host_form = Some(form);
             return Ok(());
         }
+        if let Some(problem) = hop_editor::proxy_jump_problem(&form.proxy_jump) {
+            self.host_notice = Some(problem);
+            self.host_form = Some(form);
+            return Ok(());
+        }
         // The store refuses these outright (issue #101); say so with the form
         // still open rather than letting a write error unwind the TUI.
         let option_like_field = [
@@ -265,6 +280,15 @@ impl App {
             self.host_notice = Some(format!(
                 "{field} cannot start with '-' — ssh would read it as an option, not a host"
             ));
+            self.host_form = Some(form);
+            return Ok(());
+        }
+
+        let user = form.username.trim();
+        if let Some(problem) =
+            crate::ssh::destination_problem(address, (!user.is_empty()).then_some(user))
+        {
+            self.host_notice = Some(problem);
             self.host_form = Some(form);
             return Ok(());
         }
@@ -390,6 +414,10 @@ impl App {
             return Ok(());
         }
 
+        if self.handle_key_hop_editor(&key) {
+            return Ok(());
+        }
+
         match key.code {
             KeyCode::Esc => self.cancel_host_form()?,
             _ if self.is_save_key(&key) => self.save_host_form()?,
@@ -455,6 +483,8 @@ impl App {
         };
         // Walking away re-masks (see the identity form).
         form.password_revealed = false;
+        self.hop_editor.picker = None;
+        self.hop_editor.raw = None;
         form.field = form.field.next();
         form.cursor = text_input::char_len(form.active_field());
     }
@@ -465,6 +495,8 @@ impl App {
         };
         // Walking away re-masks (see the identity form).
         form.password_revealed = false;
+        self.hop_editor.picker = None;
+        self.hop_editor.raw = None;
         form.field = form.field.prev();
         form.cursor = text_input::char_len(form.active_field());
     }
@@ -582,6 +614,39 @@ impl App {
             if changed == Some(true) {
                 form.dirty = true;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::tests::{host, test_app};
+
+    #[test]
+    fn save_refuses_spaces_and_shell_characters_in_address_and_username() {
+        for (addr, user) in [
+            ("a b.example", ""),
+            ("h;id", ""),
+            ("h$(id)", ""),
+            ("h.example", "ro ot"),
+            ("h.example", "u|x"),
+        ] {
+            let mut app = test_app(vec![("aa", host("aa"))]);
+            app.enter_host_form(None, false).unwrap();
+            let f = app.host_form.as_mut().unwrap();
+            f.name = "new".into();
+            f.address = addr.into();
+            f.username = user.into();
+            app.save_host_form().unwrap();
+            assert!(app.host_form.is_some(), "{addr:?}/{user:?} must stay open");
+            assert!(
+                app.host_notice
+                    .as_deref()
+                    .unwrap()
+                    .contains("not a valid host name"),
+                "{addr:?}/{user:?}: {:?}",
+                app.host_notice
+            );
         }
     }
 }

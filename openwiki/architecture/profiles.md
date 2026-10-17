@@ -24,6 +24,7 @@ flows: [profiles & themes workflow](../workflows/profiles-themes.md).
     ├── metadata.db
     ├── config.toml
     ├── credentials.json         only when the OS keyring is unavailable
+    ├── credentials.json.lock    advisory lock file beside it (read-modify-write)
     ├── themes/                  user themes the TUI loads (see themes)
     ├── logs/<host-dir>/         session logs
     └── tunnels/                 detached tunnel PID files
@@ -54,7 +55,9 @@ manager refuses to open in compat mode.
 
 1. Compat mode → `Startup::Silent(compat_paths)`.
 2. `ensure_layout`: create the data root and `profiles/` (0700); load
-   `state.toml`, sweeping half-deleted `.deleting-<id>` dirs; otherwise run the
+   `state.toml`, sweeping `.deleting-<id>` dirs left by an interrupted delete
+   (restored under the profile's name when the state still lists it and that
+   directory is gone, removed otherwise); with no `state.toml`, run the
    legacy migration, adopt existing profile directories (crash between rename
    and state write), or create `default` on a fresh install.
 3. `--profile NAME` → that profile (unknown names list the available ones).
@@ -78,9 +81,10 @@ opens straight into "create"; the active profile cannot be renamed or deleted,
 and the last profile cannot be deleted.
 
 Choosing a profile sets `App::pending_profile`. After the frame's input,
-`lib.rs::apply_pending_profile` first checks `profile_switch_blocker` (live SSH
-or local shell sessions, SFTP connections or transfers, a broadcast, running
-tunnels or pending reconnects all block), then builds the replacement `App`
+`lib.rs::apply_pending_profile` first checks `profile_switch_blocker` (a
+session that has not ended, SSH or local shell; SFTP connections, channels or
+relays; a running or unfinished broadcast; running tunnels or pending
+reconnects all block), then builds the replacement `App`
 with `load_profile_app`, and only on success swaps it in, carrying over the
 terminal area and the release-check state. A failure leaves the current
 workspace untouched and shows the error in the picker.
@@ -129,6 +133,12 @@ Rules enforced by the engine:
 - Destination writes run in one transaction and roll back on the first
   failure; a move deletes from the source in a second transaction only after
   the copy succeeded.
-- Identities are always copied; key files and secrets travel as paths and flags
-  only (new rows start with `has_password = false`). Groups land flattened at
-  top level; hosts land with `source = launcher`.
+- Identities are always copied; key files travel as paths and flags only and
+  secret contents are never read (new rows start with `has_password = false`;
+  a host keeps its `secret_lookup` spec). Groups land flattened at top level;
+  hosts land with `source = launcher`.
+- A **move** also purges the moved hosts' passwords and the orphaned
+  identities' passphrases from the *source* profile's credential store
+  (`TransferResult::purge_source_secrets`, called by the profile manager and
+  the CLI); keys it cannot delete are reported as a warning. Copies leave the
+  source secrets alone.

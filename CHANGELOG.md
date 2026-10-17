@@ -4,6 +4,124 @@ All notable changes to SSHub are documented in this file.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-17
+
+### Added
+
+- **Network map (tab 6) and a hop editor** (#79) - the jump hosts as a tree, with
+  every host as a status glyph behind its last hop and a column counting what
+  depends on each hop. Only real jumps are drawn: a host's own ProxyJump, a
+  group default, or an ssh_config `ProxyJump`. `B` shows a hop's blast radius
+  (and `b` broadcasts to it), `o` the tunnels riding on it (`x` starts or stops
+  one), `/` filters with `group:`, `tag:`, `via:` and `!name`, `u` makes a hop
+  the jump of another host, and `t` tests the path hop by hop with `ssh -J`,
+  reporting `auth failed`, `timeout`, `refused`, `host key changed` (with the
+  known_hosts line), `host key unknown` or `unknown host`. A jump loop is
+  flagged and not connectable, and a ProxyCommand shows as one opaque
+  `proxy cmd` hop. Big fleets cluster by group and fold the long tail; narrow
+  terminals get a compact layout and an outline below 80x24. In the host form
+  the ProxyJump field is now a hop list with a fuzzy picker (reuse a route,
+  add a host or a raw hop), a loop guard, per-hop test connect and a `direct`
+  option that overrides a group jump; it still saves the same comma separated
+  string. `sshub map --dot` prints the map for Graphviz. The ssh_config sync
+  now also records whether a host has a `ProxyCommand`, so the first start after
+  the upgrade rewrites each ssh_config row once (tags, notes and favorites stay).
+
+- **Fuzzy filter on the Tunnels and Identities tabs** - `/` opens the same
+  fuzzy matcher the host list uses. Tunnels match on label, host, ports and
+  type; identities on name, user and key or certificate path. `Enter` keeps
+  the filter, `Esc` clears it.
+
+### Fixed
+
+- **Jump hosts with a saved password asked for it again** - connecting through
+  `lb-1 -> lb-2` to a host showed the SSH authentication modal for each hop,
+  although both hops' passwords were stored. A hop that asks for a password is
+  now answered with that hop host's own stored password (or key passphrase),
+  fetched when it asks; when it has none the modal names the hop and Remember
+  saves to that hop host. The destination's password still never goes to a hop,
+  and one hop's never to another. Tunnels, `sshub exec`, `sshub connect`,
+  broadcast, test connect and key push do the same.
+- **A ProxyJump hop with a shell-active user could run commands** - OpenSSH runs
+  the `-J` hop helper through a shell without quoting the user, so a stored or
+  imported ProxyJump such as `a$IFS-oProxyCommand=touch$IFS/tmp/x@host` ran
+  `touch` on connect, tunnel, broadcast and push-key. A hop must now be a
+  `[user@]host[:port]` of login and host-name characters only, everywhere a
+  jump reaches ssh; anything else is refused with a message.
+- **ProxyJump through a host that only exists in SSHub** - `ssh -J name` looked
+  the name up in DNS and `~/.ssh/config`, so a jump host saved only in SSHub
+  failed to resolve. The connect, tunnel and broadcast commands now hand ssh
+  `user@address:port` for such a hop. The hop's own identity is not sent: ssh
+  uses its defaults for every hop.
+- **Hosts dashboard has no empty strip under the SSH log** - the log panel
+  stopped one row short of the hosts list, and in terminals a few rows too
+  short for it the middle and right columns ended early, leaving a blank band.
+  Every column now runs to the last row of the body, and the stacked panes
+  and the log are separated by one blank row, the same as the column gutter.
+- **Hosts to SFTP no longer re-lays out the hosts list** - the SFTP host
+  picker now shares the hosts tab's left edge. Switching tabs stretches the
+  list in place while the dashboard columns slide off to the right, and the
+  reverse brings them back.
+- **`sshub export` could write a command-running ssh_config** - a stored
+  ProxyJump such as `a$IFS-oProxyCommand=...@h`, a host named `*`, or a value
+  with spaces was written as is. Export now refuses such hosts, doubles `%` and
+  quotes key paths with spaces.
+- **Broadcast and OS detection ran the host's stored command instead of yours** -
+  a host with `remote_command = tmux attach` got your command appended to it.
+  The stored command is dropped, mosh hosts broadcast over ssh, and the command
+  follows `--`. Output per host is capped at 1 MiB and a stuck jump helper no
+  longer hangs a worker.
+- **A stored secret was answered to any prompt** - the destination's password
+  or key passphrase now answers only a prompt of its own kind, never a 2FA code
+  or a host-key question; a jump hop's secret only ssh's own
+  `user@host's password:` / `Enter passphrase for key '...':` prompt, not text a
+  server chose. A detached tunnel's temp file with stored secrets is wiped as
+  they are used. "Changed host key" repair only targets the host being
+  connected to.
+- **Sessions could silently drop keystrokes** - the stderr FIFO now lives in a
+  private directory and a failure to create it is reported; OpenSSH older than
+  8.4 (no `SSH_ASKPASS_REQUIRE`) gets the prompt in the terminal.
+- **Smaller hardening** - new private keys are created 0600 in a 0700 `~/.ssh`;
+  `ssh-add -d` takes `--`; tunnels use `ExitOnForwardFailure=yes`; `DISPLAY` is
+  no longer overridden; mosh gets key paths with spaces; command history skips
+  `redis-cli -a`, `ldapsearch -w`, `ssh-keygen -N`, `rar -hp`, `smbclient u%pw`
+  and passcodes.
+- **Tab-bar clicks landed on the wrong tab** in the compact bar (profile active,
+  under 132 columns).
+- **Mouse died on other tabs after zooming a panel** on Hosts, and the zoom
+  animation could draw outside a small or resized terminal.
+- **Host filter: several words match across fields** (`prod 8080`).
+- **Short terminals lost the Latency and Ping panels** (80x24); Agent and Auth
+  shrink instead.
+- **A server banner could mark a session connected** - a login banner reading
+  "Authenticated to ..." (or a forged "host key has changed" block) was read as
+  ssh's own log. ssh now writes its log to a separate channel and only that is
+  parsed. Paste into a session also drops ESC and other control bytes.
+- **A jump host could collect another hop's stored password** - a hop's secret
+  is given only to the ssh process that connects to that hop. Stored hop
+  passwords no longer stay on disk for the life of a detached tunnel: ssh
+  deletes the file once connected.
+- **Stale tunnel pid files could kill an unrelated process** - the pid file now
+  records the process start time and a recycled pid is neither "running" nor
+  signalled.
+- **A deleted host's saved password could be used by the next new host** (row
+  ids were reused) - `hosts` and `identities` ids are now never reused.
+- **Host address and user are checked** - whitespace and shell characters are
+  refused when adding or editing a host, on import, and before they reach ssh,
+  mosh or an exported config.
+- **Credential file saves from two sshub processes no longer lose a secret**
+  (file lock, fsync).
+- **Ctrl+H (Backspace on some terminals) opened Settings inside a filter line.**
+- **Audit `via` ignored a ProxyJump inherited from the group.**
+- **Test connect** reports a hop that needs a typed password or 2FA as `needs
+  interactive auth` instead of `auth failed`.
+- **Moving hosts to another profile left their saved passwords behind** - a move
+  now deletes the moved hosts' passwords (and orphaned identity passphrases)
+  from the source profile's keyring and warns if any cannot be removed.
+- **Jump-host passwords are no longer written to the temp file** used by
+  detached tunnels, `exec`, broadcast and key push: the file holds references
+  and the helper reads the credential store only when a hop asks.
+
 ## [0.18.2] - 2026-10-13
 
 ### Fixed

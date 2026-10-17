@@ -7,8 +7,96 @@ impl App {
         Ok(())
     }
 
+    /// `tunnels` indices the Tunnels tab shows: all of them, or those whose
+    /// label, host, ports or type fuzzy-match the filter, best first.
+    pub fn tunnel_view(&self) -> Vec<usize> {
+        if self.tunnel_filter.is_empty() {
+            return (0..self.tunnels.len()).collect();
+        }
+        let items: Vec<Vec<String>> = self
+            .tunnels
+            .iter()
+            .map(|t| {
+                let host = t
+                    .host_id
+                    .and_then(|hid| self.store.get_host(hid).ok().flatten())
+                    .map(|h| h.name);
+                vec![
+                    t.label.clone().unwrap_or_default(),
+                    host.unwrap_or_default(),
+                    t.remote_host.clone(),
+                    t.local_port.to_string(),
+                    t.remote_port.to_string(),
+                    t.tunnel_type.as_str().to_string(),
+                ]
+            })
+            .collect();
+        crate::search::fuzzy_indices(&self.tunnel_filter, &items)
+    }
+
+    /// Keep `tunnel_selected` on a visible row after the filter or list changed.
+    pub(crate) fn snap_tunnel_selection(&mut self) {
+        let view = self.tunnel_view();
+        if !view.contains(&self.tunnel_selected) {
+            self.tunnel_selected = view.first().copied().unwrap_or(0);
+        }
+    }
+
+    /// The selected tunnel, or `None` when the filter hides it (or hides
+    /// every row), so no action can reach a row the user cannot see.
+    pub(crate) fn selected_tunnel(&self) -> Option<&crate::store::Tunnel> {
+        self.tunnel_view()
+            .contains(&self.tunnel_selected)
+            .then(|| self.tunnels.get(self.tunnel_selected))
+            .flatten()
+    }
+
+    /// Step the selection through the visible rows.
+    pub(crate) fn move_tunnel_selection(&mut self, delta: i32) {
+        let view = self.tunnel_view();
+        if view.is_empty() {
+            return;
+        }
+        let pos = view
+            .iter()
+            .position(|&i| i == self.tunnel_selected)
+            .unwrap_or(0) as i32;
+        let next = (pos + delta).clamp(0, view.len() as i32 - 1);
+        self.tunnel_selected = view[next as usize];
+    }
+
+    /// Keystrokes while the filter bar has focus. Enter keeps the filter, Esc
+    /// drops it.
+    fn handle_key_tunnel_filter(&mut self, key: KeyEvent) {
+        match key.code {
+            _ if self.is_action(KeyAction::Cancel, &key) => {
+                self.tunnel_filter.clear();
+                self.list_filter_editing = false;
+            }
+            _ if self.is_action(KeyAction::Connect, &key) => self.list_filter_editing = false,
+            KeyCode::Char(c)
+                if (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+                    && !c.is_control() =>
+            {
+                self.tunnel_filter.push(c);
+            }
+            KeyCode::Backspace => {
+                self.tunnel_filter.pop();
+            }
+            KeyCode::Up => self.move_tunnel_selection(-1),
+            KeyCode::Down => self.move_tunnel_selection(1),
+            _ => {}
+        }
+        self.snap_tunnel_selection();
+    }
+
     pub(crate) fn handle_key_tunnels(&mut self, key: KeyEvent) -> Result<()> {
         self.tunnel_notice = None;
+
+        if self.list_filter_editing {
+            self.handle_key_tunnel_filter(key);
+            return Ok(());
+        }
 
         if self.try_tab_switch(&key)? {
             return Ok(());
@@ -16,14 +104,12 @@ impl App {
 
         match key.code {
             _ if self.is_action(KeyAction::Quit, &key) => self.request_quit(),
-            _ if self.is_action(KeyAction::MoveDown, &key) => {
-                if !self.tunnels.is_empty() {
-                    self.tunnel_selected = (self.tunnel_selected + 1).min(self.tunnels.len() - 1);
-                }
+            _ if self.is_action(KeyAction::Search, &key) => self.list_filter_editing = true,
+            _ if self.is_action(KeyAction::Cancel, &key) && !self.tunnel_filter.is_empty() => {
+                self.tunnel_filter.clear();
             }
-            _ if self.is_action(KeyAction::MoveUp, &key) => {
-                self.tunnel_selected = self.tunnel_selected.saturating_sub(1);
-            }
+            _ if self.is_action(KeyAction::MoveDown, &key) => self.move_tunnel_selection(1),
+            _ if self.is_action(KeyAction::MoveUp, &key) => self.move_tunnel_selection(-1),
             _ if self.is_action(KeyAction::AddHost, &key) => {
                 self.tunnel_form = Some(TunnelFormEdit {
                     editing_id: None,
@@ -43,7 +129,7 @@ impl App {
                 self.mode = AppMode::TunnelForm;
             }
             _ if self.is_action(KeyAction::Edit, &key) => {
-                if let Some(tunnel) = self.tunnels.get(self.tunnel_selected) {
+                if let Some(tunnel) = self.selected_tunnel().cloned() {
                     self.tunnel_form = Some(TunnelFormEdit {
                         editing_id: Some(tunnel.id),
                         tunnel_type: tunnel.tunnel_type,
@@ -63,7 +149,7 @@ impl App {
                 }
             }
             _ if self.is_action(KeyAction::Delete, &key) => {
-                if let Some(tunnel) = self.tunnels.get(self.tunnel_selected) {
+                if let Some(tunnel) = self.selected_tunnel().cloned() {
                     let label = tunnel
                         .label
                         .clone()
@@ -90,7 +176,16 @@ impl App {
     }
 
     pub(crate) fn toggle_tunnel(&mut self) -> Result<()> {
-        let Some(tunnel) = self.tunnels.get(self.tunnel_selected).cloned() else {
+        let Some(id) = self.selected_tunnel().map(|t| t.id) else {
+            return Ok(());
+        };
+        self.toggle_tunnel_by_id(id)
+    }
+
+    /// Start or stop tunnel `id`, whichever tab asked: the tunnels tab passes
+    /// its selection, the network map the tunnel of the host under its cursor.
+    pub(crate) fn toggle_tunnel_by_id(&mut self, id: i64) -> Result<()> {
+        let Some(tunnel) = self.tunnels.iter().find(|t| t.id == id).cloned() else {
             return Ok(());
         };
         let host = tunnel
@@ -128,8 +223,14 @@ impl App {
                         .store
                         .resolve_connection(h)
                         .unwrap_or_else(|_| crate::store::ResolvedConnection::from_stored(h));
+                    let hops = hop_secrets(
+                        &self.store,
+                        &self.hosts,
+                        self.password_store.as_ref(),
+                        resolved.proxy_jump.as_deref(),
+                    );
                     self.tunnel_manager
-                        .start(&tunnel, h, &resolved, secret.as_ref())
+                        .start(&tunnel, h, &resolved, secret.as_ref(), &hops)
                 }
                 None => Err(anyhow::anyhow!("No host associated with tunnel")),
             };
@@ -190,7 +291,7 @@ impl App {
     }
 
     pub(crate) fn kill_selected_tunnel(&mut self) -> Result<()> {
-        let Some(tunnel) = self.tunnels.get(self.tunnel_selected).cloned() else {
+        let Some(tunnel) = self.selected_tunnel().cloned() else {
             return Ok(());
         };
         let host_name = tunnel
@@ -221,6 +322,7 @@ impl App {
         if self.tunnel_selected >= self.tunnels.len() && !self.tunnels.is_empty() {
             self.tunnel_selected = self.tunnels.len() - 1;
         }
+        self.snap_tunnel_selection();
         Ok(())
     }
 
@@ -540,6 +642,16 @@ impl App {
         }
 
         self.reload_tunnels()?;
+        let hidden = !self.tunnel_filter.is_empty()
+            && !self
+                .tunnel_view()
+                .iter()
+                .any(|&i| self.tunnels[i].local_port == local_port);
+        if hidden {
+            if let Some(n) = self.tunnel_notice.as_mut() {
+                n.push_str(" (hidden by the filter)");
+            }
+        }
         self.mode = AppMode::Normal;
         Ok(())
     }
@@ -575,8 +687,14 @@ impl App {
                         .store
                         .resolve_connection(h)
                         .unwrap_or_else(|_| crate::store::ResolvedConnection::from_stored(h));
+                    let hops = hop_secrets(
+                        &self.store,
+                        &self.hosts,
+                        self.password_store.as_ref(),
+                        resolved.proxy_jump.as_deref(),
+                    );
                     self.tunnel_manager
-                        .start(&tunnel, h, &resolved, secret.as_ref())
+                        .start(&tunnel, h, &resolved, secret.as_ref(), &hops)
                 }
                 None => Err(anyhow::anyhow!("No host associated with tunnel")),
             };
@@ -639,7 +757,17 @@ impl App {
                     (h, resolved)
                 })
             },
-            |host| resolve_pending_secret_for_managed(host, self.password_store.as_ref()).0,
+            |host, resolved| {
+                (
+                    resolve_pending_secret_for_managed(host, self.password_store.as_ref()).0,
+                    hop_secrets(
+                        &store,
+                        &self.hosts,
+                        self.password_store.as_ref(),
+                        resolved.proxy_jump.as_deref(),
+                    ),
+                )
+            },
         );
         crate::tunnel::log_tunnel_reconnect_events(&self.store, &events, &self.tunnels);
         Ok(())
@@ -670,6 +798,7 @@ impl App {
             .and_then(|id| self.tunnels.iter().position(|t| t.id == id))
             .unwrap_or(self.tunnel_selected)
             .min(self.tunnels.len().saturating_sub(1));
+        self.snap_tunnel_selection();
         Ok(())
     }
 

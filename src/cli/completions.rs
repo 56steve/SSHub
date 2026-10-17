@@ -26,6 +26,7 @@ const TOP_LEVEL: &[&str] = &[
     "tunnel",
     "sftp",
     "audit",
+    "map",
     "tags",
     "sync",
     "import",

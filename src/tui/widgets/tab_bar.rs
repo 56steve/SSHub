@@ -56,13 +56,44 @@ fn resolve_version_label(var: Option<String>) -> Option<String> {
 }
 
 /// Tab definitions: (number label, display name).
-const TABS: [(&str, &str); 5] = [
+const TABS: [(&str, &str); 6] = [
     ("1", "hosts"),
     ("2", "sftp"),
     ("3", "tunnels"),
     ("4", "identities"),
     ("5", "audit"),
+    ("6", "map"),
 ];
+
+/// Compact tab spacing leaves room for the profile and badges at 120 columns.
+fn tabs_compact(width: u16, has_profile: bool) -> bool {
+    has_profile && width < 132
+}
+
+/// Blank columns after each tab.
+fn tab_gap(compact: bool) -> u16 {
+    if compact {
+        0
+    } else {
+        3
+    }
+}
+
+/// The tab (0-based) under column `x` of a tab bar drawn into `area`. Walks the
+/// same widths [`render_tab_bar`] advances by: one margin column, then per tab
+/// four columns of number and padding, the label, and the gap.
+pub fn tab_at(x: u16, area: Rect, has_profile: bool) -> Option<usize> {
+    let gap = tab_gap(tabs_compact(area.width, has_profile));
+    let mut cx = area.x + 1;
+    for (i, (_, label)) in TABS.iter().enumerate() {
+        let w = 4 + label.len() as u16 + gap;
+        if x >= cx && x < cx + w {
+            return Some(i);
+        }
+        cx += w;
+    }
+    None
+}
 
 /// Render the tab bar into a 1-row `area`.
 ///
@@ -102,6 +133,7 @@ pub fn render_tab_bar(
     let dim = theme.style(StyleRole::TextDim);
     let muted = theme.style(StyleRole::TextMuted);
 
+    let compact = tabs_compact(area.width, profile_name.is_some());
     for (i, (num, label)) in TABS.iter().enumerate() {
         let tab_num = i + 1;
         let is_active = tab_num == active_tab;
@@ -131,14 +163,18 @@ pub fn render_tab_bar(
             x += label.len() as u16;
         }
 
-        // Compact tab spacing leaves room for the profile and badges at 120 columns.
-        let gap = if profile_name.is_some() && area.width < 132 {
-            " "
-        } else {
-            "   "
-        };
-        buf.set_string(x, y, gap, dim);
-        x += gap.len() as u16;
+        // Compact tab spacing leaves room for the profile and badges at 120
+        // columns: every inactive tab already opens with a space, which is the
+        // only separation then.
+        let gap = tab_gap(compact);
+        buf.set_string(x, y, &"   "[..gap as usize], dim);
+        x += gap;
+    }
+    // Where the tabs end: the scope and version go before a tab does.
+    let tabs_end = x;
+    if compact {
+        // One column between the last tab and the profile label.
+        x += 1;
     }
 
     if let Some(name) = profile_name {
@@ -217,7 +253,7 @@ pub fn render_tab_bar(
     let scope_style = Style::default().fg(theme.semantic().text_highlight);
     let draw_scope = |buf: &mut ratatui::buffer::Buffer, right_x: u16| {
         let scope_len = (7 + scope_path.len()) as u16; // "scope: " + path
-        if right_x > area.x + scope_len + 2 {
+        if right_x > area.x + scope_len + 2 && right_x - scope_len >= tabs_end + 2 {
             let scope_x = right_x - scope_len;
             buf.set_string(scope_x, y, "scope: ", dim);
             buf.set_string(scope_x + 7, y, scope_path, scope_style);
@@ -231,9 +267,13 @@ pub fn render_tab_bar(
             let ver_len = version.chars().count() as u16;
             if area.width > ver_len + 2 {
                 let ver_x = area.x + area.width - ver_len - 1;
-                buf.set_string(ver_x, y, version, version_style);
-                // Two-space gap between the scope path and the version.
-                draw_scope(buf, ver_x.saturating_sub(2));
+                // The scope path goes first, then the version, rather than
+                // either one drawing over the last tabs of a narrow terminal.
+                if ver_x >= tabs_end + 2 {
+                    buf.set_string(ver_x, y, version, version_style);
+                    // Two-space gap between the scope path and the version.
+                    draw_scope(buf, ver_x.saturating_sub(2));
+                }
             }
         }
         None => draw_scope(buf, area.x + area.width - 1),

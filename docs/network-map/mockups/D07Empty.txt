@@ -1,0 +1,45 @@
+  █▀▀ █▀▀ █ █ █ █ █▀▄                                                                                                                                           
+  ▀▀█ ▀▀█ █▀█ █ █ █▀▄   hosts: 214  ·  196 online  ·  9 slow  ·  9 unreachable                                                                Thu 14:02:11 UTC  
+  ▀▀▀ ▀▀▀ ▀ ▀ ▀▀▀ ▀▀                                                                                                                                            
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  1  hosts    2  sftp    3  tunnels    4  identities    5  audit   [6] map                                                            scope: ~/.config/sshub    
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ┌─ map ─ hops as a tree · hosts as glyphs behind their last hop ─────────────────────────────────────────────────────────────────────────────────────────────┐ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                      ◉ you ─┬─▸● bastion ─┬┈┈┈┈┈┈┈┈┈┈┈┈ group ●●●●●●     Σ 9                                                               │ 
+ │                                             │             └─▸● jump ┈┈┈ group ●●●        Σ 3                                                               │ 
+ │                                             └─▸● bastion ┈┈┈┈┈┈┈┈┈┈┈┈┈┈ group ●●●●       Σ 4                                                               │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                      No jump edges yet.                                                                                                    │ 
+ │                                      All 214 hosts are reached directly, so there is no hop to hang them behind.                                           │ 
+ │                                                                                                                                                            │ 
+ │                                      A row appears when a host, its group, or ~/.ssh/config sets a ProxyJump.                                              │ 
+ │                                      Try one:                                                                                                              │ 
+ │                                                                                                                                                            │ 
+ │                                        u  on a host: route other hosts through it (fastest first edge)                                                     │ 
+ │                                        e  edit a host → ProxyJump → a add hop                                                                              │ 
+ │                                        G  give a group a default ProxyJump                                                                                 │ 
+ │                                        Shift+Z  show the 214 direct hosts as a per-group health board                                                      │ 
+ │                                                                                                                                                            │ 
+ │                                      Groups and tags never create edges.                                                                                   │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ e edit host   G groups   u use as jump   Shift+Z show direct hosts   1 hosts   ? help   q quit                                                                 

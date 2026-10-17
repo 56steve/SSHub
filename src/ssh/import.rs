@@ -163,7 +163,7 @@ fn build_import_row(
 /// Deterministic fingerprint of resolved ssh config fields for change detection.
 pub fn compute_ssh_config_hash(host: &SshHost) -> String {
     format!(
-        "hostname={}|user={}|port={}|proxy={}|identity={}|fwd={}|cmd={}",
+        "hostname={}|user={}|port={}|proxy={}|identity={}|fwd={}|cmd={}|proxycmd={}",
         host.hostname.as_deref().unwrap_or(""),
         host.user.as_deref().unwrap_or(""),
         host.port
@@ -177,7 +177,14 @@ pub fn compute_ssh_config_hash(host: &SshHost) -> String {
             None => "",
         },
         host.remote_command.as_deref().unwrap_or(""),
+        if host.has_proxy_command { "yes" } else { "no" },
     )
+}
+
+/// Whether a stored [`compute_ssh_config_hash`] fingerprint recorded a
+/// `ProxyCommand`. The fingerprint is the only place the sync keeps it.
+pub fn ssh_config_hash_has_proxy_command(hash: &str) -> bool {
+    hash.split('|').any(|f| f == "proxycmd=yes")
 }
 
 #[cfg(test)]

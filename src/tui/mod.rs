@@ -124,7 +124,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 /// what it blitted are one animation frame or they are a bug.
 ///
 /// Every other animation still reads its own clock (`render_inner`, the popup
-/// and tab slides, the toasts, the scroll chases). That is sound, and
+/// slides, the toasts, the scroll chases). That is sound, and
 /// deliberately left alone: none of them recomputes geometry that a later paint
 /// pass depends on. This is not a deterministic whole-frame renderer, and the
 /// name does not claim to be one.
@@ -378,6 +378,9 @@ fn fill_reset_pair(buf: &mut Buffer, area: Rect, ground: PtyGround) {
 /// exposed. At the end of the slide they could disagree about whether it was
 /// still playing at all.
 struct FrameComposition {
+    /// The clock this frame was composed at; the dashboard tab slide reads it
+    /// too, so a slide's progress is one value for the whole frame.
+    now: std::time::Instant,
     /// How far the exit slide has carried its snapshot, if one is playing.
     exit_offset: Option<u16>,
     /// How far the enter slide still has to carry the session in, if one is
@@ -442,6 +445,7 @@ impl FrameComposition {
         }
 
         Self {
+            now,
             exit_offset,
             enter_offset,
             tab_slide_progress,
@@ -791,7 +795,7 @@ fn render_inner(frame: &mut Frame, app: &App, composition: &FrameComposition) {
     widgets::footer::render_hrule(frame, rule2, false, theme, PaintRole::TabsSeparator);
 
     // ── Tab body dispatch (with slide animation, #35) ─────────
-    let now = std::time::Instant::now();
+    let now = composition.now;
     let sliding = app
         .tab_switch
         .filter(|s| app.motion_enabled() && now.saturating_duration_since(s.at) < TAB_ANIM);
@@ -1175,6 +1179,221 @@ fn compute_header_stats(app: &App) -> [usize; 4] {
 }
 
 /// The footer's pairs, plus how many trailing ones must never be dropped.
+/// Footer hints of the map tab, by what owns the keyboard.
+fn map_footer(app: &App) -> Vec<(String, &'static str)> {
+    use crate::app::network_map::{Lens, MapSel};
+    use crate::config::KeyAction as A;
+    let kb = &app.config.keybinds;
+    let key = |a: A| screens::map::key_label(kb.primary(a));
+    let Some(v) = app.map_view.as_ref() else {
+        return vec![("?".into(), "help"), ("q".into(), "quit")];
+    };
+    let help = ("?".to_string(), "help");
+    let arrows = ("\u{2191}\u{2193}".to_string(), "row");
+    if v.picker.is_some() {
+        return vec![
+            ("\u{2191}\u{2193}".into(), "tag"),
+            ("\u{21b5}".into(), "toggle"),
+            ("Esc".into(), "close"),
+        ];
+    }
+    if v.use_picker.is_some() {
+        return vec![
+            ("type".into(), "host"),
+            ("\u{21b5}".into(), "apply"),
+            ("Tab".into(), "replace/append"),
+            ("Esc".into(), "close"),
+        ];
+    }
+    if v.editing {
+        return vec![
+            ("type".into(), "filter"),
+            ("Tab".into(), "complete"),
+            ("\u{21b5}".into(), "keep"),
+            ("Esc".into(), "clear"),
+            help,
+        ];
+    }
+    if let Some(run) = app.test_run.as_ref().filter(|r| {
+        matches!(&r.owner, crate::app::test_connect::TestOwner::Map(s) if Some(*s) == v.selection())
+    }) {
+        return if run.running() {
+            vec![("Esc".into(), "cancel test"), arrows, help]
+        } else {
+            vec![
+                (key(A::MapTest), "test again"),
+                (key(A::KnownHosts), "known hosts"),
+                (key(A::PushKey), "push key"),
+                (key(A::MapSshLog), "ssh log"),
+                ("Esc".into(), "close"),
+                help,
+            ]
+        };
+    }
+    match &v.lens {
+        Lens::Blast(_) => {
+            return vec![
+                (key(A::MapBlast), "blast off"),
+                ("Esc".into(), "clear"),
+                (
+                    format!("{}/{}", key(A::MapNextDependent), key(A::MapPrevDependent)),
+                    "next dependent",
+                ),
+                (key(A::Broadcast), "broadcast to these"),
+                (key(A::MapCopyCmd), "copy list"),
+                help,
+            ]
+        }
+        Lens::Tunnel => {
+            return vec![
+                (key(A::MapTunnelLens), "status lens"),
+                (key(A::MapToggleTunnel), "start/stop"),
+                (key(A::TabTunnels), "tunnels tab"),
+                ("\u{21b5}".into(), "connect"),
+                help,
+            ]
+        }
+        Lens::None => {}
+    }
+    let sel = v.selection();
+    // Nothing jumps anywhere (D07), and the expanded direct-only view (D14).
+    if v.edgeless() && !v.direct_open {
+        return vec![
+            (key(A::Edit), "edit host"),
+            (key(A::GroupsManage), "groups"),
+            (key(A::MapUseAsJump), "use as jump"),
+            (key(A::MapFoldAll), "show direct hosts"),
+            ("1".into(), "hosts"),
+            help,
+            ("q".into(), "quit"),
+        ];
+    }
+    if v.direct_open {
+        return vec![
+            (key(A::MapFoldAll), "collapse direct"),
+            (key(A::MapFold), "fold"),
+            ("\u{21b5}".into(), "connect"),
+            (key(A::Search), "filter"),
+            help,
+        ];
+    }
+    if let Some(MapSel::Cycle(_)) = sel {
+        return vec![
+            ("\u{21b5}".into(), "edit chain"),
+            (key(A::Edit), "edit loop"),
+            arrows,
+            help,
+        ];
+    }
+    let narrow = app.terminal_area.width < 120;
+    if v.clustered() && matches!(sel, Some(MapSel::Cluster(_) | MapSel::More(_))) {
+        return vec![
+            (key(A::MapFold), "open/close cluster"),
+            ("\u{2192}".into(), "first host"),
+            (key(A::MapFoldAll), "fold all"),
+            (key(A::Search), "reveal"),
+            (key(A::MapBlast), "blast"),
+            ("\u{21b5}".into(), "open/close"),
+            help,
+        ];
+    }
+    let mut hints = if narrow {
+        vec![
+            arrows,
+            ("\u{2190}\u{2192}".into(), "path"),
+            ("\u{21b5}".into(), "connect"),
+            (key(A::Search), "filter"),
+            (key(A::MapBlast), "blast"),
+            (key(A::MapTunnelLens), "lens"),
+            help,
+        ]
+    } else {
+        vec![
+            arrows,
+            ("\u{2190}\u{2192}".into(), "along the path"),
+            ("\u{21b5}".into(), "connect"),
+            (key(A::Search), "filter"),
+            (key(A::MapBlast), "blast"),
+            (key(A::MapTunnelLens), "tunnel lens"),
+            (key(A::MapUseAsJump), "use as jump"),
+            (key(A::MapTest), "test"),
+            (key(A::MapFold), "fold"),
+            (key(A::Edit), "edit"),
+            (key(A::MapCopyCmd), "copy cmd"),
+            help,
+            ("q".into(), "quit"),
+        ]
+    };
+    // `a` only means something on a raw hop.
+    let on_raw_hop = matches!(
+        sel,
+        Some(MapSel::Hop(n)) if matches!(v.map.nodes[n].key, crate::map::HopKey::Raw(_))
+    );
+    if on_raw_hop && !narrow {
+        let at = hints.len().saturating_sub(2);
+        hints.insert(at, (key(A::AddHost), "save as host"));
+    }
+    hints
+}
+
+/// Footer of the host form while its ProxyJump field is the hop editor.
+fn hop_editor_footer(app: &App) -> Option<Vec<(String, &'static str)>> {
+    let form = app.host_form.as_ref()?;
+    if app.mode != AppMode::HostForm
+        || form.field != crate::app::HostFormField::ProxyJump
+        || form.metadata_only
+    {
+        return None;
+    }
+    let save = app.save_key_label();
+    let ed = &app.hop_editor;
+    if ed.is_picking() {
+        return Some(vec![
+            ("\u{2191}\u{2193}".into(), "choose"),
+            ("\u{21b5}".into(), "add hop / use route"),
+            ("End".into(), "raw hop"),
+            ("Esc".into(), "close"),
+        ]);
+    }
+    if ed.is_typing_raw() {
+        return Some(vec![("\u{21b5}".into(), "add"), ("Esc".into(), "cancel")]);
+    }
+    let failed = app
+        .test_run
+        .as_ref()
+        .is_some_and(|r| r.owner == crate::app::test_connect::TestOwner::Editor && !r.running());
+    if failed {
+        return Some(vec![
+            ("t".into(), "test again"),
+            ("H".into(), "known hosts"),
+            (save, "save"),
+            ("Esc".into(), "cancel"),
+        ]);
+    }
+    if form.proxy_jump.trim().is_empty() {
+        return Some(vec![
+            ("a".into(), "add hop (overrides group)"),
+            ("r".into(), "raw hop"),
+            ("n".into(), "direct"),
+            ("t".into(), "test inherited chain"),
+            ("Tab".into(), "next field"),
+            (save, "save"),
+            ("Esc".into(), "cancel"),
+        ]);
+    }
+    Some(vec![
+        ("a".into(), "add hop"),
+        ("d".into(), "remove"),
+        ("r".into(), "raw hop"),
+        ("n".into(), "direct"),
+        ("X".into(), "inherit"),
+        ("t".into(), "test chain"),
+        ("Tab".into(), "next field"),
+        (save, "save"),
+        ("Esc".into(), "cancel"),
+    ])
+}
+
 fn footer_keybinds(
     app: &App,
     footer_width: u16,
@@ -1233,6 +1452,7 @@ fn footer_keybinds(
         2 => vec![
             ("\u{2191}\u{2193}".into(), "select"),
             ("\u{21b5}".into(), "start/stop"),
+            ("/".into(), "filter"),
             ("a".into(), "new tunnel"),
             ("e".into(), "edit"),
             ("d".into(), "delete"),
@@ -1241,9 +1461,25 @@ fn footer_keybinds(
             ("?".into(), "help"),
             ("q".into(), "quit"),
         ],
+        // An overlay opened from the map (host form, broadcast, pickers) has its
+        // own keys: the map's footer would name keys that do nothing there.
+        5 if app.mode != AppMode::Normal => match app.mode {
+            AppMode::HostForm | AppMode::FieldPicker => vec![
+                ("Tab".into(), "next field"),
+                (app.save_key_label(), "save"),
+                ("Esc".into(), "cancel"),
+            ],
+            // The broadcast steps add their own below.
+            AppMode::BroadcastPickTarget
+            | AppMode::BroadcastCommand
+            | AppMode::BroadcastPreview => vec![],
+            _ => vec![("Esc".into(), "close")],
+        },
+        5 => map_footer(app),
         3 => vec![
             ("\u{2191}\u{2193}\u{2190}\u{2192}".into(), "move"),
             ("[ ]".into(), "columns"),
+            ("/".into(), "filter"),
             ("a".into(), "add"),
             ("g".into(), "generate"),
             ("e".into(), "edit"),
@@ -1263,6 +1499,30 @@ fn footer_keybinds(
         ],
         _ => vec![("q".into(), "quit")],
     };
+    if matches!(app.active_tab, 2 | 3) && app.list_filter_editing {
+        binds = vec![
+            (
+                screens::map::key_label(
+                    app.config
+                        .keybinds
+                        .primary(crate::config::KeyAction::Connect),
+                ),
+                "keep filter",
+            ),
+            (
+                screens::map::key_label(
+                    app.config
+                        .keybinds
+                        .primary(crate::config::KeyAction::Cancel),
+                ),
+                "clear filter",
+            ),
+        ];
+    }
+    // The host form's hop editor has its own footers (D10, D11, D13).
+    if let Some(hints) = hop_editor_footer(app) {
+        binds = hints;
+    }
     // Issue #18: surface the panel-zoom hint once a panel is focused/zoomed.
     if app.active_tab == 0
         && (app.panel_zoomed || app.focused_panel != crate::app::PanelId::default())
@@ -1288,7 +1548,14 @@ fn footer_keybinds(
     // Broadcast mode (#3): running panel gets a cancel hint (and a zoom hint
     // once focused); an active wizard step gets next/cancel.
     if app.broadcast.is_some() {
-        binds.push(("x".into(), "cancel"));
+        binds.push((
+            screens::map::key_label(
+                app.config
+                    .keybinds
+                    .primary(crate::config::KeyAction::BroadcastCancel),
+            ),
+            "cancel",
+        ));
         if app.focused_panel == crate::app::PanelId::Broadcast {
             binds.push(("z".into(), "zoom"));
         }
@@ -1335,6 +1602,22 @@ fn footer_keybinds(
         .into_iter()
         .map(|(key, label)| (key, std::borrow::Cow::Borrowed(label)))
         .collect();
+    // The map's loop row names the host `e` edits (`e edit loop-a`).
+    if app.active_tab == 5 {
+        let name = app.map_view.as_ref().and_then(|v| match v.selection()? {
+            crate::app::network_map::MapSel::Cycle(i) => {
+                Some(v.map.hosts[v.map.cycles[i].path[0]].name.clone())
+            }
+            _ => None,
+        });
+        if let Some(name) = name {
+            for (_, label) in binds.iter_mut() {
+                if label == "edit loop" {
+                    *label = std::borrow::Cow::Owned(format!("edit {name}"));
+                }
+            }
+        }
+    }
     // The action only exists on a real profile workspace: directory-override
     // (compat) installs and dependency-injected Apps without a profile cannot
     // open it, and advertising it would push useful hints off the row.
@@ -1706,6 +1989,7 @@ fn render_tab_body(
         2 => render_tunnels_body(frame, areas, app),
         3 => render_keys_body(frame, areas, app),
         4 => render_audit_body(frame, areas, app),
+        5 => screens::map::render_map(frame, areas.body, app),
         _ => render_hosts_body(frame, areas, app),
     }
 }
@@ -1737,6 +2021,13 @@ fn render_tab_slide(
     now: std::time::Instant,
 ) {
     let p = tween::ease_out(tween::progress(sw.at, TAB_ANIM, now));
+    // Hosts <-> SFTP picker: the hosts pane widens in place, the rest slides off.
+    let hosts_sftp = matches!((sw.from, sw.to), (0, 1) | (1, 0));
+    let zooming = app.zoom_anim.is_some_and(|a| !a.is_done(now));
+    if hosts_sftp && app.sftp.is_none() && !app.panel_zoomed && !zooming {
+        render_hosts_sftp_morph(frame, areas, app, if sw.to == 1 { p } else { 1.0 - p });
+        return;
+    }
     let bw = areas.body.width;
     let right = sw.to > sw.from;
     // The moving layer sits on top starting at `body.x + off`; the backdrop shows
@@ -1767,6 +2058,48 @@ fn render_tab_slide(
     }
 }
 
+/// Hosts <-> SFTP picker transition at `t` (0 = hosts tab, 1 = SFTP picker).
+///
+/// The hosts pane keeps its left edge and stretches into the picker's rect (or
+/// shrinks back), while the details/dashboard columns are pushed off the right
+/// edge of the body, clipped to it, and come back the same way.
+fn render_hosts_sftp_morph(
+    frame: &mut Frame,
+    areas: &dashboard_layout::DashboardAreas,
+    app: &App,
+    t: f32,
+) {
+    let body = areas.body;
+    // The dashboard columns at rest, lifted into cells so they can travel. The
+    // rest-layout hosts panel it draws advances the shared scroll state with
+    // the wrong body height; roll that back so the morphing panel below is
+    // the one advance this frame.
+    let scroll = (
+        app.host_scroll_pos.get(),
+        app.host_scroll_at.get(),
+        app.host_scroll_moving.get(),
+    );
+    render_hosts_body(frame, areas, app);
+    app.host_scroll_pos.set(scroll.0);
+    app.host_scroll_at.set(scroll.1);
+    app.host_scroll_moving.set(scroll.2);
+    let cols = Rect::new(
+        areas.col_mid.x,
+        body.y,
+        body.right().saturating_sub(areas.col_mid.x),
+        body.height,
+    );
+    let layer = blit::snapshot(frame.buffer_mut(), cols);
+    frame.render_widget(Clear, Rect::new(body.x, body.y, body.width, body.height));
+    let dx = (t * cols.width as f32).round() as i32;
+    blit::blit(frame.buffer_mut(), cols, body, &layer, dx, 0);
+
+    let rect =
+        dashboard_layout::lerp_rect(areas.col_left, dashboard_layout::sftp_picker_rect(body), t);
+    frame.render_widget(Clear, rect);
+    widgets::hosts_panel::render_hosts_panel(frame, rect, app);
+}
+
 fn render_hosts_body(frame: &mut Frame, areas: &dashboard_layout::DashboardAreas, app: &App) {
     // Issue #18: a zoomed panel takes over the whole dashboard body.
     // Broadcast (#3) is a floating panel drawn from render_inner instead, so a
@@ -1782,20 +2115,31 @@ fn render_hosts_body(frame: &mut Frame, areas: &dashboard_layout::DashboardAreas
         render_zoomed_panel(frame, areas.body, app);
         return;
     }
+    // The stacks take their natural height, the SSH log everything below them,
+    // so every column ends on the last body row.
+    let (stack_h, log_area) = dashboard_layout::hosts_stack_split(areas);
     widgets::hosts_panel::render_hosts_panel(frame, areas.col_left, app);
-    widgets::middle_stack::render_middle_stack(frame, areas.col_mid, app);
-    widgets::right_stack::render_right_stack(frame, areas.col_right, app);
-
-    // SSH log panel spanning middle + right columns below their stacks
-    let log_top = areas.col_mid.y + 19;
-    let log_bottom = areas.footer.y.saturating_sub(2);
-    if log_bottom > log_top + 3 {
-        let log_area = Rect::new(
+    widgets::middle_stack::render_middle_stack(
+        frame,
+        Rect::new(
             areas.col_mid.x,
-            log_top,
-            areas.col_mid.width + 1 + areas.col_right.width,
-            log_bottom - log_top,
-        );
+            areas.col_mid.y,
+            areas.col_mid.width,
+            stack_h,
+        ),
+        app,
+    );
+    widgets::right_stack::render_right_stack(
+        frame,
+        Rect::new(
+            areas.col_right.x,
+            areas.col_right.y,
+            areas.col_right.width,
+            stack_h,
+        ),
+        app,
+    );
+    if let Some(log_area) = log_area {
         widgets::middle_stack::render_ssh_log_panel(frame, log_area, app);
     }
 
@@ -1805,7 +2149,12 @@ fn render_hosts_body(frame: &mut Frame, areas: &dashboard_layout::DashboardAreas
     // the plain grid remains.
     if morphing {
         if let Some(anim) = app.zoom_anim {
-            let rect = anim.rect_at(now);
+            // The anim's rects were fixed at key-press; keep them on screen
+            // after a resize or on a terminal shorter than the slot.
+            let rect = anim.rect_at(now).intersection(frame.area());
+            if rect.is_empty() {
+                return;
+            }
             frame.render_widget(Clear, rect);
             render_zoomed_panel(frame, rect, app);
         }
@@ -1820,27 +2169,40 @@ pub fn panel_zoom_source(
     panel: crate::app::PanelId,
 ) -> Rect {
     use crate::app::PanelId;
-    use widgets::middle_stack::{AGENT_H, HOST_H, LATENCY_H};
-    use widgets::right_stack::{AUTH_H, PING_H, RECENT_H};
+    use widgets::middle_stack::{AGENT_H, HOST_H};
+    use widgets::right_stack::{AUTH_H, RECENT_H};
+    let (stack_h, log) = dashboard_layout::hosts_stack_split(areas);
+    let gap = dashboard_layout::PANEL_GAP;
     let mid = areas.col_mid;
     let right = areas.col_right;
     // Each stacked panel's real slot (same heights the stacks lay out), so the
     // morph grows/shrinks in both dimensions from the actual box.
+    // The middle panel of each stack shrinks on short terminals so the last
+    // one stays drawable (`middle_panel_h`); mirror that here.
+    let agent_h = dashboard_layout::middle_panel_h(AGENT_H, stack_h.saturating_sub(HOST_H + gap));
+    let auth_h = dashboard_layout::middle_panel_h(AUTH_H, stack_h.saturating_sub(RECENT_H + gap));
     match panel {
         PanelId::Hosts => areas.col_left,
         PanelId::Detail => Rect::new(mid.x, mid.y, mid.width, HOST_H),
-        PanelId::Agent => Rect::new(mid.x, mid.y + HOST_H, mid.width, AGENT_H),
-        PanelId::Latency => Rect::new(mid.x, mid.y + HOST_H + AGENT_H, mid.width, LATENCY_H),
-        PanelId::Recent => Rect::new(right.x, right.y, right.width, RECENT_H),
-        PanelId::Auth => Rect::new(right.x, right.y + RECENT_H, right.width, AUTH_H),
-        PanelId::Ping => Rect::new(right.x, right.y + RECENT_H + AUTH_H, right.width, PING_H),
-        // SSH log spans mid+right along the bottom (see render_hosts_body).
-        PanelId::SshLog => Rect::new(
+        PanelId::Agent => Rect::new(mid.x, mid.y + HOST_H + gap, mid.width, agent_h),
+        PanelId::Latency => Rect::new(
             mid.x,
-            mid.y + 19,
-            mid.width + 1 + right.width,
-            areas.body.height.saturating_sub(19),
+            mid.y + HOST_H + agent_h + 2 * gap,
+            mid.width,
+            stack_h.saturating_sub(HOST_H + agent_h + 2 * gap),
         ),
+        PanelId::Recent => Rect::new(right.x, right.y, right.width, RECENT_H),
+        PanelId::Auth => Rect::new(right.x, right.y + RECENT_H + gap, right.width, auth_h),
+        PanelId::Ping => Rect::new(
+            right.x,
+            right.y + RECENT_H + auth_h + 2 * gap,
+            right.width,
+            stack_h.saturating_sub(RECENT_H + auth_h + 2 * gap),
+        ),
+        // SSH log spans mid+right along the bottom (see render_hosts_body).
+        PanelId::SshLog => {
+            log.unwrap_or_else(|| Rect::new(mid.x, mid.y + stack_h + gap, mid.width, 0))
+        }
         // Broadcast morphs from its own docked rect, handled elsewhere.
         PanelId::Broadcast => screens::broadcast::docked_rect(areas.body),
     }
@@ -1909,9 +2271,45 @@ fn render_form_popup(frame: &mut Frame, app: &App, kind: FormKind) {
     // the bottom, taking the save/cancel and reveal hints with it, which is how
     // a masked password ended up looking unrevealable. `form_rows_needed` is
     // guarded by a render test at 80x24 so a new field cannot re-clip them.
+    // The hop editor of the host form (list, picker, test result) is part of the
+    // form: it grows the popup instead of being cut off at 70% of the screen.
+    let host_ctx = if matches!(kind, FormKind::Host) {
+        app.host_form.as_ref().map(|form| {
+            // Muted placeholders: what a save would actually use for each
+            // cleared field. Resolved across every selected group with the
+            // same most-specific-wins ordering as `resolve_connection`,
+            // so the placeholder matches the restored value.
+            let primary = app
+                .groups
+                .iter()
+                .find(|g| form.group_ids.contains(&g.id))
+                .map(|g| g.id);
+            let selected: Vec<i64> = form.group_ids.iter().copied().collect();
+            let inherited = app
+                .store()
+                .inherited_for_groups(primary, &selected)
+                .unwrap_or_else(|_| crate::store::ResolvedConnection::global_default());
+            let hops = app.hop_section(&inherited);
+            (form, inherited, hops)
+        })
+    } else {
+        None
+    };
+    let hop_extra = host_ctx
+        .as_ref()
+        .and_then(|(_, _, h)| h.as_ref())
+        .map_or(0, |h| {
+            screens::hop_lines::line_count(h, app.theme(), popup_width.saturating_sub(2))
+        });
+    // The footer row stays visible below a tall form (the hop editor's footer
+    // lists its keys), so a form never takes the last row.
     let popup_height = (area.height * 70 / 100)
-        .max(form_rows_needed(kind))
-        .min(area.height);
+        .max(form_rows_needed(kind) + hop_extra)
+        .min(
+            area.height
+                .saturating_sub(2)
+                .max(form_rows_needed(kind).min(area.height)),
+        );
     let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -1923,37 +2321,21 @@ fn render_form_popup(frame: &mut Frame, app: &App, kind: FormKind) {
     open_popup(frame, popup_area, theme);
 
     let body = match kind {
-        FormKind::Host => {
-            if let Some(form) = app.host_form.as_ref() {
-                // Muted placeholders: what a save would actually use for each
-                // cleared field. Resolved across every selected group with the
-                // same most-specific-wins ordering as `resolve_connection`,
-                // so the placeholder matches the restored value.
-                let primary = app
-                    .groups
-                    .iter()
-                    .find(|g| form.group_ids.contains(&g.id))
-                    .map(|g| g.id);
-                let selected: Vec<i64> = form.group_ids.iter().copied().collect();
-                let inherited = app
-                    .store()
-                    .inherited_for_groups(primary, &selected)
-                    .unwrap_or_else(|_| crate::store::ResolvedConnection::global_default());
-                Some(screens::host_form::render_host_form(
-                    form,
-                    &app.groups,
-                    &app.identities,
-                    &inherited,
-                    &app.save_key_label(),
-                    &app.config.keybinds.secret_field_hints(),
-                    &app.copy_field_hint(),
-                    theme,
-                    border,
-                ))
-            } else {
-                None
-            }
-        }
+        FormKind::Host => host_ctx.as_ref().map(|(form, inherited, hops)| {
+            screens::host_form::render_host_form(
+                form,
+                &app.groups,
+                &app.identities,
+                inherited,
+                hops.as_ref(),
+                popup_area.width.saturating_sub(2),
+                &app.save_key_label(),
+                &app.config.keybinds.secret_field_hints(),
+                &app.copy_field_hint(),
+                theme,
+                border,
+            )
+        }),
         FormKind::Identity => {
             if let Some(form) = app.identity_form.as_ref() {
                 let cert = app.cert_statuses.get(&form.certificate);
@@ -2399,8 +2781,8 @@ mod tests {
         };
         let mut state = crate::profile::ProfileState::default();
         for (name, narrow) in [
-            ("界".repeat(20), format!("{}…", "界".repeat(6))),
-            ("e\u{301}".repeat(20), format!("{}…", "e\u{301}".repeat(12))),
+            ("界".repeat(20), format!("{}…", "界".repeat(4))),
+            ("e\u{301}".repeat(20), format!("{}…", "e\u{301}".repeat(9))),
         ] {
             let record = crate::profile::create_profile(&roots, &mut state, &name).unwrap();
             app.profile = Some(crate::profile::profile_paths(
@@ -2412,7 +2794,7 @@ mod tests {
                 let buffer = render_to_buffer(&app, width, 24);
                 let area =
                     dashboard_layout::dashboard_layout_zoomed(buffer.area, app.ui_zoom).tab_bar;
-                let start = if width < 132 { 57 } else { 67 };
+                let start = if width < 132 { 60 } else { 77 };
                 let adjusted;
                 let expected_name = if width == 80 {
                     &narrow
@@ -2459,6 +2841,21 @@ mod tests {
                     .collect();
                 assert!(row.contains("audit"), "audit tab must remain intact: {row}");
             }
+        }
+    }
+
+    #[test]
+    fn the_sixth_tab_is_never_covered_by_the_scope_or_the_version() {
+        let mut app = test_app_with_hosts();
+        app.active_tab = 5;
+        for width in [80, 90, 100, 110, 120, 160] {
+            let buffer = render_to_buffer(&app, width, 24);
+            let y = dashboard_layout::dashboard_layout_zoomed(buffer.area, app.ui_zoom)
+                .tab_bar
+                .y;
+            let row: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+            assert!(row.contains("[6] map"), "{width}: {row:?}");
+            assert!(row.contains("5  audit"), "{width}: {row:?}");
         }
     }
 
@@ -2701,6 +3098,243 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn tunnels_and_identities_filter_bar_renders_and_hides_rows() {
+        let mut app = test_app_with_hosts();
+        app.identities = ["alpha-key", "bravo-key"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| crate::store::Identity {
+                id: i as i64 + 1,
+                name: (*n).into(),
+                username: None,
+                private_key: Some(format!("/k/{n}").into()),
+                certificate: None,
+                has_password: false,
+            })
+            .collect();
+        app.tunnels = ["alpha-db", "bravo-web"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| crate::store::Tunnel {
+                id: i as i64 + 1,
+                host_id: None,
+                tunnel_type: crate::store::TunnelType::Local,
+                local_port: 5000 + i as u16,
+                remote_host: "localhost".into(),
+                remote_port: 80,
+                label: Some((*n).into()),
+                auto_connect: false,
+                created_at: 0,
+                updated_at: 0,
+            })
+            .collect();
+        for tab in [2usize, 3] {
+            app.active_tab = tab;
+            app.list_filter_editing = true;
+            app.tunnel_filter = "bravo".into();
+            app.identity_filter = "bravo".into();
+            app.snap_tunnel_selection();
+            app.snap_identity_selection();
+            let buffer = render_to_buffer(&app, 120, 40);
+            assert!(buffer_contains(&buffer, "filter: bravo"), "tab {tab} bar");
+            // The row itself, not the filter bar's own "bravo".
+            let kept = if tab == 2 { "bravo-web" } else { "bravo-key" };
+            assert!(buffer_contains(&buffer, kept), "tab {tab} kept row");
+            assert!(!buffer_contains(&buffer, "alpha"), "tab {tab} hid row");
+            assert!(buffer_contains(&buffer, "keep filter"), "tab {tab} footer");
+        }
+    }
+
+    /// True when the cell is part of a drawn box edge (anything but blank).
+    fn drawn(buffer: &Buffer, x: u16, y: u16) -> bool {
+        buffer
+            .cell((x, y))
+            .is_some_and(|c| !c.symbol().trim().is_empty())
+    }
+
+    #[test]
+    fn hosts_dashboard_panes_are_separated_by_one_blank_cell() {
+        use widgets::middle_stack::{AGENT_H, HOST_H};
+        use widgets::right_stack::{AUTH_H, RECENT_H};
+        let gap = dashboard_layout::PANEL_GAP;
+        for (w, h) in [(132u16, 38u16), (132, 32), (160, 60)] {
+            let app = test_app_with_hosts();
+            let buffer = render_to_buffer(&app, w, h);
+            let areas = dashboard_layout::dashboard_layout_zoomed(Rect::new(0, 0, w, h), 0);
+            let (stack_h, log) = dashboard_layout::hosts_stack_split(&areas);
+            let top = areas.body.y;
+            // Rows (relative to the body) that must be blank in each column.
+            let mid_gaps = [HOST_H, HOST_H + AGENT_H + gap];
+            let right_gaps = [RECENT_H, RECENT_H + AUTH_H + gap];
+            for y in areas.body.top()..areas.body.bottom() {
+                let rel = y - top;
+                let in_stack = rel < stack_h;
+                let mid_gap = mid_gaps.contains(&rel) || (log.is_some() && rel == stack_h);
+                let right_gap = right_gaps.contains(&rel) || (log.is_some() && rel == stack_h);
+                assert!(
+                    drawn(&buffer, areas.col_left.x, y),
+                    "{w}x{h} hosts edge, row {y}"
+                );
+                assert_eq!(
+                    drawn(&buffer, areas.col_mid.x, y),
+                    !mid_gap,
+                    "{w}x{h} middle column, row {y}"
+                );
+                if in_stack || log.is_some() && rel == stack_h {
+                    assert_eq!(
+                        drawn(&buffer, areas.col_right.x, y),
+                        !right_gap,
+                        "{w}x{h} right column, row {y}"
+                    );
+                }
+            }
+            if let Some(log) = log {
+                let last = areas.body.bottom() - 1;
+                assert_eq!(
+                    log.bottom() - 1,
+                    last,
+                    "{w}x{h}: log ends on the last body row"
+                );
+                assert_eq!(
+                    buffer[(log.x, last)].symbol(),
+                    "└",
+                    "{w}x{h}: log bottom corner"
+                );
+                assert_eq!(
+                    buffer[(areas.col_left.x, last)].symbol(),
+                    "└",
+                    "{w}x{h}: hosts bottom corner on the same row"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn short_terminals_still_draw_latency_and_ping_to_the_last_row() {
+        for (w, h) in [(80u16, 24u16), (80, 23), (100, 24), (132, 28), (132, 30)] {
+            let buffer = render_to_buffer(&test_app_with_hosts(), w, h);
+            let areas = dashboard_layout::dashboard_layout(Rect::new(0, 0, w, h));
+            assert!(
+                find_cell(&buffer, "latency").is_some(),
+                "{w}x{h}: Latency box"
+            );
+            assert!(
+                find_cell(&buffer, "ping all hosts").is_some(),
+                "{w}x{h}: Ping box"
+            );
+            let last = areas.body.bottom() - 1;
+            for x in [areas.col_mid.x, areas.col_right.x] {
+                assert_eq!(buffer[(x, last)].symbol(), "└", "{w}x{h}: column at x={x}");
+            }
+        }
+    }
+
+    #[test]
+    fn tab_clicks_land_on_the_tab_drawn_there() {
+        let app = test_app_with_hosts();
+        let labels = ["hosts", "sftp", "tunnels", "identities", "audit", "map"];
+        for width in [80u16, 100, 131, 132, 160] {
+            for profile in [None, Some("alpha")] {
+                let area = Rect::new(0, 0, width, 1);
+                let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        widgets::tab_bar::render_tab_bar(
+                            frame,
+                            area,
+                            1,
+                            "~/.config/sshub",
+                            profile,
+                            None,
+                            app.theme(),
+                        )
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let row: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
+                let mut from = 0;
+                for (i, label) in labels.iter().enumerate() {
+                    let start = from + row[from..].find(label).expect(label);
+                    let (first, last) = (start as u16, (start + label.len() - 1) as u16);
+                    for x in [first, last] {
+                        assert_eq!(
+                            widgets::tab_bar::tab_at(x, area, profile.is_some()),
+                            Some(i),
+                            "{width} cols, profile {profile:?}, '{label}' at x={x}: {row}"
+                        );
+                    }
+                    from = start + label.len();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reversing_a_tab_switch_resumes_from_where_it_stands() {
+        let mut app = test_app_with_hosts();
+        app.config.appearance.disable_animation = false;
+        app.active_tab = 1;
+        app.detect_tab_switch();
+        let mut sw = app.tab_switch.expect("switch armed");
+        sw.at -= TAB_ANIM / 4;
+        app.tab_switch = Some(sw);
+        let before = tween::ease_out(tween::progress(sw.at, TAB_ANIM, std::time::Instant::now()));
+
+        app.active_tab = 0;
+        app.detect_tab_switch();
+        let back = app.tab_switch.expect("reverse armed");
+        let after = tween::ease_out(tween::progress(
+            back.at,
+            TAB_ANIM,
+            std::time::Instant::now(),
+        ));
+        assert_eq!((back.from, back.to), (1, 0));
+        assert!(
+            (before + after - 1.0).abs() < 0.05,
+            "reverse starts at {after}, forward stood at {before}"
+        );
+    }
+
+    #[test]
+    fn hosts_to_sftp_morph_keeps_the_hosts_pane_on_the_left_edge() {
+        let (w, h) = (132u16, 38u16);
+        let areas = dashboard_layout::dashboard_layout_zoomed(Rect::new(0, 0, w, h), 0);
+        let picker = dashboard_layout::sftp_picker_rect(areas.body);
+        // `stale_zoom`: a panel zoom that finished earlier must not demote the
+        // morph to the whole-body slide (`zoom_anim` stays set after `z`).
+        let at = |from: usize, to: usize, frac: f32, stale_zoom: bool| {
+            let mut app = test_app_with_hosts();
+            app.config.appearance.disable_animation = false;
+            app.active_tab = to;
+            if stale_zoom {
+                let r = Rect::new(0, 0, 4, 2);
+                app.zoom_anim = Some(tween::SlideAnim::new(r, r, std::time::Duration::ZERO));
+            }
+            let now = std::time::Instant::now();
+            app.tab_switch = Some(crate::app::TabSwitch {
+                from,
+                to,
+                at: now - TAB_ANIM.mul_f32(frac),
+            });
+            render_frame_at(&app, w, h, now)
+        };
+        // Midway either way: the pane's top-left corner never leaves col_left.x,
+        // and its own top-right corner (the first `┐` on the row, the pane being
+        // leftmost) sits strictly between the two resting widths.
+        for (from, to, stale_zoom) in [(0, 1, false), (1, 0, false), (0, 1, true), (1, 0, true)] {
+            let buffer = at(from, to, 0.5, stale_zoom);
+            assert_eq!(buffer[(areas.col_left.x, areas.body.y)].symbol(), "┌");
+            let right_edge = (areas.col_left.x..picker.right())
+                .find(|&x| buffer[(x, areas.body.y)].symbol() == "┐")
+                .expect("hosts pane top-right corner");
+            assert!(
+                right_edge + 1 > areas.col_left.right() && right_edge + 1 < picker.right(),
+                "{from}->{to} stale_zoom={stale_zoom}: pane mid-stretch, right edge {right_edge}"
+            );
+        }
     }
 
     // ── Frozen default-theme golden ──────────────────────────
@@ -2985,6 +3619,7 @@ mod tests {
             ("db-old", "root", "10.0.0.13"),
         ] {
             let cfg = SessionConfig {
+                hops: Vec::new(),
                 argv: vec!["true".into()],
                 display_name: name.into(),
                 meta: SessionMeta {
@@ -3066,6 +3701,7 @@ mod tests {
         let mut app = test_app_with_hosts();
         for name in ["alpha", "bravo"] {
             let cfg = crate::session::SessionConfig {
+                hops: Vec::new(),
                 argv: vec!["true".into()],
                 display_name: name.into(),
                 meta: crate::session::SessionMeta::default(),
@@ -3414,6 +4050,26 @@ mod tests {
         );
     }
 
+    /// The 132x38 golden says nothing about smaller terminals or the SFTP
+    /// picker tab: draw both at 100x30, 80x24 and a tiny 60x18 (must not panic
+    /// on an unlucky slot) and check the landmarks that must survive.
+    #[test]
+    fn dashboard_and_sftp_picker_draw_at_smaller_sizes() {
+        for (w, h) in [(100, 30), (80, 24), (60, 18)] {
+            let mut app = test_app_with_hosts();
+            let hosts = render_to_buffer(&app, w, h);
+            app.active_tab = 1;
+            let picker = render_to_buffer(&app, w, h);
+            if w < 80 {
+                continue;
+            }
+            assert!(buffer_contains(&hosts, "web-prod"), "hosts tab {w}x{h}");
+            assert!(buffer_contains(&picker, "web-prod"), "picker list {w}x{h}");
+            assert!(buffer_contains(&picker, "Esc back"), "picker hint {w}x{h}");
+            assert!(!buffer_contains(&hosts, "Esc back"), "hosts tab {w}x{h}");
+        }
+    }
+
     // ── Theme-driven app background ─────────────────────────
     //
     // Three background states (terminal / explicit solid / explicit gradient)
@@ -3508,6 +4164,7 @@ mod tests {
         use crate::session::{SessionConfig, SessionMeta, SessionPhase};
 
         let cfg = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["true".into()],
             display_name: "web-prod".into(),
             meta: SessionMeta {
@@ -5244,6 +5901,7 @@ mod tests {
         {
             let mut app = test_app_with_hosts();
             let cfg = SessionConfig {
+                hops: Vec::new(),
                 argv: vec!["true".into()],
                 display_name: name.into(),
                 meta: SessionMeta {
@@ -5504,6 +6162,7 @@ mod tests {
     fn failed_connect_shows_x_and_reason() {
         let mut app = test_app_with_hosts();
         let config = crate::session::SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),
@@ -5547,6 +6206,7 @@ mod tests {
     fn connecting_screen_shows_spinner_overlay() {
         let mut app = test_app_with_hosts();
         let config = crate::session::SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sleep".into(), "1".into()],
             display_name: "web-prod".into(),
             meta: crate::session::SessionMeta {
@@ -5571,6 +6231,7 @@ mod tests {
     fn dashboard_shows_open_session_strip() {
         let mut app = test_app_with_hosts();
         let config = crate::session::SessionConfig {
+            hops: Vec::new(),
             argv: vec!["true".into()],
             display_name: "web-prod".into(),
             meta: crate::session::SessionMeta::default(),

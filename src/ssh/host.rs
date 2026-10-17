@@ -9,6 +9,9 @@ pub struct SshHost {
     pub forward_agent: Option<bool>,
     pub remote_command: Option<String>,
     pub certificate_file: Option<String>,
+    /// `ssh -G` reported a `ProxyCommand`. Presence only: the command line is
+    /// never stored or run (the network map shows it as an opaque hop).
+    pub has_proxy_command: bool,
 }
 
 impl SshHost {
@@ -23,6 +26,7 @@ impl SshHost {
             forward_agent: None,
             remote_command: None,
             certificate_file: None,
+            has_proxy_command: false,
         }
     }
 }
@@ -62,7 +66,12 @@ pub fn build_ssh_argv(host: &SshHost) -> Vec<String> {
     }
 
     let hostname = host.hostname.as_deref().unwrap_or(&host.name);
-    let target = if let Some(ref user) = host.user {
+    let target = if destination_problem(hostname, host.user.as_deref()).is_some() {
+        // Fail closed at the sink: every caller that did not already refuse
+        // (`resolve_connection`, the form, the CLI) gets an argv that can only
+        // fail to resolve, never one that reaches a shell or another machine.
+        REFUSED_TARGET.to_string()
+    } else if let Some(user) = &host.user {
         format!("{user}@{hostname}")
     } else {
         hostname.to_string()
@@ -78,6 +87,45 @@ pub fn build_ssh_argv(host: &SshHost) -> Vec<String> {
     }
 
     args
+}
+
+/// Destination ssh is handed in place of one that failed [`destination_problem`].
+/// `.invalid` is reserved (RFC 2606): it never resolves.
+const REFUSED_TARGET: &str = "refused-invalid-destination.invalid";
+
+/// Why a stored destination (`address`, effective `username`) must not reach an
+/// ssh argv, `-J`/`-W` hop or ssh_config export, if it must not.
+///
+/// With a `ProxyJump`, OpenSSH before 9.6 runs `ssh -W '[%h]:%p' <jump>` through
+/// `sh -c` with the destination's host (and user) substituted unquoted
+/// (CVE-2023-51385; fixed in 9.6, which refuses such host names itself:
+/// `ssh -G -o 'ProxyCommand=echo %h' "x';id;'y"` prints `hostname contains
+/// invalid characters`). A `Match exec`/`ProxyCommand` in the user's own config
+/// substitutes `%h`/`%u` the same way on any version. So only what a real login
+/// or host name is made of gets through: the exact allowlist that guards hop
+/// tokens (`crate::map::parse_raw_hop`), applied to the destination.
+pub fn destination_problem(address: &str, username: Option<&str>) -> Option<String> {
+    let host = if address.contains(':') {
+        format!("[{address}]") // IPv6 literal
+    } else {
+        address.to_string()
+    };
+    let user = username.filter(|u| !u.is_empty());
+    let token = match user {
+        Some(user) => format!("{user}@{host}"),
+        None => host,
+    };
+    // `parse_raw_hop` trims and drops a leading `ssh://`; neither may hide
+    // behind the allowlist.
+    let ok = token == token.trim()
+        && !token.starts_with("ssh://")
+        && crate::map::parse_raw_hop(&token).is_some();
+    (!ok).then(|| {
+        let who = user.map(|u| format!(" / user {u:?}")).unwrap_or_default();
+        format!(
+            "address {address:?}{who} is not a valid host name (letters, digits and . - _ % only), refusing to hand it to ssh"
+        )
+    })
 }
 
 /// Build argv for alias connect (`ssh name` via ssh_config).
@@ -157,7 +205,11 @@ pub fn build_mosh_from_ssh_argv(ssh_argv: &[String]) -> Vec<String> {
     let ssh_cmd = if base.len() <= 1 {
         "ssh".to_string()
     } else {
-        base[..base.len() - 1].join(" ")
+        base[..base.len() - 1]
+            .iter()
+            .map(|a| shellword(a))
+            .collect::<Vec<_>>()
+            .join(" ")
     };
 
     let mut out = vec!["mosh".into(), format!("--ssh={ssh_cmd}"), target];
@@ -166,6 +218,27 @@ pub fn build_mosh_from_ssh_argv(ssh_argv: &[String]) -> Vec<String> {
         out.push(cmd);
     }
     out
+}
+
+/// Quote one argument for mosh's `--ssh=` value, which mosh splits with Perl's
+/// `shellwords`: a path with whitespace (or a quote) must stay one word.
+fn shellword(arg: &str) -> String {
+    if !arg.is_empty()
+        && !arg.contains(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '\\'))
+    {
+        return arg.to_string();
+    }
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+/// `argv` without the trailing `-- <remote command>` pair that
+/// [`build_ssh_argv`] adds for a host's stored `remote_command`. A one-shot
+/// probe appends its own command, so the stored one must not run first.
+pub fn without_remote_command(argv: &[String]) -> &[String] {
+    match argv {
+        [rest @ .., sep, _] if sep == "--" => rest,
+        _ => argv,
+    }
 }
 
 fn split_ssh_remote_command(ssh_argv: &[String]) -> (Vec<String>, Option<String>) {
@@ -316,6 +389,25 @@ mod tests {
     }
 
     #[test]
+    fn mosh_ssh_value_keeps_a_spaced_path_one_word() {
+        let mut host = SshHost::new("prod");
+        host.hostname = Some("10.0.0.5".into());
+        host.identity_file = Some("/Users/Mary Ann/.ssh/id".into());
+        let argv = build_mosh_argv(&host);
+        assert_eq!(argv[1], "--ssh=ssh -i '/Users/Mary Ann/.ssh/id'");
+    }
+
+    #[test]
+    fn without_remote_command_drops_only_the_trailing_pair() {
+        let mut host = SshHost::new("prod");
+        host.remote_command = Some("tmux attach".into());
+        let argv = build_ssh_argv(&host);
+        assert_eq!(without_remote_command(&argv), &["ssh", "prod"]);
+        let alias = build_ssh_alias_argv(&host);
+        assert_eq!(without_remote_command(&alias), &alias[..]);
+    }
+
+    #[test]
     fn build_mosh_argv_passes_remote_command() {
         let mut host = SshHost::new("web");
         host.hostname = Some("example.com".into());
@@ -348,7 +440,7 @@ mod tests {
     fn an_option_like_address_is_not_read_as_an_ssh_option() {
         use std::process::Command;
         if Command::new("ssh").arg("-V").output().is_err() {
-            eprintln!("skipping: no ssh binary");
+            crate::test_support::tool_missing("ssh");
             return;
         }
 
@@ -374,22 +466,59 @@ mod tests {
              guard may be obsolete:\n{cfg}"
         );
 
-        // What it hands over now.
+        // What it hands over now: the destination allowlist refuses first, and
+        // the target is one that only fails to resolve.
         let mut host = SshHost::new("evil");
         host.hostname = Some(hostile.into());
         let argv = build_ssh_argv(&host);
         let target = argv.last().unwrap();
-        assert_eq!(target, "ssh://-oProxyCommand=id");
+        assert_eq!(target, REFUSED_TARGET);
+        assert!(!argv.iter().any(|a| a.contains("ProxyCommand")));
 
-        let (ok, cfg) = resolve(target);
-        assert!(
-            !ok,
-            "ssh accepted the guarded target instead of refusing it:\n{cfg}"
-        );
+        let (_, cfg) = resolve(target);
         assert!(
             !cfg.contains("proxycommand id"),
             "ProxyCommand survived the guard:\n{cfg}"
         );
+        // The `ssh://` guard stays for the paths that build their own target.
+        let (ok, _) = resolve(&safe_ssh_target(hostile.to_string()));
+        assert!(
+            !ok,
+            "ssh accepted the guarded target instead of refusing it"
+        );
+    }
+
+    #[test]
+    fn a_destination_outside_the_allowlist_is_refused_at_the_argv_sink() {
+        for (addr, user) in [
+            ("x';touch /tmp/p;'y", None),
+            ("10.0.0.1", Some("a$IFS-oProxyCommand=touch\\$IFS/x")),
+            ("host name", None),
+            ("ssh://h", None),
+            (" h", None),
+            ("h", Some("ssh://u")),
+            ("", None),
+        ] {
+            assert!(
+                destination_problem(addr, user).is_some(),
+                "{addr:?} {user:?}"
+            );
+            let mut host = SshHost::new("x");
+            host.hostname = Some(addr.into());
+            host.user = user.map(String::from);
+            assert_eq!(build_ssh_argv(&host).last().unwrap(), REFUSED_TARGET);
+        }
+        for (addr, user) in [
+            ("10.0.0.5", None),
+            ("web-01.example.com", Some("deploy")),
+            ("fe80::1%eth0", Some("a@b")),
+            ("2001:db8::1", None),
+        ] {
+            assert!(
+                destination_problem(addr, user).is_none(),
+                "{addr:?} {user:?}"
+            );
+        }
     }
 
     #[test]

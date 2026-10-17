@@ -33,8 +33,16 @@ impl KeygenAskpass {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
+        let secret_file = opts.open(&secret)?;
+        // From here every early return drops `guard`, which removes what exists.
+        // `script` stays empty until that file is really ours (`create_new`
+        // succeeded), so a failed open never deletes someone else's file.
+        let mut guard = Self {
+            secret,
+            script: PathBuf::new(),
+        };
         // ssh strips the trailing newline from the askpass output.
-        writeln!(opts.open(&secret)?, "{passphrase}")?;
+        writeln!(&secret_file, "{passphrase}")?;
 
         let mut sopts = std::fs::OpenOptions::new();
         sopts.write(true).create_new(true);
@@ -43,13 +51,12 @@ impl KeygenAskpass {
             use std::os::unix::fs::OpenOptionsExt;
             sopts.mode(0o700);
         }
+        let mut script_file = sopts.open(&script)?;
+        guard.script = script;
         // The secret path is passed via env so the script needs no quoting.
-        write!(
-            sopts.open(&script)?,
-            "#!/bin/sh\nexec cat \"$SSHUB_KG_SECRET\"\n"
-        )?;
+        write!(script_file, "#!/bin/sh\nexec cat \"$SSHUB_KG_SECRET\"\n")?;
 
-        Ok(Self { secret, script })
+        Ok(guard)
     }
 
     fn env(&self) -> Vec<(String, String)> {
@@ -217,7 +224,16 @@ pub fn write_key_material(name: &str, contents: &str) -> Result<PathBuf> {
     let home =
         std::env::var("HOME").map_err(|_| anyhow::anyhow!("HOME environment variable not set"))?;
     let ssh_dir = PathBuf::from(home).join(".ssh");
-    std::fs::create_dir_all(&ssh_dir).context("create ~/.ssh")?;
+    {
+        let mut dir = std::fs::DirBuilder::new();
+        dir.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            dir.mode(0o700);
+        }
+        dir.create(&ssh_dir).context("create ~/.ssh")?;
+    }
 
     let safe_name: String = name
         .trim()
@@ -255,13 +271,24 @@ pub fn write_key_material(name: &str, contents: &str) -> Result<PathBuf> {
             }
         }
 
-        std::fs::write(&dest, &body)
-            .with_context(|| format!("write key file {}", dest.display()))?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600))?;
+            use std::os::unix::fs::OpenOptionsExt;
+            // 0600 from the first byte: never a window where the key is
+            // readable under the process umask.
+            opts.mode(0o600);
         }
+        let mut file = match opts.open(&dest) {
+            Ok(f) => f,
+            // Lost a race for this name: take the next suffix.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("write key file {}", dest.display())),
+        };
+        use std::io::Write as _;
+        file.write_all(body.as_bytes())
+            .with_context(|| format!("write key file {}", dest.display()))?;
         return Ok(dest);
     }
     anyhow::bail!("too many conflicting sshub_{safe_name}* key files in ~/.ssh")
@@ -324,35 +351,33 @@ mod tests {
 
     #[test]
     fn writes_key_with_owner_only_perms_and_dedups() {
-        let _home = crate::test_env::lock_home();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", dir.path());
+        crate::config::with_test_home(dir.path(), || {
+            let blob =
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----";
+            let p1 = write_key_material("work laptop", blob).unwrap();
+            assert!(p1.ends_with("sshub_work_laptop"));
+            let written = std::fs::read_to_string(&p1).unwrap();
+            assert!(written.ends_with("-----END OPENSSH PRIVATE KEY-----\n"));
 
-        let blob = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----";
-        let p1 = write_key_material("work laptop", blob).unwrap();
-        assert!(p1.ends_with("sshub_work_laptop"));
-        let written = std::fs::read_to_string(&p1).unwrap();
-        assert!(written.ends_with("-----END OPENSSH PRIVATE KEY-----\n"));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&p1).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o600);
+            }
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&p1).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600);
-        }
-
-        // Same content → same file; different content → suffixed file.
-        let p2 = write_key_material("work laptop", blob).unwrap();
-        assert_eq!(p1, p2);
-        let p3 = write_key_material(
-            "work laptop",
-            "-----BEGIN OPENSSH PRIVATE KEY-----\nother\n-----END OPENSSH PRIVATE KEY-----",
-        )
-        .unwrap();
-        assert_ne!(p1, p3);
-        assert!(p3.to_string_lossy().contains("sshub_work_laptop-2"));
-
-        std::env::remove_var("HOME");
+            // Same content → same file; different content → suffixed file.
+            let p2 = write_key_material("work laptop", blob).unwrap();
+            assert_eq!(p1, p2);
+            let p3 = write_key_material(
+                "work laptop",
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nother\n-----END OPENSSH PRIVATE KEY-----",
+            )
+            .unwrap();
+            assert_ne!(p1, p3);
+            assert!(p3.to_string_lossy().contains("sshub_work_laptop-2"));
+        });
     }
 
     #[test]

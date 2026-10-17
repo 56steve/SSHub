@@ -60,6 +60,16 @@ impl App {
         // every character it types, so a global bind on a plain or Shift key
         // (`Shift+S` snippets, `Shift+L` logs, or any user rebind) must not
         // steal it. Chords such as Ctrl+T or Alt+P still reach the globals.
+        // Terminals that send ^H for Backspace arrive as Ctrl+H (crossterm maps
+        // 0x08 so): inside a filter that is a Backspace, not Settings.
+        if self.mode == AppMode::Normal
+            && self.dashboard_text_input_active()
+            && key.code == KeyCode::Char('h')
+            && key.modifiers == KeyModifiers::CONTROL
+        {
+            return self
+                .handle_key_dashboard_tab(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
         if self.mode == AppMode::Normal && self.dashboard_text_input_active() && is_typed_char(&key)
         {
             return self.handle_key_dashboard_tab(key);
@@ -258,6 +268,7 @@ impl App {
             2 => self.handle_key_tunnels(key),
             3 => self.handle_key_keychain(key),
             4 => self.handle_key_audit(key),
+            5 => self.handle_key_map(key),
             _ => self.handle_key_normal(key),
         }
     }
@@ -266,8 +277,35 @@ impl App {
     /// in `AppMode::Normal`, unlike overlay inputs, which have their own mode
     /// and never see the global binds.
     fn dashboard_text_input_active(&self) -> bool {
-        self.active_tab == 1
-            && (self.sftp_picker_searching || self.sftp.as_ref().is_some_and(|s| s.searching))
+        (self.active_tab == 1
+            && (self.sftp_picker_searching || self.sftp.as_ref().is_some_and(|s| s.searching)))
+            || (matches!(self.active_tab, 2 | 3) && self.list_filter_editing)
+            || (self.active_tab == 5
+                && self
+                    .map_view
+                    .as_ref()
+                    .is_some_and(|v| v.editing || v.use_picker.is_some()))
+    }
+
+    /// The broadcast cancel key does double duty: cancel a live run, or
+    /// (nothing running) clear the error toasts. Works regardless of focus or
+    /// tab, matching the always-shown footer hint. `true` when it acted.
+    pub(crate) fn try_broadcast_cancel(&mut self, key: &KeyEvent) -> bool {
+        if !self.is_action(KeyAction::BroadcastCancel, key)
+            || (self.broadcast.is_none() && self.broadcast_toasts.is_empty())
+        {
+            return false;
+        }
+        if self
+            .broadcast
+            .as_ref()
+            .is_some_and(|b| !crate::broadcast::all_terminal(&b.results))
+        {
+            self.cancel_broadcast();
+        } else {
+            self.broadcast_toasts.clear();
+        }
+        true
     }
 
     pub(crate) fn handle_key_normal(&mut self, key: KeyEvent) -> Result<()> {
@@ -277,22 +315,8 @@ impl App {
             return Ok(());
         }
 
-        // Broadcast (#3). The cancel key does double duty, claimed before any
-        // other binding: cancel a live run, or (nothing running) clear the error
-        // toasts. Works regardless of focus, matching the always-shown footer
-        // hint. `open_broadcast` refuses a second concurrent run.
-        if self.is_action(KeyAction::BroadcastCancel, &key)
-            && (self.broadcast.is_some() || !self.broadcast_toasts.is_empty())
-        {
-            if self
-                .broadcast
-                .as_ref()
-                .is_some_and(|b| !crate::broadcast::all_terminal(&b.results))
-            {
-                self.cancel_broadcast();
-            } else {
-                self.broadcast_toasts.clear();
-            }
+        // Broadcast (#3). Claimed before any other binding.
+        if self.try_broadcast_cancel(&key) {
             return Ok(());
         }
         if self.is_action(KeyAction::Broadcast, &key) {
@@ -541,14 +565,37 @@ impl App {
     /// #18). `ssh-add -d` can only drop a key by file path, and the agent
     /// listing exposes only the key's comment (usually, but not always, that
     /// path), so this can fail with a clear notice.
+    ///
+    /// The row is taken from the listing the panel shows (`agent_info`), and
+    /// the agent is asked again only to confirm that key is still loaded under
+    /// the same fingerprint: a key added or removed since the panel drew would
+    /// shift a re-listed index onto a different key.
     fn remove_zoomed_agent_key(&mut self) {
-        let agent = crate::ssh::agent::detect_agent();
         let idx = self.panel_scroll.get() as usize;
-        let Some(k) = agent.keys.get(idx) else {
+        let Some(k) = self
+            .agent_info
+            .as_ref()
+            .and_then(|a| a.keys.get(idx))
+            .cloned()
+        else {
             return;
         };
         if k.comment.is_empty() {
             self.host_notice = Some("can't remove: agent key has no file path".into());
+            return;
+        }
+        let still_loaded = crate::ssh::agent::detect_agent()
+            .keys
+            .iter()
+            .any(|f| f.fingerprint == k.fingerprint && f.comment == k.comment);
+        if !still_loaded {
+            self.agent_info_updated =
+                std::time::Instant::now() - std::time::Duration::from_secs(60);
+            self.refresh_agent_info();
+            self.host_notice = Some(format!(
+                "{} changed in the agent since the list was drawn; nothing removed",
+                k.comment
+            ));
             return;
         }
         self.host_notice = Some(match crate::ssh::agent::remove_key(&k.comment) {
@@ -558,6 +605,8 @@ impl App {
                 k.comment
             ),
         });
+        self.agent_info_updated = std::time::Instant::now() - std::time::Duration::from_secs(60);
+        self.refresh_agent_info();
     }
 
     /// Connect to the host selected in a zoomed ping/recent panel (issue #18).
@@ -594,6 +643,27 @@ impl App {
 
     /// Switch dashboard tabs when a tab keybinding matches.
     pub(crate) fn try_tab_switch(&mut self, key: &KeyEvent) -> Result<bool> {
+        let tab = self.active_tab;
+        let switched = self.try_tab_switch_binds(key)?;
+        if self.active_tab != tab {
+            self.reset_tab_input_state();
+        }
+        Ok(switched)
+    }
+
+    /// Close the text inputs and pickers a tab owns; run on every tab change
+    /// (keys and mouse) so none stays open, swallowing keys, on a hidden tab.
+    pub(crate) fn reset_tab_input_state(&mut self) {
+        // A filter bar belongs to the tab it was opened on.
+        self.list_filter_editing = false;
+        if let Some(v) = self.map_view.as_mut() {
+            v.editing = false;
+            v.picker = None;
+            v.use_picker = None;
+        }
+    }
+
+    fn try_tab_switch_binds(&mut self, key: &KeyEvent) -> Result<bool> {
         if self.is_action(KeyAction::TabHosts, key) {
             self.active_tab = 0;
             return Ok(true);
@@ -613,6 +683,10 @@ impl App {
         if self.is_action(KeyAction::TabAudit, key) {
             self.active_tab = 4;
             self.refresh_audit_events();
+            return Ok(true);
+        }
+        if self.is_action(KeyAction::TabMap, key) {
+            self.switch_to_map_tab();
             return Ok(true);
         }
         Ok(false)
@@ -739,12 +813,21 @@ impl App {
     pub(crate) fn handle_key_keychain(&mut self, key: KeyEvent) -> Result<()> {
         self.identity_notice = None;
 
+        if self.list_filter_editing {
+            self.handle_key_identity_filter(key);
+            return Ok(());
+        }
+
         if self.try_tab_switch(&key)? {
             return Ok(());
         }
 
         match key.code {
             _ if self.is_action(KeyAction::Quit, &key) => self.request_quit(),
+            _ if self.is_action(KeyAction::Search, &key) => self.list_filter_editing = true,
+            _ if self.is_action(KeyAction::Cancel, &key) && !self.identity_filter.is_empty() => {
+                self.identity_filter.clear();
+            }
             _ if self.is_action(KeyAction::Cancel, &key) => {
                 self.active_tab = 0;
             }
@@ -1020,7 +1103,7 @@ impl App {
                     state.selected = 0;
                 } else {
                     self.known_hosts = None;
-                    self.mode = AppMode::Normal;
+                    self.mode = self.known_hosts_return.take().unwrap_or(AppMode::Normal);
                 }
             }
             KeyCode::Up => {

@@ -215,9 +215,17 @@ fn cmd_connect(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
 
     let mut askpass_guard = None;
     let mut extra_env: Vec<(String, String)> = Vec::new();
-    if let Some(secret) = pending_secret.as_ref() {
+    // The jump hosts' own stored passwords, so a hop that asks is answered with
+    // its own, never with the destination's.
+    let hops = crate::app::hop_secrets(
+        &ctx.store,
+        &ctx.hosts,
+        ctx.password_store(),
+        resolved.as_ref().and_then(|r| r.proxy_jump.as_deref()),
+    );
+    if pending_secret.is_some() || !hops.is_empty() {
         if let Ok(exe) = crate::session::askpass::helper_exe() {
-            if let Ok(guard) = AskpassSecret::new(secret.value()) {
+            if let Ok(guard) = AskpassSecret::staged(pending_secret.as_ref(), &hops) {
                 extra_env = guard.env(&exe);
                 askpass_guard = Some(guard);
             }
@@ -297,6 +305,28 @@ fn cmd_connect(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
     Ok(status.code().unwrap_or(1))
 }
 
+/// A ProxyJump that is not valid hops is never stored: the same message the
+/// host form and connect give.
+fn refuse_bad_jump(jump: Option<&str>) -> Result<()> {
+    if let Some(problem) = jump.and_then(crate::map::hops::jump_problem) {
+        bail!("{problem}");
+    }
+    Ok(())
+}
+
+/// An address or login outside the host-name allowlist is never stored: it
+/// would reach an ssh argv or a `ProxyJump` helper shell.
+fn refuse_bad_destination(address: &str, username: Option<&str>) -> Result<()> {
+    // A leading `-` has its own, more precise refusal in the store.
+    if address.starts_with('-') || username.is_some_and(|u| u.starts_with('-')) {
+        return Ok(());
+    }
+    if let Some(problem) = crate::ssh::destination_problem(address, username) {
+        bail!("{problem}");
+    }
+    Ok(())
+}
+
 fn cmd_add(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
     let spec = HostAddSpec::parse(args)?;
     let unique_name = ctx.store.unique_host_name(&spec.name, None)?;
@@ -311,6 +341,8 @@ fn cmd_add(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
         .transpose()?
         .map(|i| i.id);
 
+    refuse_bad_jump(spec.proxy_jump.as_deref())?;
+    refuse_bad_destination(&spec.address, spec.username.as_deref())?;
     let group_ids = resolve_group_ids(ctx, &spec.groups)?;
 
     let created = ctx.store.create_host(&NewHost {
@@ -387,6 +419,15 @@ fn cmd_edit(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
         bail!("connection fields are read-only for ssh_config hosts");
     }
 
+    if patch.set_address.is_some() || patch.set_username.is_some() {
+        let address = patch.set_address.as_deref().unwrap_or(&managed.address);
+        let username = match &patch.set_username {
+            Some(v) => v.as_deref(),
+            None => managed.username.as_deref(),
+        };
+        refuse_bad_destination(address, username)?;
+    }
+
     let mut update = HostUpdate::default();
 
     if let Some(v) = patch.set_label {
@@ -425,6 +466,7 @@ fn cmd_edit(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
         update.environment = Some(None);
     }
     if let Some(v) = patch.set_proxy_jump {
+        refuse_bad_jump(v.as_deref())?;
         update.proxy_jump = Some(v);
     }
     if patch.clear_proxy_jump {

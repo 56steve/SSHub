@@ -51,6 +51,9 @@ pub struct BroadcastTask {
     /// uses). `Some` => `BatchMode=no`; `None` => key/agent only (`BatchMode=yes`,
     /// fail fast on a password prompt).
     pub secret: Option<crate::session::PendingSecret>,
+    /// The jump hosts' own stored secrets: each hop's prompt is answered with
+    /// that hop's, never with `secret`. Empty without a ProxyJump.
+    pub hops: Vec<crate::session::hop_auth::HopSecret>,
 }
 
 /// Per-host lifecycle state, folded from [`BroadcastEvent`]s by [`apply_event`].
@@ -112,6 +115,20 @@ pub trait CommandRunner: Send + Sync {
         secret: Option<&crate::session::PendingSecret>,
         cancel: &AtomicBool,
     ) -> Result<(i32, String, String), String>;
+
+    /// [`Self::run`] with the jump hosts' own secrets. A runner that cannot stage
+    /// them ignores them: a hop that asks then fails fast instead of prompting.
+    fn run_with_hops(
+        &self,
+        argv: &[String],
+        command: &str,
+        secret: Option<&crate::session::PendingSecret>,
+        hops: &[crate::session::hop_auth::HopSecret],
+        cancel: &AtomicBool,
+    ) -> Result<(i32, String, String), String> {
+        let _ = hops;
+        self.run(argv, command, secret, cancel)
+    }
 }
 
 /// Real runner: shells out to `ssh` with the same non-interactive option splice
@@ -126,6 +143,19 @@ pub trait CommandRunner: Send + Sync {
 pub struct SshCommandRunner {
     pub connect_timeout_secs: u32,
     pub run_timeout: Duration,
+    /// Pass `StrictHostKeyChecking=accept-new` (a first connection writes
+    /// `known_hosts`). A diagnostic such as the map's test connect turns this
+    /// off, so an unknown host key fails instead of being trusted.
+    pub accept_new_host_keys: bool,
+    /// Run ssh in its own process group and kill the whole group on cancel or
+    /// timeout, so the `ssh -W` helper of a `-J` hop dies with it.
+    pub kill_process_group: bool,
+    /// Run ssh with a generated `-F` file that wins over the user's config
+    /// (which it `Include`s): no `ProxyCommand`, no prompts, no `known_hosts`
+    /// writes. ssh hands `-F` to the `-W` helper of every `-J` hop, so the
+    /// helpers obey it too, which a command-line `-o` does not reach. The path
+    /// is the user's own ssh config.
+    pub isolated_config: Option<std::path::PathBuf>,
 }
 
 impl SshCommandRunner {
@@ -133,6 +163,9 @@ impl SshCommandRunner {
         Self {
             connect_timeout_secs: CONNECT_TIMEOUT_SECS,
             run_timeout: RUN_TIMEOUT,
+            accept_new_host_keys: true,
+            kill_process_group: false,
+            isolated_config: None,
         }
     }
 }
@@ -151,9 +184,28 @@ impl CommandRunner for SshCommandRunner {
         secret: Option<&crate::session::PendingSecret>,
         cancel: &AtomicBool,
     ) -> Result<(i32, String, String), String> {
+        self.run_with_hops(argv, command, secret, &[], cancel)
+    }
+
+    fn run_with_hops(
+        &self,
+        argv: &[String],
+        command: &str,
+        secret: Option<&crate::session::PendingSecret>,
+        hops: &[crate::session::hop_auth::HopSecret],
+        cancel: &AtomicBool,
+    ) -> Result<(i32, String, String), String> {
         if argv.is_empty() {
             return Err("empty ssh argv".to_string());
         }
+        if argv[0] != "ssh" {
+            return Err(format!(
+                "{} cannot run a one-shot command (ssh transport only)",
+                argv[0]
+            ));
+        }
+        // The host's stored `remote_command` would run instead of ours.
+        let argv = crate::ssh::without_remote_command(argv);
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".to_string());
         }
@@ -164,7 +216,8 @@ impl CommandRunner for SshCommandRunner {
         // session); without one, BatchMode=yes so ssh fails fast instead of
         // blocking on a /dev/tty password prompt (ConnectTimeout only bounds the
         // TCP connect).
-        let batchmode = if secret.is_some() {
+        let askpass = secret.is_some() || !hops.is_empty();
+        let batchmode = if askpass {
             "BatchMode=no"
         } else {
             "BatchMode=yes"
@@ -172,17 +225,37 @@ impl CommandRunner for SshCommandRunner {
         let connect_timeout = format!("ConnectTimeout={}", self.connect_timeout_secs);
         let mut full: Vec<String> = Vec::with_capacity(argv.len() + 8);
         full.push(argv[0].clone());
-        for opt in [
-            "-o",
-            batchmode,
-            "-o",
-            &connect_timeout,
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-        ] {
+        for opt in ["-o", batchmode, "-o", &connect_timeout] {
             full.push(opt.to_string());
         }
+        if self.accept_new_host_keys {
+            full.push("-o".to_string());
+            full.push("StrictHostKeyChecking=accept-new".to_string());
+        } else {
+            // A diagnostic must not touch known_hosts, whatever the user's
+            // ssh_config says: command-line options win over the config.
+            for opt in ["StrictHostKeyChecking=yes", "UpdateHostKeys=no"] {
+                full.push("-o".to_string());
+                full.push(opt.to_string());
+            }
+        }
+        // Kept alive until the child has exited: ssh re-reads it for each hop.
+        let mut _config = None;
+        if let Some(user_config) = &self.isolated_config {
+            let text = crate::ssh::test_connect::isolated_config(user_config, askpass);
+            let file = tempfile::Builder::new()
+                .prefix("sshub-test-")
+                .suffix(".conf")
+                .tempfile()
+                .map_err(|e| format!("temp ssh config: {e}"))?;
+            std::fs::write(file.path(), text).map_err(|e| format!("temp ssh config: {e}"))?;
+            full.push("-F".to_string());
+            full.push(file.path().to_string_lossy().into_owned());
+            _config = Some(file);
+        }
         full.extend(argv[1..].iter().cloned());
+        // `--`: a command that starts with `-` must not be read as an ssh option.
+        full.push("--".to_string());
         full.push(command.to_string());
 
         let mut cmd = Command::new(&full[0]);
@@ -190,14 +263,25 @@ impl CommandRunner for SshCommandRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if self.kill_process_group {
+            crate::cli::exec::spawn_group(&mut cmd);
+        }
+        let kill = |child: &mut std::process::Child| {
+            if self.kill_process_group {
+                crate::cli::exec::kill_group(child);
+            } else {
+                let _ = child.kill();
+            }
+        };
 
         // Stage the stored secret through SSH_ASKPASS. The guard owns an
         // owner-only temp file removed on drop, so keep it alive until the child
         // has exited (i.e. for the whole poll loop below).
         let mut _askpass = None;
-        if let Some(secret) = secret {
+        if askpass {
             if let Ok(exe) = crate::session::askpass::helper_exe() {
-                if let Ok(guard) = crate::session::askpass::AskpassSecret::new(secret.value()) {
+                let staged = crate::session::askpass::AskpassSecret::staged(secret, hops);
+                if let Ok(guard) = staged {
                     for (k, v) in guard.env(&exe) {
                         cmd.env(k, v);
                     }
@@ -222,27 +306,32 @@ impl CommandRunner for SshCommandRunner {
                 Ok(None) => {}
                 Err(e) => {
                     fail_reason = Some(format!("wait ssh: {e}"));
-                    let _ = child.kill();
+                    kill(&mut child);
                     let _ = child.wait();
                     break None;
                 }
             }
             if cancel.load(Ordering::Relaxed) {
                 fail_reason = Some("cancelled".to_string());
-                let _ = child.kill();
+                kill(&mut child);
                 let _ = child.wait();
                 break None;
             }
             if start.elapsed() >= self.run_timeout {
                 fail_reason = Some("timed out".to_string());
-                let _ = child.kill();
+                kill(&mut child);
                 let _ = child.wait();
                 break None;
             }
             thread::sleep(POLL_INTERVAL);
         };
 
-        // Killing the child closes the pipes, so the reader threads finish.
+        // Killing the child closes the pipes, so the reader threads finish. A
+        // `-W` helper of a black-holed jump host can outlive ssh and keep them
+        // open: kill the group, and bound the wait for the readers regardless.
+        if self.kill_process_group {
+            crate::cli::exec::kill_group(&child);
+        }
         let stdout = stdout_reader.map(join_pipe_reader).unwrap_or_default();
         let stderr = stderr_reader.map(join_pipe_reader).unwrap_or_default();
 
@@ -255,19 +344,28 @@ impl CommandRunner for SshCommandRunner {
     }
 }
 
-/// Spawn a thread that reads a child pipe to EOF into a `String`
-/// (lossy UTF-8), returning its join handle.
-fn spawn_pipe_reader<R: Read + Send + 'static>(mut pipe: R) -> thread::JoinHandle<String> {
+/// Most output kept per stream; the rest is drained and dropped so a chatty
+/// host can neither fill memory nor block ssh on a full pipe.
+const MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
+/// How long to wait for a reader after the child is gone.
+const PIPE_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Spawn a thread that reads a child pipe to EOF into a `String` (lossy UTF-8,
+/// capped at [`MAX_OUTPUT_BYTES`]), delivering it on the returned channel.
+fn spawn_pipe_reader<R: Read + Send + 'static>(mut pipe: R) -> Receiver<String> {
+    let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut buf = Vec::new();
-        let _ = pipe.read_to_end(&mut buf);
-        String::from_utf8_lossy(&buf).into_owned()
-    })
+        let _ = (&mut pipe).take(MAX_OUTPUT_BYTES).read_to_end(&mut buf);
+        let _ = std::io::copy(&mut pipe, &mut std::io::sink());
+        let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+    });
+    rx
 }
 
-/// Join a pipe-reader thread, tolerating a panicked reader (empty string).
-fn join_pipe_reader(handle: thread::JoinHandle<String>) -> String {
-    handle.join().unwrap_or_default()
+/// Wait (bounded) for a pipe reader; a stuck or panicked reader yields "".
+fn join_pipe_reader(rx: Receiver<String>) -> String {
+    rx.recv_timeout(PIPE_JOIN_TIMEOUT).unwrap_or_default()
 }
 
 /// Seed one `Pending` row per task, in task order (stable per-target order).
@@ -374,7 +472,13 @@ fn broadcast_worker(
             return;
         }
 
-        let ev = match runner.run(&task.argv, command, task.secret.as_ref(), cancel) {
+        let ev = match runner.run_with_hops(
+            &task.argv,
+            command,
+            task.secret.as_ref(),
+            &task.hops,
+            cancel,
+        ) {
             Ok((exit, stdout, stderr)) => BroadcastEvent::Finished {
                 host_id: task.host_id,
                 exit,
@@ -496,8 +600,16 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
+    #[test]
+    fn pipe_reader_caps_output_and_still_drains() {
+        let big = vec![b'x'; MAX_OUTPUT_BYTES as usize + 4096];
+        let out = join_pipe_reader(spawn_pipe_reader(std::io::Cursor::new(big)));
+        assert_eq!(out.len(), MAX_OUTPUT_BYTES as usize);
+    }
+
     fn task(id: i64, name: &str) -> BroadcastTask {
         BroadcastTask {
+            hops: Vec::new(),
             host_id: id,
             host_name: name.to_string(),
             argv: vec!["ssh".to_string(), name.to_string()],
@@ -919,6 +1031,7 @@ mod tests {
         let runner = SshCommandRunner {
             connect_timeout_secs: 1,
             run_timeout: Duration::from_secs(1),
+            ..SshCommandRunner::new()
         };
         let cancel = AtomicBool::new(false);
         let argv = vec![
@@ -968,12 +1081,14 @@ mod tests {
         let with_secret = Arc::new(AtomicUsize::new(0));
         let tasks = vec![
             BroadcastTask {
+                hops: Vec::new(),
                 host_id: 1,
                 host_name: "pw-host".into(),
                 argv: vec!["ssh".into(), "pw-host".into()],
                 secret: Some(crate::session::PendingSecret::Password("hunter2".into())),
             },
             BroadcastTask {
+                hops: Vec::new(),
                 host_id: 2,
                 host_name: "key-host".into(),
                 argv: vec!["ssh".into(), "key-host".into()],
@@ -994,6 +1109,84 @@ mod tests {
             with_secret.load(Ordering::SeqCst),
             1,
             "only the host with a stored secret hands one to the runner"
+        );
+    }
+
+    #[test]
+    fn each_tasks_hop_secrets_reach_the_runner_beside_its_own_secret() {
+        use crate::session::hop_auth::HopSecret;
+        use crate::session::PendingSecret;
+        use std::sync::Mutex;
+
+        let hop = |user: &str, key: &str| HopSecret {
+            user: Some(user.into()),
+            host: "10.0.4.11".into(),
+            via: "10.0.4.11".into(),
+            key_path: None,
+            class: crate::session::auth_prompt::PromptClass::Password,
+            refs: vec![crate::credentials::SecretRef::Key(key.into())],
+            store: None,
+        };
+        // (target secret, the hop values it came with), per run.
+        type Seen = Vec<(Option<String>, Vec<String>)>;
+        struct Spy(Arc<Mutex<Seen>>);
+        impl CommandRunner for Spy {
+            fn run(
+                &self,
+                _: &[String],
+                _: &str,
+                _: Option<&PendingSecret>,
+                _: &AtomicBool,
+            ) -> Result<(i32, String, String), String> {
+                panic!("a task with hops must go through run_with_hops");
+            }
+            fn run_with_hops(
+                &self,
+                _: &[String],
+                _: &str,
+                secret: Option<&PendingSecret>,
+                hops: &[HopSecret],
+                _: &AtomicBool,
+            ) -> Result<(i32, String, String), String> {
+                self.0.lock().unwrap().push((
+                    secret.map(|s| s.value().to_string()),
+                    hops.iter()
+                        .map(|h| match &h.refs[0] {
+                            crate::credentials::SecretRef::Key(k) => k.clone(),
+                            other => panic!("unexpected {other:?}"),
+                        })
+                        .collect(),
+                ));
+                Ok((0, String::new(), String::new()))
+            }
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let task = |id: i64, secret: Option<&str>, hops: Vec<HopSecret>| BroadcastTask {
+            hops,
+            host_id: id,
+            host_name: format!("h{id}"),
+            argv: vec!["ssh".into(), format!("h{id}")],
+            secret: secret.map(|s| PendingSecret::Password(s.into())),
+        };
+        let rx = spawn_broadcast(
+            vec![
+                task(1, Some("target-1"), vec![hop("ops", "hop-pw")]),
+                task(2, None, vec![hop("ops", "other-hop-pw")]),
+            ],
+            "true".into(),
+            1,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Spy(Arc::clone(&seen))),
+        );
+        let _: Vec<_> = rx.iter().collect();
+        let mut seen = seen.lock().unwrap().clone();
+        seen.sort();
+        assert_eq!(
+            seen,
+            [
+                (None, vec!["other-hop-pw".to_string()]),
+                (Some("target-1".to_string()), vec!["hop-pw".to_string()]),
+            ]
         );
     }
 }

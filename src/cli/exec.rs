@@ -113,6 +113,14 @@ pub fn run(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
     if verbose {
         eprintln!("sshub: {credential_diag}");
     }
+    // The jump hosts' own stored passwords: a hop that asks is answered with
+    // its own, never with the destination's.
+    let hops = crate::app::hop_secrets(
+        &ctx.store,
+        &ctx.hosts,
+        ctx.password_store(),
+        resolved.as_ref().and_then(|r| r.proxy_jump.as_deref()),
+    );
     let base_argv = match (entry.managed(), resolved.as_ref()) {
         (Some(m), Some(r)) => resolved_session_argv(m, r),
         _ => session_argv_for_entry(&entry),
@@ -126,14 +134,14 @@ pub fn run(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
         // when there is no staged secret to hand over. Without a secret exec
         // must never sit on a prompt: ssh reads those from /dev/tty, so
         // redirecting stdin does not save a script from hanging forever.
-        pending_secret.is_none(),
+        pending_secret.is_none() && hops.is_empty(),
     );
 
     let mut askpass_guard = None;
     let mut extra_env: Vec<(String, String)> = Vec::new();
-    if let Some(secret) = pending_secret.as_ref() {
+    if pending_secret.is_some() || !hops.is_empty() {
         if let Ok(exe) = crate::session::askpass::helper_exe() {
-            if let Ok(guard) = AskpassSecret::new(secret.value()) {
+            if let Ok(guard) = AskpassSecret::staged(pending_secret.as_ref(), &hops) {
                 extra_env = guard.env(&exe);
                 askpass_guard = Some(guard);
             }
@@ -364,16 +372,16 @@ fn wait_or_kill(child: &mut Child, timeout: Option<Duration>) -> Result<(ExitSta
 /// stop reaching ssh — an acceptable trade for a run that already declared a
 /// deadline, but not for one that did not.
 #[cfg(unix)]
-fn spawn_group(cmd: &mut Command) {
+pub(crate) fn spawn_group(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
 }
 
 #[cfg(not(unix))]
-fn spawn_group(_cmd: &mut Command) {}
+pub(crate) fn spawn_group(_cmd: &mut Command) {}
 
 #[cfg(unix)]
-fn kill_group(child: &Child) {
+pub(crate) fn kill_group(child: &Child) {
     // SIGKILL the group; the child is its own group leader (`process_group(0)`),
     // so its pid is the group id. Falls back to the single child if the group
     // call fails, which is all a non-group spawn could have killed anyway.
@@ -384,7 +392,7 @@ fn kill_group(child: &Child) {
 }
 
 #[cfg(not(unix))]
-fn kill_group(child: &mut Child) {
+pub(crate) fn kill_group(child: &mut Child) {
     let _ = child.kill();
 }
 
@@ -507,7 +515,7 @@ mod tests {
     #[test]
     fn argv_is_understood_by_real_ssh() {
         if Command::new("ssh").arg("-V").output().is_err() {
-            eprintln!("skipping: no ssh binary");
+            crate::test_support::tool_missing("ssh");
             return;
         }
 
@@ -560,7 +568,7 @@ mod tests {
     fn a_config_remote_command_does_not_defeat_the_ad_hoc_command() {
         use std::io::Write;
         if Command::new("ssh").arg("-V").output().is_err() {
-            eprintln!("skipping: no ssh binary");
+            crate::test_support::tool_missing("ssh");
             return;
         }
 

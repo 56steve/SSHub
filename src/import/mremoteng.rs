@@ -448,7 +448,9 @@ pub fn import_mremoteng(path: &Path, store: &LauncherStore) -> Result<HostImport
         };
         // A rejected row is skipped, not fatal: the rest of the file is still
         // worth importing, and the count says something was dropped.
-        match store.create_host(&new_host) {
+        match super::check_destination(&new_host.address, new_host.username.as_deref())
+            .and_then(|()| store.create_host(&new_host))
+        {
             Ok(_) => report.imported += 1,
             Err(e) => {
                 eprintln!("sshub: skipping host '{}': {e:#}", host.name);

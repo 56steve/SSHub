@@ -8,6 +8,7 @@ pub mod askpass;
 pub mod askpass_channel;
 pub mod auth_prompt;
 pub mod history;
+pub mod hop_auth;
 pub mod interactive_auth;
 pub mod keys;
 pub mod parser;
@@ -77,15 +78,29 @@ pub struct SessionConfig {
     pub key_push_identity: Option<String>,
     /// Actual unique host name (entry.name()).
     pub host_name: String,
+    /// The jump hosts' own secrets, for a session without the interactive
+    /// channel (key push): staged beside `pending_secret`, so a hop's prompt is
+    /// answered with that hop's password and never with the destination's.
+    pub hops: Vec<hop_auth::HopSecret>,
 }
 
-/// Auto-respond once to either a password or passphrase prompt.
-#[derive(Debug, Clone)]
+/// Auto-respond once to either a password or passphrase prompt. `Debug` is
+/// written by hand: the value never reaches `{:?}`, a log or a panic message.
+#[derive(Clone)]
 pub enum PendingSecret {
     /// Sent on `password:`-style prompts only.
     Password(String),
     /// Sent on `Enter passphrase for …` prompts only.
     Passphrase(String),
+}
+
+impl std::fmt::Debug for PendingSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            PendingSecret::Password(_) => "PendingSecret::Password(..)",
+            PendingSecret::Passphrase(_) => "PendingSecret::Passphrase(..)",
+        })
+    }
 }
 
 impl PendingSecret {
@@ -204,6 +219,14 @@ pub struct Session {
     /// side FIFO. Rendered as the connect spinner's debug tail / expanded log,
     /// and scanned for the real "authenticated to" connected marker.
     debug_log: String,
+    /// The part of `debug_log` only ssh itself can write: its `-E` log (a
+    /// server banner lands on stderr, never here). Every security decision —
+    /// `connected`, host-key fingerprint, changed-key repair target — reads
+    /// this, not `debug_log`. Children without a separate log channel (mosh,
+    /// test doubles) feed it from stderr, the best they have.
+    ssh_log: String,
+    /// Whether the child has its own ssh log channel, see `ssh_log`.
+    log_channel: bool,
     /// First host-key fingerprint seen in `debug_log` (first-wins). Cached so a
     /// hostile banner that floods the 64 KB ring buffer cannot replace the
     /// genuine KEX line with a forged `debug1: Server host key:` after eviction.
@@ -281,8 +304,12 @@ impl Session {
         siphon_stderr: bool,
     ) -> Result<Self> {
         let (pty_rows, pty_cols) = floor_grid(grid);
-        let interactive = config.key_push_identity.is_none()
-            && matches!(config.argv.first().map(String::as_str), Some("ssh"));
+        // OpenSSH before 8.4 ignores `SSH_ASKPASS_REQUIRE` and asks on the PTY,
+        // where no answer ever arrives: leave such an ssh to the live terminal.
+        let program = config.argv.first().map(String::as_str);
+        let askpass_ok = program != Some("ssh") || ssh_honors_askpass_require();
+        let interactive =
+            askpass_ok && config.key_push_identity.is_none() && matches!(program, Some("ssh"));
         let mut auth = if interactive {
             Some(interactive_auth::InteractiveAuth::new()?)
         } else {
@@ -299,10 +326,11 @@ impl Session {
         if let Some(auth) = auth.as_ref() {
             env = auth.channel_env(&askpass::helper_exe()?);
             use_askpass = true;
-        } else if let Some(secret) = config.pending_secret.as_ref() {
+        } else if askpass_ok && (config.pending_secret.is_some() || !config.hops.is_empty()) {
             match askpass::helper_exe() {
                 Ok(exe) => {
-                    if let Ok(guard) = askpass::AskpassSecret::new(secret.value()) {
+                    let secret = config.pending_secret.as_ref();
+                    if let Ok(guard) = askpass::AskpassSecret::staged(secret, &config.hops) {
                         env = guard.env(&exe);
                         askpass = Some(guard);
                         use_askpass = true;
@@ -322,6 +350,7 @@ impl Session {
         }
         let parser = ParserState::new(pty_rows, pty_cols);
 
+        let log_channel = runtime.has_log_channel();
         let display_argv = config.argv.clone();
 
         // Transparent auth log: say exactly how the stored secret is delivered.
@@ -356,6 +385,8 @@ impl Session {
             auth,
             connected: false,
             debug_log: String::new(),
+            ssh_log: String::new(),
+            log_channel,
             host_key_fingerprint: None,
             debug_expanded: false,
             saw_pty_bytes: false,
@@ -633,21 +664,15 @@ impl Session {
                     // ssh's `-v` handshake — kept off the PTY grid, accumulated
                     // for the connect spinner's debug view. Cap the buffer so a
                     // long-lived session can't grow it without bound.
-                    self.debug_log.push_str(&String::from_utf8_lossy(&bytes));
-                    if self.host_key_fingerprint.is_none() {
-                        if let Some(fp) =
-                            crate::known_hosts::host_key_fingerprint_from_log(&self.debug_log)
-                        {
-                            self.host_key_fingerprint = Some(fp);
-                        }
+                    push_capped(&mut self.debug_log, &bytes);
+                    if !self.log_channel {
+                        self.push_ssh_log(&bytes);
                     }
-                    if self.debug_log.len() > DEBUG_LOG_CAP {
-                        let mut cut = self.debug_log.len() - DEBUG_LOG_CAP;
-                        while cut > 0 && !self.debug_log.is_char_boundary(cut) {
-                            cut -= 1;
-                        }
-                        self.debug_log.drain(..cut);
-                    }
+                    had_stderr = true;
+                }
+                PtyEvent::SshLog(bytes) => {
+                    push_capped(&mut self.debug_log, &bytes);
+                    self.push_ssh_log(&bytes);
                     had_stderr = true;
                 }
                 PtyEvent::Exited(reason) => {
@@ -899,7 +924,7 @@ impl Session {
         if self.connected {
             return;
         }
-        let text = self.debug_log.to_ascii_lowercase();
+        let text = self.ssh_log.to_ascii_lowercase();
         if CONNECTED_NEEDLES.iter().any(|n| text.contains(n)) {
             self.connected = true;
             // Authentication consumed whatever was typed pre-auth (a typed
@@ -907,6 +932,16 @@ impl Session {
             // the stale uncertainty so the first post-auth command records.
             // Transition-only — later output must not wipe a live input line.
             self.history.input.reset();
+        }
+    }
+
+    /// Record bytes only ssh could have written (see `ssh_log`); the host-key
+    /// fingerprint is cached first-wins so a flood cannot evict the real one.
+    fn push_ssh_log(&mut self, bytes: &[u8]) {
+        push_capped(&mut self.ssh_log, bytes);
+        if self.host_key_fingerprint.is_none() {
+            self.host_key_fingerprint =
+                crate::known_hosts::host_key_fingerprint_from_log(&self.ssh_log);
         }
     }
 
@@ -920,12 +955,30 @@ impl Session {
         self.host_key_fingerprint.as_deref()
     }
 
+    /// Whether `spec` (ssh's lookup name: `host` or `[host]:port`) is the host
+    /// this session connects to: its address, a host argument of the command,
+    /// or an explicit `HostKeyAlias`.
+    fn names_this_session(&self, spec: &str) -> bool {
+        let host = spec
+            .strip_prefix('[')
+            .and_then(|rest| rest.split_once("]:"))
+            .map_or(spec, |(host, _)| host);
+        self.meta.address.as_deref() == Some(host)
+            || self.config.argv.iter().skip(1).any(|arg| {
+                arg.rsplit_once('@').map_or(arg.as_str(), |(_, h)| h) == host
+                    || arg
+                        .strip_prefix("HostKeyAlias=")
+                        .or_else(|| arg.strip_prefix("-oHostKeyAlias="))
+                        == Some(spec)
+            })
+    }
+
     /// True when ssh refused because the server's host key CHANGED versus
     /// known_hosts (a mismatch), as opposed to a merely-unknown first-time host.
     /// This is the case worth offering to accept — a changed key can be a
     /// legitimate server rebuild or a MITM, so the user must opt in.
     pub fn host_key_changed(&self) -> bool {
-        let log = self.debug_log.to_ascii_lowercase();
+        let log = self.ssh_log.to_ascii_lowercase();
         log.contains("host identification has changed")
             || (log.contains("host key for") && log.contains("has changed"))
     }
@@ -933,12 +986,17 @@ impl Session {
     /// Use OpenSSH's actual offending file and lookup name, not ~/.ssh defaults
     /// or the display address (HostKeyAlias and custom ports can differ).
     pub fn changed_key_target(&self) -> Option<(String, std::path::PathBuf)> {
-        let mut specs = self.debug_log.lines().filter_map(|line| {
+        let mut specs = self.ssh_log.lines().filter_map(|line| {
             line.strip_prefix("Host key for ")?
                 .split_once(" has changed")
                 .map(|(host, _)| host)
         });
         let spec = specs.next()?;
+        // ssh's stderr also carries whatever a server's banner prints, so the
+        // name must be one this session connects to, not just any host.
+        if !self.names_this_session(spec) {
+            return None;
+        }
         if spec.is_empty()
             || spec.starts_with('-')
             || spec.contains([',', '*', '?'])
@@ -947,7 +1005,7 @@ impl Session {
         {
             return None;
         }
-        let mut files = self.debug_log.lines().filter_map(|line| {
+        let mut files = self.ssh_log.lines().filter_map(|line| {
             let line = line.strip_prefix("Offending ")?;
             let (_, location) = line.split_once(" key in ")?;
             let (file, row) = location.rsplit_once(':')?;
@@ -1182,15 +1240,36 @@ pub fn edge_autoscroll_dir(raw_row: i32, rows: u16) -> Option<i32> {
 /// otherwise return it unchanged. Pulled out of [`Session::write_paste`] so the
 /// framing is unit-testable without a live PTY.
 fn encode_paste(text: &[u8], bracketed: bool) -> Vec<u8> {
+    let text = sanitize_paste(text);
     if bracketed {
         let mut buf = Vec::with_capacity(text.len() + 12);
         buf.extend_from_slice(b"\x1b[200~");
-        buf.extend_from_slice(text);
+        buf.extend_from_slice(&text);
         buf.extend_from_slice(b"\x1b[201~");
         buf
     } else {
-        text.to_vec()
+        text
     }
+}
+
+/// Drop what could end the paste early or act as a command: ESC (so clipboard
+/// text cannot carry `ESC[201~` and run the rest as typed input), the other C0
+/// controls and DEL, and the C1 controls (UTF-8 `C2 80..9F`). Tab, LF and CR
+/// stay. Terminals do the same to a bracketed paste.
+fn sanitize_paste(text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut bytes = text.iter().copied().peekable();
+    while let Some(b) = bytes.next() {
+        match b {
+            b'\t' | b'\n' | b'\r' => out.push(b),
+            0x00..=0x1f | 0x7f => {}
+            0xc2 if matches!(bytes.peek(), Some(0x80..=0x9f)) => {
+                bytes.next();
+            }
+            _ => out.push(b),
+        }
+    }
+    out
 }
 
 /// How long an armed session keeps the connect animation up while waiting to
@@ -1204,6 +1283,35 @@ const REVEAL_TIMEOUT: Duration = Duration::from_secs(6);
 /// secret is typed, or until the reveal timeout fails open.
 fn should_reveal(armed: bool, secret_sent: bool, elapsed: Duration) -> bool {
     !armed || secret_sent || elapsed >= REVEAL_TIMEOUT
+}
+
+/// `(major, minor)` of an `ssh -V` banner (`OpenSSH_8.2p1 Ubuntu-4…`).
+fn openssh_version(banner: &str) -> Option<(u32, u32)> {
+    let rest = banner.split("OpenSSH_").nth(1)?;
+    let (major, rest) = rest.split_once('.')?;
+    let minor: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// Whether the installed `ssh` honours `SSH_ASKPASS_REQUIRE` (OpenSSH 8.4+).
+/// An older one asks on the PTY and never calls the helper, so no stored or
+/// typed answer can reach it. Unknown versions count as supported.
+fn ssh_honors_askpass_require() -> bool {
+    static HONORED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        let Ok(out) = std::process::Command::new("ssh").arg("-V").output() else {
+            return true;
+        };
+        let banner = String::from_utf8_lossy(&out.stderr).into_owned()
+            + &String::from_utf8_lossy(&out.stdout);
+        banner_honors_askpass_require(&banner)
+    });
+    *HONORED
+}
+
+/// `SSH_ASKPASS_REQUIRE` arrived in OpenSSH 8.4 (release notes: "ssh(1),
+/// ssh-add(1): add SSH_ASKPASS_REQUIRE"; `man ssh` of 8.3 does not list it).
+fn banner_honors_askpass_require(banner: &str) -> bool {
+    openssh_version(banner).is_none_or(|version| version >= (8, 4))
 }
 
 /// Things ssh / sshd actually say when asking for a password. Keep the
@@ -1244,11 +1352,23 @@ const CONNECTED_NEEDLES: &[&str] = &[
 
 /// How an embedded ssh is asked for the debug output scanned for
 /// [`CONNECTED_NEEDLES`]. Not `-v`: ssh hands `-v` on to every ProxyJump hop,
-/// whose own `Authenticated to …` reaches the same stderr and would mark the
-/// session connected (closing the askpass channel) before the destination asks
-/// for its password. A jump host whose ssh_config sets `LogLevel VERBOSE` or
-/// higher still prints that line.
+/// whose own `Authenticated to …` reaches stderr. The embedded ssh logs to
+/// its own `-E` FIFO (see `pty::StderrFifo`) and only that stream is scanned,
+/// so neither a hop's stderr nor a server banner can fake the marker.
 pub(crate) const SSH_DEBUG_ARGS: [&str; 2] = ["-o", "LogLevel=DEBUG1"];
+
+/// Append `bytes` to a debug buffer, dropping old output past
+/// [`DEBUG_LOG_CAP`] from the front.
+fn push_capped(buf: &mut String, bytes: &[u8]) {
+    buf.push_str(&String::from_utf8_lossy(bytes));
+    if buf.len() > DEBUG_LOG_CAP {
+        let mut cut = buf.len() - DEBUG_LOG_CAP;
+        while cut > 0 && !buf.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        buf.drain(..cut);
+    }
+}
 
 /// Cap on the retained ssh `-v` debug buffer (bytes). Old output past this is
 /// dropped from the front so a long session can't grow it without bound.
@@ -1558,6 +1678,21 @@ mod paste_tests {
         // Remote did not: send raw so markers don't leak in as literal text.
         assert_eq!(encode_paste(text, false), text.to_vec());
     }
+
+    #[test]
+    fn paste_cannot_smuggle_escape_or_control_bytes() {
+        // A clipboard carrying the end marker would otherwise end the bracket
+        // early and run the tail as typed keys.
+        let evil = "a\x1b[201~rm -rf ~\x07\x7f\u{9b}2J\tb\r\nc é".as_bytes();
+        let expect = b"a[201~rm -rf ~2J\tb\r\nc \xc3\xa9".to_vec();
+        assert_eq!(sanitize_paste(evil), expect);
+        let wrapped = encode_paste(evil, true);
+        assert_eq!(
+            wrapped.iter().filter(|&&b| b == 0x1b).count(),
+            2,
+            "only our two markers"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1567,15 +1702,20 @@ mod prompt_tests {
     #[test]
     fn auth_changed_key_parser_requires_unambiguous_exact_target() {
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 30".into()],
             display_name: "offline".into(),
-            meta: SessionMeta::default(),
+            meta: SessionMeta {
+                address: Some("alias".into()),
+                port: Some(2222),
+                ..SessionMeta::default()
+            },
             pending_secret: None,
             key_push_identity: None,
             host_name: "offline".into(),
         };
         let mut session = Session::spawn(config, (24, 80), None).unwrap();
-        session.debug_log = "Offending ED25519 key in /tmp/custom known_hosts:7\nHost key for [alias]:2222 has changed and you have requested strict checking.\n".into();
+        session.ssh_log = "Offending ED25519 key in /tmp/custom known_hosts:7\nHost key for [alias]:2222 has changed and you have requested strict checking.\n".into();
         assert_eq!(
             session.changed_key_target(),
             Some(("[alias]:2222".into(), "/tmp/custom known_hosts".into()))
@@ -1585,10 +1725,36 @@ mod prompt_tests {
             "Offending ED25519 key in /tmp/keys:0\nHost key for alias has changed\n",
             "Offending ED25519 key in /tmp/keys:1\nHost key for alias has changed\nHost key for other has changed\n",
             "Offending ED25519 key in /tmp/keys:1\nOffending RSA key in /tmp/other:2\nHost key for alias has changed\n",
+            // A banner naming another host must not aim the repair at that host.
+            "Offending ED25519 key in /home/u/.ssh/known_hosts:1\nHost key for github.com has changed and you have requested strict checking.\n",
         ] {
-            session.debug_log = log.into();
+            session.ssh_log = log.into();
             assert!(session.changed_key_target().is_none(), "ambiguous or invalid target must not be repaired");
         }
+    }
+
+    #[test]
+    fn askpass_require_needs_openssh_8_4() {
+        assert!(!banner_honors_askpass_require("OpenSSH_8.3p1 Ubuntu"));
+        assert!(!banner_honors_askpass_require("OpenSSH_7.9p1, OpenSSL"));
+        assert!(banner_honors_askpass_require("OpenSSH_8.4p1, OpenSSL"));
+        assert!(banner_honors_askpass_require("OpenSSH_10.5p1, OpenSSL"));
+        // Not OpenSSH, or unreadable: do not take the helper away.
+        assert!(banner_honors_askpass_require("dropbear"));
+    }
+
+    #[test]
+    fn openssh_versions_are_read_from_the_ssh_v_banner() {
+        assert_eq!(
+            openssh_version("OpenSSH_8.2p1 Ubuntu-4ubuntu0.5, OpenSSL 1.1.1f"),
+            Some((8, 2))
+        );
+        assert_eq!(
+            openssh_version("OpenSSH_10.0p2 Debian-7, OpenSSL 3.5.1"),
+            Some((10, 0))
+        );
+        assert_eq!(openssh_version("OpenSSH_for_Windows_9.5p1"), None);
+        assert_eq!(openssh_version("dropbear"), None);
     }
 
     #[test]
@@ -1604,6 +1770,7 @@ mod prompt_tests {
         // dash on Ubuntu) — the script is POSIX either way, but the spawn
         // must not depend on the runner's PATH.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["/bin/sh".into(), "-c".into(), "stty raw -echo; printf '\\033[5n'; dd bs=1 count=4 2>/dev/null | od -An -tx1; sleep 30".into()],
             display_name: "offline".into(), meta: SessionMeta::default(),
             pending_secret: None, key_push_identity: None, host_name: "offline".into(),
@@ -1648,6 +1815,7 @@ mod prompt_tests {
     #[test]
     fn mosh_running_alone_does_not_latch_connected() {
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 120".into()],
             display_name: "mosh-host".into(),
             meta: SessionMeta::default(),
@@ -1673,6 +1841,7 @@ mod prompt_tests {
         // exit — but the closed channel must not read as cancellation and kill
         // the child on the next drain.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 120".into()],
             display_name: "t".into(),
             meta: SessionMeta::default(),
@@ -1722,6 +1891,7 @@ mod prompt_tests {
         // stdout must land on the PTY grid; stderr must be routed through the
         // side FIFO into debug_log — never onto the grid.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),
@@ -1772,6 +1942,7 @@ mod prompt_tests {
         // Running alone is not post-auth evidence for mosh: history capture
         // must stay gated until trustworthy connected evidence arrives.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 120".into()],
             display_name: "mosh-host".into(),
             meta: SessionMeta::default(),
@@ -1831,6 +2002,7 @@ mod prompt_tests {
             return;
         }
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),
@@ -1859,6 +2031,57 @@ mod prompt_tests {
     }
 
     #[test]
+    fn a_server_banner_cannot_latch_connected() {
+        // The pre-auth banner reaches ssh's stderr verbatim; the real `-E` log
+        // is a different stream. A banner reading "Authenticated to …" (and
+        // forging a host-key-changed block) must change nothing; the genuine
+        // log line must.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("ssh");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\n[ \"$1\" = -E ] || exit 3\n\
+             printf 'Authenticated to evil ([1.2.3.4]:22)\\nHost key for victim has changed\\n' >&2\n\
+             sleep 1\n\
+             printf 'Authenticated to real ([1.2.3.4]:22) using \"password\".\\n' > \"$2\"\n\
+             exec sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = SessionConfig {
+            hops: Vec::new(),
+            argv: vec![fake.to_string_lossy().into_owned(), "real".into()],
+            display_name: "banner".into(),
+            meta: SessionMeta::default(),
+            pending_secret: None,
+            key_push_identity: None,
+            host_name: "banner".into(),
+        };
+        let mut s = Session::spawn(config, (10, 40), None).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !s.debug_log().contains("Authenticated to evil") {
+            s.drain();
+            assert!(std::time::Instant::now() < deadline, "banner never arrived");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!s.is_connected(), "banner text must not latch connected");
+        assert!(
+            !s.host_key_changed(),
+            "banner text must not forge a host-key change"
+        );
+        while !s.is_connected() {
+            s.drain();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the real log line never latched connected: {:?}",
+                s.debug_log()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
     fn local_shell_with_merged_stderr_reveals_on_its_prompt() {
         // Oracle: a real interactive `/bin/sh` on a real PTY. POSIX shells
         // print PS1 to STDERR, not stdout. `open_local_shell` spawns
@@ -1878,6 +2101,7 @@ mod prompt_tests {
             return;
         }
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into()],
             display_name: "local".into(),
             meta: SessionMeta::default(),
@@ -1931,6 +2155,7 @@ mod prompt_tests {
             return;
         }
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),
@@ -1975,6 +2200,7 @@ mod prompt_tests {
         // clipboard is the frame's job (it knows which tab is on screen), so
         // `drain` must leave the queue alone.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),
@@ -2017,6 +2243,7 @@ mod prompt_tests {
         // A remote flushing `ESU BSU` in many tiny reads must not cost one
         // full-grid rasterization per read on the UI thread.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["true".into()],
             display_name: "t".into(),
             meta: SessionMeta::default(),
@@ -2052,6 +2279,7 @@ mod prompt_tests {
               stty sane; printf 'CPR<%s>\r\n' $r"
         );
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), script],
             display_name: "t".into(),
             meta: SessionMeta::default(),
@@ -2124,6 +2352,7 @@ mod prompt_tests {
     /// Build a throwaway session for tests that only need a live `Session`.
     fn scratch_session() -> Session {
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["true".into()],
             display_name: "t".into(),
             meta: SessionMeta::default(),
@@ -2133,135 +2362,7 @@ mod prompt_tests {
         };
         Session::spawn(config, (24, 80), None).unwrap()
     }
-    /// A key-auth `sshd` on a free 127.0.0.1 port, configured in a tempdir;
-    /// `None` (test skipped) without sshd, ssh or ssh-keygen. Killed on drop.
-    struct TempdirSshd {
-        dir: tempfile::TempDir,
-        port: u16,
-        user_key: std::path::PathBuf,
-        host_key: std::path::PathBuf,
-        log: std::path::PathBuf,
-        child: std::process::Child,
-    }
-
-    impl Drop for TempdirSshd {
-        fn drop(&mut self) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-    }
-
-    fn tempdir_sshd() -> Option<TempdirSshd> {
-        use std::process::Command;
-        let sshd_bin = ["sshd", "/usr/sbin/sshd", "/usr/bin/sshd"]
-            .into_iter()
-            .filter_map(|bin| {
-                Command::new("sh")
-                    .arg("-c")
-                    .arg(format!("command -v {bin}"))
-                    .output()
-                    .ok()
-                    .filter(|o| o.status.success())
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-            })
-            .find(|path| path.starts_with('/'));
-        let Some(sshd_bin) = sshd_bin else {
-            eprintln!("skipping: no sshd binary");
-            return None;
-        };
-        for bin in ["ssh", "ssh-keygen"] {
-            if Command::new("sh")
-                .arg("-c")
-                .arg(format!("command -v {bin} >/dev/null"))
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            eprintln!("skipping: no {bin} binary");
-            return None;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let host_key = dir.path().join("host_key");
-        let user_key = dir.path().join("id");
-        for (key, kind) in [(&host_key, "host"), (&user_key, "user")] {
-            let out = Command::new("ssh-keygen")
-                .args(["-t", "ed25519", "-N", "", "-f", key.to_str().unwrap(), "-q"])
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "{kind} keygen failed: {out:?}");
-        }
-        let auth_keys = dir.path().join("auth_keys");
-        std::fs::copy(user_key.with_extension("pub"), &auth_keys).unwrap();
-        let cfg = dir.path().join("sshd_config");
-        let log = dir.path().join("sshd.log");
-        // The probe port is free when picked but not reserved: another process
-        // can take it before sshd binds. sshd then exits, so try a fresh port.
-        let mut attempts = 0;
-        let (port, child) = loop {
-            attempts += 1;
-            let port = {
-                let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-                probe.local_addr().unwrap().port()
-            };
-            std::fs::write(
-                &cfg,
-                format!(
-                    "Port {port}\nListenAddress 127.0.0.1\nHostKey {}\nPidFile {}\n\
-                     AuthorizedKeysFile {}\nStrictModes no\nPasswordAuthentication no\n\
-                     PubkeyAuthentication yes\nUsePAM no\n",
-                    host_key.display(),
-                    dir.path().join("sshd.pid").display(),
-                    auth_keys.display(),
-                ),
-            )
-            .unwrap();
-            let mut sshd = Command::new(sshd_bin.as_str())
-                .args([
-                    "-D",
-                    "-f",
-                    cfg.to_str().unwrap(),
-                    "-E",
-                    log.to_str().unwrap(),
-                ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .unwrap();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            let listening = loop {
-                if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
-                    break true;
-                }
-                if sshd.try_wait().unwrap().is_some() {
-                    break false;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "tempdir sshd never listened: {}",
-                    std::fs::read_to_string(&log).unwrap_or_default(),
-                );
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            };
-            if listening {
-                break (port, sshd);
-            }
-            assert!(
-                attempts < 5,
-                "tempdir sshd exited on {attempts} ports: {}",
-                std::fs::read_to_string(&log).unwrap_or_default(),
-            );
-        };
-        Some(TempdirSshd {
-            dir,
-            port,
-            user_key,
-            host_key,
-            log,
-            child,
-        })
-    }
+    use crate::test_support::tempdir_sshd;
 
     #[test]
     fn real_ssh_master_latches_connected_through_drain() {
@@ -2276,6 +2377,7 @@ mod prompt_tests {
         let user = std::env::var("USER").unwrap_or_else(|_| "root".into());
         let known = sshd.dir.path().join("known_hosts");
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "ssh".into(),
                 "-v".into(),
@@ -2366,6 +2468,7 @@ mod prompt_tests {
             false,
         );
         let config = SessionConfig {
+            hops: Vec::new(),
             argv,
             display_name: "jump".into(),
             meta: SessionMeta::default(),
@@ -2583,6 +2686,7 @@ mod prompt_tests {
         // with nothing on stdout. The reason must end up in debug_log (so the
         // render layer can show it) and the session must never latch connected.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),

@@ -355,3 +355,149 @@ pub(crate) fn keychain_create_edit_delete_flow() {
         .expect("created in store");
     assert_eq!(created.username.as_deref(), Some("deploy"));
 }
+
+fn ident(id: i64, name: &str, key: &str) -> crate::store::Identity {
+    crate::store::Identity {
+        id,
+        name: name.into(),
+        username: None,
+        private_key: Some(key.into()),
+        certificate: None,
+        has_password: false,
+    }
+}
+
+fn tunnel(id: i64, label: &str, local: u16) -> crate::store::Tunnel {
+    crate::store::Tunnel {
+        id,
+        host_id: None,
+        tunnel_type: crate::store::TunnelType::Local,
+        local_port: local,
+        remote_host: "localhost".into(),
+        remote_port: 80,
+        label: Some(label.into()),
+        auto_connect: false,
+        created_at: 0,
+        updated_at: 0,
+    }
+}
+
+fn type_str(app: &mut App, s: &str) {
+    for c in s.chars() {
+        app.handle_key(key_char(c)).unwrap();
+    }
+}
+
+#[test]
+pub(crate) fn identities_tab_slash_filters_and_esc_clears() {
+    let mut app = test_app(vec![("web", host("web"))]);
+    app.active_tab = 3;
+    app.identities = vec![
+        ident(1, "work", "/k/id_work"),
+        ident(2, "home", "/k/id_home"),
+        ident(3, "deploy", "/k/id_ci"),
+    ];
+    app.handle_key(key_char('/')).unwrap();
+    assert!(app.list_filter_editing);
+    // `d` and `e` are bound keys elsewhere; here they are query text.
+    type_str(&mut app, "hom");
+    assert_eq!(app.identity_filter, "hom");
+    assert_eq!(app.identity_view(), vec![1]);
+    assert_eq!(
+        app.identity_selected, 1,
+        "selection snaps onto a visible card"
+    );
+    assert!(app.identity_form.is_none());
+
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    assert!(!app.list_filter_editing);
+    assert_eq!(app.identity_view(), vec![1], "Enter keeps the filter");
+
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    assert!(app.identity_filter.is_empty());
+    assert_eq!(app.active_tab, 3, "first Esc only clears the filter");
+    assert_eq!(app.identity_view(), vec![0, 1, 2]);
+}
+
+#[test]
+pub(crate) fn identity_grid_moves_over_filtered_cards_only() {
+    let mut app = test_app(vec![("web", host("web"))]);
+    app.active_tab = 3;
+    app.config.appearance.identity_columns = 1;
+    app.identities = vec![
+        ident(1, "aa-one", "/k/1"),
+        ident(2, "zz", "/k/2"),
+        ident(3, "aa-two", "/k/3"),
+    ];
+    app.identity_filter = "aa".into();
+    app.snap_identity_selection();
+    assert_eq!(app.identity_selected, 0);
+    app.move_identity_grid(1, 0);
+    assert_eq!(app.identity_selected, 2, "skips the hidden card");
+}
+
+#[test]
+pub(crate) fn tunnels_tab_slash_filters_and_selection_follows_view() {
+    let mut app = test_app(vec![("web", host("web"))]);
+    app.active_tab = 2;
+    app.tunnels = vec![
+        tunnel(1, "db", 5432),
+        tunnel(2, "web", 8080),
+        tunnel(3, "dev web", 3000),
+    ];
+    app.handle_key(key_char('/')).unwrap();
+    type_str(&mut app, "web");
+    assert_eq!(app.tunnel_view().len(), 2);
+    assert!(!app.tunnel_view().contains(&0));
+    assert!(app.tunnel_view().contains(&app.tunnel_selected));
+    let first = app.tunnel_selected;
+    app.handle_key(key(KeyCode::Down)).unwrap();
+    assert_ne!(app.tunnel_selected, first);
+    assert_ne!(app.tunnel_selected, 0, "never lands on a hidden tunnel");
+
+    // Ports are searchable too.
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    assert!(app.tunnel_filter.is_empty());
+    type_str(&mut app, "/5432");
+    assert_eq!(app.tunnel_view(), vec![0]);
+}
+
+#[test]
+pub(crate) fn no_match_filter_leaves_tunnel_actions_inert() {
+    let mut app = test_app(vec![("web", host("web"))]);
+    app.active_tab = 2;
+    app.tunnels = vec![tunnel(1, "db", 5432), tunnel(2, "web", 8080)];
+    app.handle_key(key_char('/')).unwrap();
+    type_str(&mut app, "zzzz");
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    assert!(app.tunnel_view().is_empty());
+    assert!(app.selected_tunnel().is_none());
+
+    app.handle_key(key_char('d')).unwrap();
+    assert!(app.pending_delete.is_none(), "delete must not open");
+    assert_eq!(app.mode, AppMode::Normal);
+    app.handle_key(key_char('e')).unwrap();
+    assert!(app.tunnel_form.is_none(), "edit must not open");
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    assert!(app.tunnel_notice.is_none(), "toggle must not act");
+}
+
+#[test]
+pub(crate) fn no_match_filter_leaves_identity_actions_inert() {
+    let mut app = test_app(vec![("web", host("web"))]);
+    app.active_tab = 3;
+    app.identities = vec![
+        ident(1, "work", "/k/id_work"),
+        ident(2, "home", "/k/id_home"),
+    ];
+    app.handle_key(key_char('/')).unwrap();
+    type_str(&mut app, "zzzz");
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    assert!(app.selected_identity().is_none());
+
+    app.handle_key(key_char('d')).unwrap();
+    assert!(app.pending_delete.is_none(), "delete must not open");
+    app.handle_key(key_char('e')).unwrap();
+    assert!(app.identity_form.is_none(), "edit must not open");
+    assert_eq!(app.mode, AppMode::Normal);
+}

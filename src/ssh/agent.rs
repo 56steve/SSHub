@@ -30,8 +30,15 @@ pub fn detect_agent() -> AgentInfo {
     }
 }
 
+/// The exact `ssh-add -d` invocation [`remove_key`] runs. `--` keeps an agent
+/// comment such as `-D` (wipe the whole agent) a file name, not an option.
+pub fn agent_remove_argv(path: &str) -> Vec<String> {
+    ["ssh-add", "-d", "--", path].map(String::from).to_vec()
+}
+
 pub fn remove_key(path: &str) -> Result<()> {
-    let output = Command::new("ssh-add").arg("-d").arg(path).output()?;
+    let argv = agent_remove_argv(path);
+    let output = Command::new(&argv[0]).args(&argv[1..]).output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("ssh-add -d failed: {}", stderr.trim());
@@ -99,6 +106,11 @@ fn list_agent_keys() -> Result<Vec<AgentKey>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_remove_argv_ends_options_before_the_comment() {
+        assert_eq!(agent_remove_argv("-D"), ["ssh-add", "-d", "--", "-D"]);
+    }
 
     #[test]
     fn agent_add_argv_lists_key_before_cert() {

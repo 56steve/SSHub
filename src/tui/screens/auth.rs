@@ -46,7 +46,12 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
     let mut lines = Vec::new();
     if let Some(session) = app.sessions.get(modal.session) {
-        lines.push(Line::raw(format!("Session: {}", session.display_name)));
+        lines.push(Line::raw(match &modal.hop {
+            // A jump host of the chain asks, not the destination.
+            Some(Some(hop)) => format!("Session: {}, hop {hop}", session.display_name),
+            Some(None) => format!("Session: {}, jump host", session.display_name),
+            None => format!("Session: {}", session.display_name),
+        }));
     }
     if modal.class == PromptClass::HostKey {
         let details = HostKeyDetails::parse(&modal.prompt);
@@ -122,6 +127,8 @@ pub fn render(frame: &mut Frame, app: &App) {
             )
         } else if modal.class == PromptClass::Generic {
             "One-time response: never saved".into()
+        } else if matches!(modal.hop, Some(None)) {
+            "Not saved: this jump host is not a saved host".into()
         } else {
             "Not saved: no managed host/identity destination".into()
         }));
@@ -164,6 +171,7 @@ mod tests {
         const PROMPT: &str = "Password: aaaaaaaaaaaaaa bbbbbbbbbbbbbb cccccccccccccc\ndddddddddddddd eeeeeeeeeeeeee ffffffffffffff gggggggggggggg\nhhhhhhhhhhhhhh iiiiiiiiiiiiii jjjjjjjjjjjjjj\nFINAL-TOKEN-VISIBLE";
         let mut app = themed_app(resolved_default());
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 30".into()],
             display_name: "offline".into(),
             meta: SessionMeta::default(),

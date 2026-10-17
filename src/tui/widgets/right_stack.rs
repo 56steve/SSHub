@@ -28,7 +28,7 @@ pub fn render_right_stack(frame: &mut Frame, area: Rect, app: &App) {
     // ── Panel 1: Recent sessions ────────────────────────
     let recent_area = Rect::new(area.x, y, w, RECENT_H.min(area.height));
     render_recent_panel(buf, recent_area, app);
-    y += recent_area.height;
+    y += recent_area.height + crate::tui::dashboard_layout::PANEL_GAP;
 
     if y >= area.y + area.height {
         return;
@@ -36,9 +36,14 @@ pub fn render_right_stack(frame: &mut Frame, area: Rect, app: &App) {
 
     // ── Panel 2: Auth events ────────────────────────────
     let remaining = area.y + area.height - y;
-    let auth_area = Rect::new(area.x, y, w, AUTH_H.min(remaining));
+    let auth_area = Rect::new(
+        area.x,
+        y,
+        w,
+        crate::tui::dashboard_layout::middle_panel_h(AUTH_H, remaining),
+    );
     render_auth_panel(buf, auth_area, app);
-    y += auth_area.height;
+    y += auth_area.height + crate::tui::dashboard_layout::PANEL_GAP;
 
     if y >= area.y + area.height {
         return;
@@ -46,7 +51,7 @@ pub fn render_right_stack(frame: &mut Frame, area: Rect, app: &App) {
 
     // ── Panel 3: Ping all hosts ─────────────────────────
     let remaining = area.y + area.height - y;
-    let ping_area = Rect::new(area.x, y, w, PING_H.min(remaining));
+    let ping_area = Rect::new(area.x, y, w, remaining);
     render_ping_panel(buf, ping_area, app);
 }
 

@@ -72,20 +72,33 @@ impl HostSearch {
     }
 }
 
-fn score_field(
+/// Score one item given as several fields. Every pattern atom must match in
+/// at least one field, but different atoms may match different fields, so
+/// `prod 8080` finds a row with "prod" in its name and 8080 in its port. A
+/// negated atom (`!x`) must pass in all fields. `None` when any atom fails.
+fn score_fields(
     pattern: &Pattern,
     matcher: &mut Matcher,
-    field: &str,
+    fields: &[&str],
     buf: &mut Vec<char>,
-    best: &mut Option<u32>,
-) {
-    if field.is_empty() {
-        return;
+) -> Option<u32> {
+    let mut total = 0u32;
+    for atom in &pattern.atoms {
+        let mut best: Option<u16> = None;
+        for field in fields.iter().filter(|f| !f.is_empty()) {
+            buf.clear();
+            let score = atom.score(Utf32Str::new(field, buf), matcher);
+            if atom.negative {
+                score?;
+            } else if let Some(score) = score {
+                best = Some(best.map_or(score, |current| current.max(score)));
+            }
+        }
+        if !atom.negative {
+            total += u32::from(best?);
+        }
     }
-    buf.clear();
-    if let Some(score) = pattern.score(Utf32Str::new(field, buf), matcher) {
-        *best = Some(best.map_or(score, |current| current.max(score)));
-    }
+    Some(total)
 }
 
 fn score_entry(
@@ -94,28 +107,63 @@ fn score_entry(
     entry: &HostEntry,
     buf: &mut Vec<char>,
 ) -> Option<u32> {
-    let mut best = None;
-    score_field(pattern, matcher, entry.name(), buf, &mut best);
-    score_field(pattern, matcher, entry.display_name(), buf, &mut best);
-    let ssh = entry.ssh_host();
-    if let Some(hostname) = ssh.hostname.as_deref() {
-        score_field(pattern, matcher, hostname, buf, &mut best);
-    }
     let tags = entry.tags().join(" ");
-    score_field(pattern, matcher, &tags, buf, &mut best);
-    if let Some(description) = entry.description() {
-        score_field(pattern, matcher, description, buf, &mut best);
+    let ssh = entry.ssh_host();
+    let fields = [
+        entry.name(),
+        entry.display_name(),
+        ssh.hostname.as_deref().unwrap_or(""),
+        &tags,
+        entry.description().unwrap_or(""),
+        entry.environment().unwrap_or(""),
+    ];
+    score_fields(pattern, matcher, &fields, buf)
+}
+
+/// Indices of the `items` whose any field fuzzy-matches `query`, best score
+/// first (ties keep list order). An empty query keeps every item in order.
+///
+/// Same nucleo pattern parse and per-field scoring as the host filter, for
+/// lists that are not hosts (tunnels, identities).
+pub fn fuzzy_indices(query: &str, items: &[Vec<String>]) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..items.len()).collect();
     }
-    if let Some(environment) = entry.environment() {
-        score_field(pattern, matcher, environment, buf, &mut best);
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut buf = Vec::new();
+    let mut scored = Vec::new();
+    for (idx, fields) in items.iter().enumerate() {
+        let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+        if let Some(score) = score_fields(&pattern, &mut matcher, &fields, &mut buf) {
+            scored.push((score, idx));
+        }
     }
-    best
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    scored.into_iter().map(|(_, idx)| idx).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ssh::SshHost;
+
+    #[test]
+    fn fuzzy_indices_filters_and_ranks_fields() {
+        let items = vec![
+            vec!["prod db".to_string(), "5432".to_string()],
+            vec!["staging".to_string()],
+            vec!["proxy".to_string(), "8080".to_string()],
+        ];
+        assert_eq!(fuzzy_indices("", &items), vec![0, 1, 2]);
+        assert_eq!(fuzzy_indices("5432", &items), vec![0]);
+        assert_eq!(fuzzy_indices("stg", &items), vec![1]);
+        assert!(fuzzy_indices("zzz", &items).is_empty());
+        // Atoms may match different fields.
+        assert_eq!(fuzzy_indices("prod 5432", &items), vec![0]);
+        assert_eq!(fuzzy_indices("proxy 8080", &items), vec![2]);
+        assert!(fuzzy_indices("prod 8080", &items).is_empty());
+    }
 
     fn fixture() -> Vec<HostEntry> {
         vec![

@@ -159,6 +159,48 @@ pub struct TransferResult {
     pub transferred: usize,
     pub renamed: Vec<String>,
     pub blocked: Vec<String>,
+    /// Source host ids deleted by a move; their `host:{id}` secrets are
+    /// orphaned until [`TransferResult::purge_source_secrets`] runs.
+    pub deleted_host_ids: Vec<i64>,
+    /// Source identity ids deleted by a move (`identity:{id}` secrets).
+    pub deleted_identity_ids: Vec<i64>,
+}
+
+impl TransferResult {
+    /// Delete the saved secrets of the source hosts/identities a move removed
+    /// from `src_secrets` (the SOURCE profile's credential store). Returns one
+    /// message per key that could not be deleted; callers MUST surface them.
+    /// Copy results carry no deleted ids, so this is a no-op there.
+    pub fn purge_source_secrets(
+        &self,
+        src_secrets: &dyn crate::credentials::PasswordStore,
+    ) -> Vec<String> {
+        let keys = self
+            .deleted_host_ids
+            .iter()
+            .map(|id| crate::credentials::host_key(*id))
+            .chain(
+                self.deleted_identity_ids
+                    .iter()
+                    .map(|id| crate::credentials::identity_key(*id)),
+            );
+        keys.filter_map(|key| {
+            src_secrets
+                .delete(&key)
+                .err()
+                .map(|e| format!("{key}: {e:#}"))
+        })
+        .collect()
+    }
+}
+
+/// One-line warning for the failures from [`TransferResult::purge_source_secrets`].
+pub fn secret_purge_warning(failures: &[String]) -> String {
+    format!(
+        "{} moved secret(s) could not be removed from the source keyring: {}",
+        failures.len(),
+        failures.join("; ")
+    )
 }
 
 /// First free name for `base`: `base` itself when unused, otherwise
@@ -827,13 +869,15 @@ pub fn apply_transfer_plan(
             .into_iter()
             .map(|i| (i.name.clone(), i))
             .collect();
-        delete_source_originals(
+        let (hosts, identities) = delete_source_originals(
             src_store,
             plan,
             &owned_hosts,
             &owned_groups,
             &owned_identities,
         )?;
+        result.deleted_host_ids = hosts;
+        result.deleted_identity_ids = identities;
     }
 
     Ok(result)
@@ -861,11 +905,13 @@ fn delete_source_originals(
     src_hosts: &HashMap<String, ManagedHost>,
     src_groups: &HashMap<String, HostGroup>,
     src_identities: &HashMap<String, Identity>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(Vec<i64>, Vec<i64>)> {
     let runnable: Vec<&PlannedItem> = plan.runnable();
     src_store
         .with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
+            let mut deleted_hosts: Vec<i64> = Vec::new();
+            let mut deleted_identities: Vec<i64> = Vec::new();
             for item in runnable.iter().filter(|i| i.kind == "host") {
                 let Some(host) = src_hosts.get(item.src_name.as_str()) else {
                     continue;
@@ -874,6 +920,7 @@ fn delete_source_originals(
                     continue;
                 }
                 super::hosts::delete_host_on(conn, host.id)?;
+                deleted_hosts.push(host.id);
             }
             // Host deletion cascaded companion tunnels; remove leftovers by
             // re-reading inside the transaction, matched with the same
@@ -910,10 +957,11 @@ fn delete_source_originals(
                     super::hosts::group_default_uses_identity_on(conn, identity.id)?;
                 if hosts_still_use == 0 && !group_default_still_use {
                     super::identities::delete_identity_on(conn, identity.id)?;
+                    deleted_identities.push(identity.id);
                 }
             }
             tx.commit()?;
-            Ok(())
+            Ok((deleted_hosts, deleted_identities))
         })
         .context("delete moved source originals")
 }

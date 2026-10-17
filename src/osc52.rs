@@ -25,6 +25,21 @@ pub(crate) fn write_b64_to(out: &mut impl Write, payload: &str) -> std::io::Resu
     out.flush()
 }
 
+thread_local! {
+    static CAPTURE: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with the clipboard writes of this thread kept in memory instead of
+/// sent to the terminal, and return them. For tests (hidden from the docs): a copied command must be
+/// checkable without the escape sequence landing in the developer's clipboard.
+#[doc(hidden)]
+pub fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+    CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+    let out = f();
+    let copied = CAPTURE.with(|c| c.borrow_mut().take()).unwrap_or_default();
+    (out, copied)
+}
+
 /// Base64-encode plain `text` and write it through [`write_b64_to`].
 pub(crate) fn write_text_to(out: &mut impl Write, text: &str) -> std::io::Result<()> {
     write_b64_to(out, &base64_encode(text.as_bytes()))
@@ -37,6 +52,15 @@ pub(crate) fn write_b64(payload: &str) -> std::io::Result<()> {
 
 /// [`write_text_to`] against the process's stdout.
 pub(crate) fn write_text(text: &str) -> std::io::Result<()> {
+    let kept = CAPTURE.with(|c| {
+        c.borrow_mut()
+            .as_mut()
+            .map(|v| v.push(text.to_string()))
+            .is_some()
+    });
+    if kept {
+        return Ok(());
+    }
     write_text_to(&mut std::io::stdout().lock(), text)
 }
 

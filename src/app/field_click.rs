@@ -78,7 +78,7 @@ impl App {
             }
             ClickHit::Row(index) => self.select_row(index),
             // The dashboard behind an overlay: a click there is not for it.
-            ClickHit::SftpPane { .. } => {}
+            ClickHit::SftpPane { .. } | ClickHit::MapCell { .. } => {}
         }
     }
 
@@ -103,6 +103,8 @@ impl App {
                 if form.field != field {
                     // Walking away re-masks, as with Tab.
                     form.password_revealed = false;
+                    self.hop_editor.picker = None;
+                    self.hop_editor.raw = None;
                     form.field = field;
                 }
                 form.cursor = place(form.active_field(), glyph, masked);

@@ -14,14 +14,17 @@ struct TestEnv {
     _data_dir: tempfile::TempDir,
     store: Arc<LauncherStore>,
     app: App,
+    /// Last field: restores the env after the store and app are gone.
+    _env: crate::support::EnvGuard,
 }
 
 impl TestEnv {
     fn new() -> Self {
         let config_dir = tempfile::tempdir().unwrap();
         let data_dir = tempfile::tempdir().unwrap();
-        std::env::set_var("SSH_LAUNCHER_CONFIG_DIR", config_dir.path());
-        std::env::set_var("SSH_LAUNCHER_DATA_DIR", data_dir.path());
+        let mut env = crate::support::EnvGuard::new();
+        env.set("SSH_LAUNCHER_CONFIG_DIR", config_dir.path())
+            .set("SSH_LAUNCHER_DATA_DIR", data_dir.path());
 
         let store = Arc::new(LauncherStore::open(data_dir.path().join("launcher.db")).unwrap());
         let mut app = App::new_with_deps(
@@ -40,6 +43,7 @@ impl TestEnv {
             _data_dir: data_dir,
             store,
             app,
+            _env: env,
         }
     }
 

@@ -136,11 +136,9 @@ impl Channel {
     }
 
     pub fn env(&self, exe: &Path) -> Vec<(String, String)> {
-        vec![
+        let mut env = vec![
             ("SSH_ASKPASS".into(), exe.to_string_lossy().into_owned()),
             ("SSH_ASKPASS_REQUIRE".into(), "force".into()),
-            // Nonempty DISPLAY also supports OpenSSH versions checking it.
-            ("DISPLAY".into(), "sshub:0".into()),
             (MODE_ENV.into(), MODE_WITH_SSH_PID.into()),
             (
                 SOCKET_ENV.into(),
@@ -151,7 +149,13 @@ impl Channel {
                     .into_owned(),
             ),
             (TOKEN_ENV.into(), self.token.clone()),
-        ]
+        ];
+        // A nonempty DISPLAY also supports OpenSSH versions checking it. Never
+        // replace a real one: `-X`/`ForwardX11` would then point at `sshub:0`.
+        if std::env::var_os("DISPLAY").is_none_or(|d| d.is_empty()) {
+            env.push(("DISPLAY".into(), "sshub:0".into()));
+        }
+        env
     }
 
     /// Work per tick is bounded, including unauthenticated/partial clients.

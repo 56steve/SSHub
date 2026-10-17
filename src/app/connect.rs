@@ -29,7 +29,15 @@ impl App {
         // prompts; an identity-level credential at `Enter passphrase for …`.
         // The interactive askpass channel delivers it only to its prompt class.
         let resolved = match entry.managed() {
-            Some(m) => Some(self.store.resolve_connection(m)?),
+            Some(m) => match self.store.resolve_connection(m) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    // A stored ProxyJump hop ssh must not be handed: tell the
+                    // user, never unwind the event loop.
+                    self.host_notice = Some(format!("{}: {e:#}", entry.name()));
+                    return Ok(());
+                }
+            },
             None => None,
         };
         let effective_identity = resolved.as_ref().and_then(|r| r.identity.as_ref());
@@ -110,9 +118,11 @@ impl App {
                     .as_deref()
                     .or_else(|| m.identity.as_ref().and_then(|i| i.username.as_deref()))
             });
-            let via = entry
-                .managed()
-                .and_then(|m| m.proxy_jump.as_deref())
+            // The effective jump (own, group default), not just the own field.
+            let via = resolved
+                .as_ref()
+                .and_then(|r| r.proxy_jump.as_deref())
+                .or_else(|| entry.managed().and_then(|m| m.proxy_jump.as_deref()))
                 .unwrap_or("direct");
             // Spawn an embedded PTY session in-process. No external terminal.
             let display_name = entry.name().to_string();
@@ -121,6 +131,7 @@ impl App {
                 _ => session_meta_for_entry(&entry),
             };
             let config = crate::session::SessionConfig {
+                hops: Vec::new(),
                 argv: session_argv.clone(),
                 display_name,
                 meta,
@@ -144,6 +155,15 @@ impl App {
                         auth.identity_id = entry
                             .managed()
                             .and_then(|m| m.identity.as_ref().map(|i| i.id));
+                        // The jump hosts' own saved credentials: a hop that asks
+                        // for its password gets that host's, never this one's.
+                        if let Some(jump) = resolved.as_ref().and_then(|r| r.proxy_jump.as_deref())
+                        {
+                            auth.hops = hop_specs(&self.store, &self.hosts, jump)
+                                .into_iter()
+                                .map(|s| s.lazy(self.password_store.clone()))
+                                .collect();
+                        }
                     }
                     let mut log_path = None;
                     if log_enabled {

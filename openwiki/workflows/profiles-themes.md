@@ -37,7 +37,7 @@ Switching happens in place (`apply_pending_profile` in `src/lib.rs` swaps in a f
 1. **Destination**: type to fuzzy-filter the other profiles, arrows move, Enter picks.
 2. **Scope**: `h` the host selected on the hosts tab, `g` the group selected in the group manager (open it with `Shift+G` first), `i` the selected identity, `t` the selected tunnel.
 3. **Group mode** (groups only): `g` group only (member hosts stay) or `w` group with its hosts.
-4. **Plan**: the planned items with renames and blocked reasons. `m` toggles copy/move (move deletes the originals after copying), `w` toggles with-hosts for a group, `y` applies; an empty plan refuses. `Esc` cancels at any step.
+4. **Plan**: the planned items with renames and blocked reasons. `m` toggles copy/move (move deletes the originals after copying, then deletes the moved hosts' saved passwords and the moved identities' passphrases from the source profile's credential store; the result notice carries a WARNING if any could not be removed), `w` toggles with-hosts for a group, `y` applies; an empty plan refuses. `Esc` cancels at any step.
 
 Identities carry the key path only, never secrets; the reserved Favorites group cannot be transferred. The same engine ([cross-profile transfers](../architecture/profiles.md#cross-profile-transfers)) backs `sshub host|group|identity|tunnel transfer ... --to PROFILE` ([CLI](cli.md)).
 

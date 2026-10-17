@@ -123,7 +123,12 @@ pub fn host_record_json(entry: &HostEntry, store: &LauncherStore) -> HostRecordJ
         group,
         groups,
         identity,
-        proxy_jump: ssh.proxy_jump.clone(),
+        // The stored value: an invalid one is dropped from the argv, but it is
+        // still what is saved, and `show` must not hide it.
+        proxy_jump: entry
+            .managed()
+            .and_then(|m| m.proxy_jump.clone())
+            .or_else(|| ssh.proxy_jump.clone()),
         source,
         tags: entry.tags().to_vec(),
         environment: entry.environment().map(str::to_string),

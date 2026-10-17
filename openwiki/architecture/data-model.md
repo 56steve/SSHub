@@ -1,7 +1,7 @@
 ---
 type: Data Model
-title: Data Model & Storage, launcher.db v20, metadata.db, config.toml, and hybrid hosts
-description: SSHub persists each profile's state in two SQLite databases (launcher.db at schema v20 for managed hosts, groups and their connection defaults, identities, tunnels, audit, snippets, log bookmarks, opt-in command history and saved split-view workspaces; metadata.db for legacy ssh_config aliases), snapshots launcher.db before every migration, keeps settings in config.toml, and merges managed hosts with read-only ~/.ssh/config aliases through HostResolver.
+title: Data Model & Storage, launcher.db v21, metadata.db, config.toml, and hybrid hosts
+description: SSHub persists each profile's state in two SQLite databases (launcher.db at schema v21 for managed hosts, groups and their connection defaults, identities, tunnels, audit, snippets, log bookmarks, opt-in command history and saved split-view workspaces; metadata.db for legacy ssh_config aliases), snapshots launcher.db before every migration, keeps settings in config.toml, and merges managed hosts with read-only ~/.ssh/config aliases through HostResolver.
 resource: src/store/migrate.rs
 tags: [storage, sqlite, schema, migrations, config, hosts, architecture]
 ---
@@ -53,7 +53,7 @@ migrations and seeds the "Default" identity. `run_migrations`
 3. One transaction: the base v2 schema (`CREATE TABLE IF NOT EXISTS`), then
    every `migrate_vN_to_vN+1` step below the current version, then the legacy
    metadata import (fresh DB only), then `schema_version` is set to
-   **`SCHEMA_VERSION = 20`**. Column adds are guarded with `pragma_table_info`
+   **`SCHEMA_VERSION = 21`**. Column adds are guarded with `pragma_table_info`
    so re-runs are safe.
 
 Migration history worth knowing:
@@ -76,16 +76,17 @@ Migration history worth knowing:
 | v18 | `hosts.ping` (per-host ping override: `NULL` inherit, 1 on, 0 off) |
 | v19 | `hosts.secret_lookup` (one `Attribute=value` Secret Service spec) |
 | v20 | `workspaces` table (saved split-view layouts) |
+| v21 | `hosts` and `identities` rebuilt with `AUTOINCREMENT`: ids are never reused, so a new host can no longer adopt the keyring secret (`host:<id>` / `identity:<id>`) a deleted one left behind. Child rows (memberships, tunnels, command history, host and group identity references) are copied out and put back around the `DROP TABLE` |
 
-The v16 rebuild is the cautionary tale: `DROP TABLE hosts` fires every child
-`ON DELETE CASCADE`, and 0.17.0 emptied memberships, tunnels and command
-history that way. The rebuild now copies those child rows into temp tables and
-puts them back; v17 repairs databases already damaged (only the primary group
-is recoverable). This is why the pre-migration snapshot exists.
+The v16 and v21 rebuilds carry the same hazard: `DROP TABLE hosts` fires every
+child `ON DELETE CASCADE`, and 0.17.0 emptied memberships, tunnels and command
+history that way. Rebuilds now copy those child rows into temp tables and put
+them back; v17 repairs databases already damaged (only the primary group is
+recoverable). This is why the pre-migration snapshot exists.
 
 Tables:
 
-- `hosts`: `id`, `name` (unique), `label`, `address`, `port`, `group_id`
+- `hosts`: `id` (`AUTOINCREMENT`), `name` (unique), `label`, `address`, `port`, `group_id`
   (primary group, kept in sync with memberships), `identity_id`, `os_icon`,
   `tags` (JSON), `notes`, `proxy_jump`, `forward_agent`, `remote_command`,
   `sort_order`, `favorite`, `last_connected`, `source` (`launcher` |
@@ -93,20 +94,24 @@ Tables:
   `username`, `environment`, `session_logging`, `transport`, `ping`,
   `secret_lookup`. Writes refuse a `name`, `address` or `username` starting with
   `-` (`reject_option_like`, see [secrets](../security/secrets.md#input-safety)).
+  Stricter address / login checks (the destination allowlist,
+  `ssh::destination_problem`: login and host-name characters only) run in the
+  host form, `sshub host add|edit`, importers and at every point that builds ssh
+  argv, not in the store.
 - `host_groups`: nested via `parent_id`; `reserved` marks the built-in
   **Favorites** group (found by flag, never by name: a user's own "Favorites"
   group is never repurposed, the reserved one is renamed `Favorites (2)` on
   clash); `default_identity_id` plus the five v16 `default_*` columns.
 - `host_group_memberships`: M:N, primary key `(host_id, group_id)`, both sides
   cascade.
-- `identities`: `name`, `username`, `private_key`, `certificate`,
+- `identities`: `id` (`AUTOINCREMENT`), `name`, `username`, `private_key`, `certificate`,
   `has_password`, `sort_order`; seeded with "Default".
 - `tunnels`: tunnel definitions, `host_id` cascades (see
   [tunnels](../workflows/tunnels.md)).
 - `auth_events`: the audit log, columns `id`, `host_name`, `username`, `via`,
   `status`, `note`, `created_at`, `log_path`. `via` distinguishes connect
   paths; `tunnel`, `agent`, `exec` and `broadcast` have their own audit filter.
-- `ui_state`: key/value (`collapsed_groups`, `ui_zoom`, `name_zoom`).
+- `ui_state`: key/value (`collapsed_groups`, `ui_zoom` with the legacy `name_zoom` as fallback, the SFTP hidden-files flag).
 - `snippets`: `name`, `command`, `description`, `tags` (JSON), timestamps
   (`src/store/snippets.rs`).
 - `log_bookmarks`: `host_dir`, `file_name`, `line`, `name`, `created_at`. Keyed
@@ -141,7 +146,11 @@ identity, username and ProxyJump stay unset). "Best" is most-specific-wins over
 the ancestor chains of every membership: smallest chain distance, then the
 deeper group, then the primary group's chain, then the smaller group id. Tags
 and favorites never inherit. Connect paths must build argv from the resolved
-values (`app::util::resolved_session_argv`).
+values (`app::util::resolved_session_argv`). `ResolvedConnection` also carries
+`jump_argv` (the `-J` value, with a hop that exists only in SSHub expanded to
+`user@address:port` by `expand_jump`) and `jump_error` (set when ProxyJump is
+not valid hops or the destination is outside the allowlist: a caller that runs
+ssh must refuse rather than connect without the bastion).
 
 ### Cross-profile transfer engine (`src/store/transfer.rs`)
 
@@ -150,7 +159,12 @@ source and destination stores, so planning never holds a store lock and applying
 never holds two (the `LauncherStore` mutex is not reentrant).
 `build_transfer_plan` / `apply_transfer_plan` copy or move hosts, groups,
 identities and tunnels; clashes rename to `name (copy N)`
-(`unique_dest_name`). Callers: the profile manager and `sshub <entity> transfer`
+(`unique_dest_name`). Copied hosts and identities start with
+`has_password = false` (a host keeps its `secret_lookup` spec); a **move** reports
+the deleted source ids in `TransferResult`, and the caller then runs
+`purge_source_secrets` on the source profile's credential store so the moved
+rows' passwords and passphrases do not stay behind (failures are surfaced as a
+warning). Callers: the profile manager and `sshub <entity> transfer`
 ([profiles](profiles.md#cross-profile-transfers)).
 
 ### Destructive purge
@@ -167,7 +181,12 @@ imported hosts reappear on next launch; keyring entries are orphaned.
 1. DB hosts with `source = launcher` (full CRUD).
 2. DB hosts with `source = ssh_config`: rows synced from the ssh config by
    `sync_ssh_config_hosts` (`src/ssh/import.rs`), keyed by `ssh_config_hash`;
-   launcher rows are never overwritten.
+   launcher rows are never overwritten. The fingerprint ends in
+   `|proxycmd=yes` or `|proxycmd=no` (the only place the sync keeps whether
+   `ssh -G` printed a `ProxyCommand`; the network map and test connect read it
+   with `ssh_config_hash_has_proxy_command`). Adding that suffix changed every
+   stored hash, so the first sync after the upgrade rewrites each ssh_config row
+   once; tags, notes and favorites are kept by the upsert.
 3. Remaining ssh_config aliases with no DB row surface as
    `HostEntry::Legacy { host, meta }`, with metadata from `metadata.db`.
 
@@ -176,8 +195,11 @@ Resolution goes through the `HostResolver` trait. `SshConfigResolver`
 OpenSSH does, following `Include` up to depth 16) and shells out to
 `ssh -F <cfg> -G <alias>` for effective options. The
 ssh config is never written: export renders `exported.conf` with an atomic
-write and `.bak` (`src/ssh/export.rs`), and `conf_val` flattens CR/LF so a host
-field cannot inject a `Host *` stanza.
+write and `.bak` (`src/ssh/export.rs`). Export refuses a host it cannot render
+safely (`token`: whitespace, control, quote, `#` or, for the `Host` line,
+pattern characters `*?!,`; a leading `-`; an invalid ProxyJump), doubles `%` and
+quotes key paths with spaces, so a host field cannot inject a `Host *` stanza or
+a `ProxyCommand`.
 
 Hosts, groups, favorites and identities as user-facing concepts:
 [domain/hosts-identities](../domain/hosts-identities.md).

@@ -24,10 +24,10 @@ Each candidate's argv and stored secret are resolved when the target is picked, 
 
 `spawn_broadcast` starts `min(DEFAULT_CONCURRENCY = 8, hosts)` worker threads that pull tasks from a shared channel and report `BroadcastEvent`s; the UI folds them each tick (`tick_broadcast`, `apply_event`).
 
-`SshCommandRunner` runs `ssh -o BatchMode=… -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new <argv…> <command>` with stdin closed and both pipes drained on threads:
+`SshCommandRunner` runs `ssh -o BatchMode=… -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new <argv…> -- <command>` with stdin closed and both pipes drained on threads (each capped at `MAX_OUTPUT_BYTES`, 1 MiB per host). The `--` keeps a command that starts with `-` from being read as an ssh option. The host's stored `remote_command` is dropped from the argv first (`ssh::without_remote_command`), otherwise it would run instead of the typed command; a managed mosh host is broadcast over ssh (the candidate's transport is forced to `Ssh`), and a non-ssh argv is refused ("cannot run a one-shot command"). A host whose effective connection cannot be resolved (for example an invalid ProxyJump) is left out with a "Not included: …" notice.
 
-- a host with a stored secret runs `BatchMode=no` and gets the secret through the file-based `SSH_ASKPASS` helper (`AskpassSecret`);
-- a host without one runs `BatchMode=yes`, so a password prompt fails fast instead of reaching `/dev/tty`;
+- a host with a stored secret, or a ProxyJump chain with saved hop hosts, runs `BatchMode=no` and gets the secret and the hop references through the staged `SSH_ASKPASS` helper (`AskpassSecret::staged`, `app::hop_secrets`; a hop prompt is answered only with that hop's own stored secret, see [sessions](sessions-sftp.md));
+- a host without either runs `BatchMode=yes`, so a password prompt fails fast instead of reaching `/dev/tty`;
 - each run is killed after `RUN_TIMEOUT` (60 s) and reported as "timed out".
 
 ## Live panel

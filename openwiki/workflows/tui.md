@@ -1,7 +1,7 @@
 ---
 type: Workflow
 title: TUI Dashboard - Tabs, Overlays, and Keybindings
-description: The keyboard-driven SSHub dashboard with five tabs (hosts, SFTP, tunnels, identities, audit), the dashboard panel grid, every overlay (palette, session switcher, settings, theme picker, profiles, snippets, log browser, broadcast, keybind editor, help), default keybindings from src/keybinds.rs, and how screens map to AppMode.
+description: The keyboard-driven SSHub dashboard with six tabs (hosts, SFTP, tunnels, identities, audit, map), the dashboard panel grid, every overlay (palette, session switcher, settings, theme picker, profiles, snippets, log browser, broadcast, keybind editor, help), default keybindings from src/keybinds.rs, and how screens map to AppMode.
 resource: src/app/keys.rs
 tags: [tui, keybindings, dashboard, workflow, ux]
 ---
@@ -10,7 +10,7 @@ tags: [tui, keybindings, dashboard, workflow, ux]
 
 The TUI is a bento-grid dashboard rendered by `src/tui/` on top of the [App state machine](../architecture/overview.md). Tabs are tracked as `App.active_tab: usize` (0-based); every overlay (forms, pickers, confirms) is an `AppMode` variant in `src/app/types.rs`, dispatched in `App::handle_key` (`src/app/keys.rs`) and drawn from `src/tui/mod.rs` with its screen under `src/tui/screens/`.
 
-All bindings below are defaults from `KeybindsConfig::default()` in `src/keybinds.rs`; every `KeyAction` (86 of them, listed in `KeyAction::ALL`) can be rebound, so the code always reads the configured chord. A few overlay-internal keys are hard-coded and noted as such.
+All bindings below are defaults from `KeybindsConfig::default()` in `src/keybinds.rs`; every `KeyAction` (109 of them, listed in `KeyAction::ALL`, 15 of them `Map*`) can be rebound, so the code always reads the configured chord. A few overlay-internal keys are hard-coded and noted as such.
 
 ## Tabs
 
@@ -23,6 +23,7 @@ Order and digits come from `src/tui/widgets/tab_bar.rs` and `App::try_tab_switch
 | `3` | 2 | tunnels | `screens/tunnels.rs` | [tunnel manager](tunnels.md) |
 | `4` / `i` | 3 | identities | `screens/keys.rs` | [identities & ssh-agent](../domain/hosts-identities.md#identities) |
 | `5` | 4 | audit | `screens/audit.rs` | `auth_events` ([data model](../architecture/data-model.md)) |
+| `6` | 5 | map | `screens/map.rs` (state in `src/app/network_map.rs`, model in `src/map/`) | [network map](network-map.md) |
 
 Configs written before the SFTP tab existed are re-digited once by `KeybindsConfig::migrate_pre_sftp_tabs`.
 
@@ -30,7 +31,7 @@ While a dashboard tab's text input is active (the SFTP host search or file filte
 
 ## Hosts tab panels
 
-The hosts tab is a panel grid (`PanelId` in `src/app/types.rs`): `Hosts` (left column), `Detail` / `Agent` / `Latency` (middle), `Recent` / `Auth` / `Ping` (right), an `SshLog` strip along the bottom, and a floating `Broadcast` panel while a [broadcast](broadcast.md) run is live. `Alt+Arrows` move focus spatially; `z` or `Alt+Enter` zooms the focused panel to the full body (Esc unzooms). In a zoomed panel, `j`/`k`/PageUp/PageDown scroll; Enter connects from the zoomed Ping or Recent panel; `f`/`r` cycle status and range in the zoomed Auth panel; `d` removes the selected key in the zoomed Agent panel (`ssh-add -d`, needs a file path); mouse drag copies the panel text via OSC 52.
+The hosts tab is a panel grid (`PanelId` in `src/app/types.rs`): `Hosts` (left column), `Detail` / `Agent` / `Latency` (middle), `Recent` / `Auth` / `Ping` (right), an `SshLog` panel spanning the middle and right columns below the two stacks, and a floating `Broadcast` panel while a [broadcast](broadcast.md) run is live. Geometry is `src/tui/dashboard_layout.rs`: three columns with one-cell gutters (target 132x38, margins 2/1/0 by width), stacked panels and the SSH log separated by `PANEL_GAP` (1 blank row, the same as the gutter), both stacks `STACK_H` tall so the log starts on one row in each column; the log takes every remaining row to the bottom of the body and is dropped when fewer than `STACK_H + PANEL_GAP + 4` rows exist. A short column shrinks the middle panel (Agent / Auth) before dropping the last one (Latency / Ping, `MIN_LAST_H` 3 rows). `+`/`-` widen or narrow the hosts column (the other two shrink to a 16-column minimum). Switching hosts to SFTP morphs instead of redrawing: the SFTP host picker (`sftp_picker_rect`) shares the hosts column's left edge, and the hosts rect grows out of `col_left` in place (`render_hosts_sftp_morph`, `lerp_rect`). `Alt+Arrows` move focus spatially; `z` or `Alt+Enter` zooms the focused panel to the full body with the same rect-interpolating morph (Esc unzooms). In a zoomed panel, `j`/`k`/PageUp/PageDown scroll; Enter connects from the zoomed Ping or Recent panel; `f`/`r` cycle status and range in the zoomed Auth panel; `d` removes the selected key in the zoomed Agent panel (`ssh-add -d`, needs a file path); mouse drag copies the panel text via OSC 52.
 
 ## Overlays
 
@@ -65,13 +66,19 @@ Hosts: `Enter` connect (or fold on a group header), `a`/`e`/`d`/`Shift+D` add/ed
 
 Sessions on the dashboard (only while at least one session exists): `Ctrl+Shift+S` resume, `Ctrl+[`/`Ctrl+]` (or `Ctrl+PageUp`/`Ctrl+PageDown`) move along the session strip, `Alt+S` switcher, `Ctrl+T` new tab, `Ctrl+W` close, `Ctrl+Shift+F` SFTP for the selected session's host. In-session keys are on the [sessions page](sessions-sftp.md#embedded-ssh-sessions-srcsession).
 
-Identities: arrows move in the card grid, `[`/`]` fewer/more columns, `a` add, `g` generate, `e` edit, `d` delete, `p`/`r` add to / remove from ssh-agent, `Shift+P` push key, `H` known hosts, Esc back to hosts.
+Identities: arrows move in the card grid, `[`/`]` fewer/more columns, `a` add, `g` generate, `e` edit, `d` delete, `p`/`r` add to / remove from ssh-agent, `Shift+P` push key, `H` known hosts, `/` inline fuzzy filter (name, user, key or certificate path; `Enter` keeps it, `Esc` clears it), Esc back to hosts.
 
-Tunnels: `Enter` start/stop (also cancels a pending reconnect), `a`/`e`/`d` add/edit/delete, `x` kill process, `R` reconnect settings.
+Tunnels: `Enter` start/stop (also cancels a pending reconnect), `a`/`e`/`d` add/edit/delete, `x` kill process, `R` reconnect settings, `/` inline fuzzy filter (label, host, ports, type; `Enter` keeps it, `Esc` clears it; see [tunnels](tunnels.md#tunnels-tab-keys)).
 
 Audit: `f` status filter (all/ok/fail), `r` range (all/24h/week/month).
 
+Map: arrows only (`MapUp/Down/Left/Right`; no `hjkl`), `Enter` connect, `e` edit, `/` filter, `#` tags, `B` blast radius (`n`/`N`, `b` broadcast), `o` tunnel lens (`x` start/stop), `u` use as jump, `t` test (then `H`/`P`/`l` on a failure), `y` copy the `ssh -J` command, `a` save a raw hop, `z` zoom, `Space`/`Shift+Z` fold; clicks select, double-click connects, the wheel moves the cursor (`ClickHit::MapCell`). All are `KeyAction::Map*` and rebindable. Full key table: [network map](network-map.md#map-tab-keys).
+
 The footer hints are built per tab in `footer_keybinds` (`src/tui/mod.rs`) and pin `resume`, `help`, `quit` (and an available update) to the tail so truncation never hides them. The full binding table is in `README.md` (`## Keybindings`) and the help overlay; the man page covers the CLI only.
+
+## Network map (tab 6)
+
+`App::handle_key_map` (`src/app/network_map.rs`) is the tab's own handler: it never falls through to the hosts-tab handler, and its filter line, tag picker and `u` picker own the keyboard while open (digits typed into the filter do not switch tabs). The model is the pure `src/map/` (`collect_hosts`, `Map::build`, `map::filter`, `map::hops`, `map::dot`); the renderer is `src/tui/screens/map.rs`. Chain rule, hop editor, test connect and `sshub map --dot` are on the [network map page](network-map.md).
 
 ## Mouse
 

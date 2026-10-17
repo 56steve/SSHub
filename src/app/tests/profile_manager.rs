@@ -400,6 +400,7 @@ fn detached_local_session_blocks_switch_until_closed() {
     let (_dir, mut app, _) = profile_app(&["default", "work"]);
     let session = crate::session::Session::spawn(
         crate::session::SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sleep".into(), "30".into()],
             display_name: "local".into(),
             meta: crate::session::SessionMeta::default(),

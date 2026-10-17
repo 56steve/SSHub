@@ -204,6 +204,47 @@ impl App {
         self.mode = AppMode::BroadcastPickTarget;
     }
 
+    /// Open the wizard on an explicit host set (managed ids), skipping the
+    /// target menu: straight to the command prompt. Esc steps back to a menu
+    /// holding just this set.
+    pub(crate) fn open_broadcast_for_hosts(&mut self, ids: Vec<i64>, label: String) {
+        if self
+            .broadcast
+            .as_ref()
+            .is_some_and(|b| !crate::broadcast::all_terminal(&b.results))
+        {
+            self.host_notice = Some("A broadcast run is already in progress.".into());
+            return;
+        }
+        if self.broadcast.is_some() {
+            self.slide_broadcast_out();
+        }
+        self.broadcast_setup = Some(BroadcastSetup {
+            options: vec![BroadcastTarget::Hosts { ids, label }],
+            menu_selected: 0,
+            target_label: String::new(),
+            command: String::new(),
+            cursor: 0,
+            candidates: Vec::new(),
+            preview_selected: 0,
+            edit_targets: false,
+        });
+        self.host_notice = None;
+        self.resolve_broadcast_candidates();
+        let any = self
+            .broadcast_setup
+            .as_ref()
+            .is_some_and(|s| !s.candidates.is_empty());
+        if any {
+            self.mode = AppMode::BroadcastCommand;
+        } else {
+            self.broadcast_setup = None;
+            if self.host_notice.is_none() {
+                self.host_notice = Some("No saved hosts to broadcast to.".into());
+            }
+        }
+    }
+
     /// Stage 1: the target-pick menu. Up/Down move the highlight (clamped),
     /// Enter resolves the highlighted target to candidates and advances to the
     /// command prompt, Esc closes the wizard.
@@ -250,10 +291,14 @@ impl App {
         let target_label = match &target {
             BroadcastTarget::Group { label, .. } => format!("group: {label}"),
             BroadcastTarget::Tag { name } => format!("#{name}"),
+            BroadcastTarget::Hosts { label, .. } => label.clone(),
         };
 
         let pw_store = self.password_store.as_ref();
         let launcher = &self.store;
+        // Hosts whose ProxyJump cannot be resolved are left out: running ssh
+        // without the jump would reach them directly, which nobody asked for.
+        let mut refused: Vec<String> = Vec::new();
         let candidates: Vec<BroadcastCandidate> = self
             .hosts
             .iter()
@@ -262,6 +307,7 @@ impl App {
                 let matches = match &target {
                     BroadcastTarget::Group { id, .. } => entry.group_ids().contains(id),
                     BroadcastTarget::Tag { name } => entry.tags().iter().any(|t| t == name),
+                    BroadcastTarget::Hosts { ids, .. } => ids.contains(&host_id),
                 };
                 if !matches {
                     return None;
@@ -269,28 +315,48 @@ impl App {
                 // Resolve a stored password/passphrase now (same path connect +
                 // detect use); threaded into the run so password hosts auth via
                 // SSH_ASKPASS instead of failing under BatchMode.
-                let effective = entry
-                    .managed()
-                    .and_then(|m| launcher.resolve_connection(m).ok());
+                let effective = match entry.managed().map(|m| launcher.resolve_connection(m)) {
+                    Some(Ok(r)) => Some(r),
+                    Some(Err(e)) => {
+                        refused.push(format!("{}: {e:#}", entry.name()));
+                        return None;
+                    }
+                    None => None,
+                };
                 let secret = resolve_pending_secret(
                     entry,
                     effective.as_ref().and_then(|r| r.identity.as_ref()),
                     pw_store,
                 )
                 .0;
+                let hops = hop_secrets(
+                    &self.store,
+                    &self.hosts,
+                    pw_store,
+                    effective.as_ref().and_then(|r| r.proxy_jump.as_deref()),
+                );
                 Some(BroadcastCandidate {
                     host_id,
                     host_name: entry.name().to_string(),
                     argv: match (entry.managed(), effective.as_ref()) {
-                        (Some(m), Some(r)) => resolved_session_argv(m, r),
+                        // A one-shot command needs ssh: mosh has no such mode.
+                        (Some(m), Some(r)) => {
+                            let mut r = r.clone();
+                            r.transport = crate::session_transport::SessionTransport::Ssh;
+                            resolved_session_argv(m, &r)
+                        }
                         _ => ssh_argv_for_entry(entry),
                     },
                     secret,
+                    hops,
                     selected: true,
                 })
             })
             .collect();
 
+        if !refused.is_empty() {
+            self.host_notice = Some(format!("Not included: {}", refused.join("; ")));
+        }
         if let Some(s) = self.broadcast_setup.as_mut() {
             s.candidates = candidates;
             s.target_label = target_label;
@@ -427,6 +493,7 @@ impl App {
                 host_name: c.host_name.clone(),
                 argv: c.argv.clone(),
                 secret: c.secret.clone(),
+                hops: c.hops.clone(),
             })
             .collect();
 

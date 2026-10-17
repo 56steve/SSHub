@@ -31,7 +31,12 @@ pub fn render_tunnels(frame: &mut Frame, area: Rect, app: &App) {
     let summary_y = area.y;
     let active = app.tunnel_manager.active_count();
     let total = app.tunnels.len();
-    let summary = format!("{total} tunnels  {active} active");
+    let view = app.tunnel_view();
+    let summary = if app.tunnel_filter.is_empty() {
+        format!("{total} tunnels  {active} active")
+    } else {
+        format!("{}/{total} tunnels  {active} active", view.len())
+    };
     buf.set_string(
         inner_x,
         summary_y,
@@ -62,6 +67,17 @@ pub fn render_tunnels(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    // The filter bar sits on the spacer row under the summary.
+    if app.list_filter_editing || !app.tunnel_filter.is_empty() {
+        crate::tui::widgets::filter_bar(
+            buf,
+            Rect::new(inner_x, summary_y + 1, inner_w, 1),
+            &app.tunnel_filter,
+            app.list_filter_editing,
+            theme,
+        );
+    }
+
     // Optional error detail + spacer, then table header
     let data_y = data_top(area, app);
     let header_y = data_y - 2;
@@ -89,23 +105,21 @@ pub fn render_tunnels(frame: &mut Frame, area: Rect, app: &App) {
     // Row 4+: Data rows
     let max_rows = (area.y + area.height).saturating_sub(data_y) as usize;
 
-    let visible_rows = max_rows.min(app.tunnels.len());
-    let scroll = if app.tunnel_selected >= max_rows {
-        app.tunnel_selected - max_rows + 1
+    let visible_rows = max_rows.min(view.len());
+    let sel_pos = view
+        .iter()
+        .position(|&i| i == app.tunnel_selected)
+        .unwrap_or(0);
+    let scroll = if sel_pos >= max_rows {
+        sel_pos - max_rows + 1
     } else {
         0
     };
 
-    for (i, tunnel) in app
-        .tunnels
-        .iter()
-        .skip(scroll)
-        .take(visible_rows)
-        .enumerate()
-    {
+    for (i, &tunnel_idx) in view.iter().skip(scroll).take(visible_rows).enumerate() {
+        let tunnel = &app.tunnels[tunnel_idx];
         let y = data_y + i as u16;
-        let row_idx = scroll + i;
-        let is_selected = row_idx == app.tunnel_selected;
+        let is_selected = tunnel_idx == app.tunnel_selected;
         let status = app.tunnel_manager.status(tunnel.id);
         let uptime = app.tunnel_manager.uptime_secs(tunnel.id);
 
@@ -133,8 +147,12 @@ pub fn render_tunnels(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     // Empty state
-    if app.tunnels.is_empty() {
-        let msg = "No tunnels — press 'a' to add one";
+    if view.is_empty() {
+        let msg = if app.tunnels.is_empty() {
+            "No tunnels — press 'a' to add one"
+        } else {
+            "No tunnels match the filter"
+        };
         let x = inner_x + (inner_w.saturating_sub(msg.len() as u16)) / 2;
         let y = data_y + 2.min(max_rows.saturating_sub(1) as u16);
         buf.set_string(x, y, msg, theme.style(StyleRole::TunnelsEmpty));
@@ -144,7 +162,7 @@ pub fn render_tunnels(frame: &mut Frame, area: Rect, app: &App) {
 /// The selected tunnel's status and failure detail, when the tab shows that
 /// detail on its own line above the table.
 fn selected_detail(app: &App) -> Option<(&str, &str)> {
-    let tunnel = app.tunnels.get(app.tunnel_selected)?;
+    let tunnel = app.selected_tunnel()?;
     let status = app.tunnel_manager.status(tunnel.id);
     if !matches!(status, "gave_up" | "error" | "reconnecting") {
         return None;

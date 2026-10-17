@@ -186,6 +186,14 @@ impl App {
         };
         let default_username = optional_field(&form.default_username);
         let default_proxy_jump = optional_field(&form.default_proxy_jump);
+        if let Some(problem) = default_proxy_jump
+            .as_deref()
+            .and_then(super::hop_editor::proxy_jump_problem)
+        {
+            self.host_notice = Some(problem);
+            self.group_form = Some(form);
+            return Ok(());
+        }
 
         if let Some(id) = form.id {
             self.store.update_group(

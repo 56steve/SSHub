@@ -28,7 +28,7 @@ Order matters and is fixed:
    by contract: no database is opened), then the subcommands accepted by
    `cli::is_subcommand` (`host`, `connect`, `exec`, `list`, `tunnel`, `group`,
    `groups`, `identity`, `tags`, `sync`, `import`, `export`, `completions`,
-   `sftp`, `audit`). See [CLI](../workflows/cli.md).
+   `sftp`, `audit`, `map`). See [CLI](../workflows/cli.md).
 4. `--help`, `--version`; an unknown positional exits 2; `--dry-run` exits 0.
 5. `sshub::run_with(startup)` starts the TUI.
 
@@ -62,32 +62,36 @@ parse global flags -> profile::resolve_startup -> (picker session: splash + pick
 `POLL_INTERVAL = 50ms`; while a panel animation plays (`app.animating()`) the
 poll window drops to 16 ms. Each iteration:
 
-1. `terminal.size()` becomes `app.terminal_area`. Every session is `drain`ed
-   (so background tabs keep up); each session on screen is `resize`d to the grid
-   of its pane (`App::pane_views`, a no-op when unchanged), sessions out of view
-   keep their last size and exited ones are never resized. The size comes from
-   `terminal.size()`, not from crossterm resize events.
-2. Finished key-push sessions are written to the audit log.
-3. `app.poll_authentication()` collects secrets answered in auth modals.
-4. `app.relay_visible_session_clipboard()` relays OSC 52 writes of the visible
-   session only (in a split, the focused pane's), dropping the rest (before diagnostics, so a failed relay is
-   logged in the same frame).
-5. Session diagnostics feed the SSH log panel; a newly connected session clears
-   its host's SSH log; a visible session that produced output is promoted from
-   `Connecting` to `Session`.
-6. `app.refresh_agent_info()`, then `terminal.draw(|f| tui::render(f, app))`.
-7. `poll_keys_and_watcher(app)`: drains **all** queued crossterm events
+1. `terminal.size()` becomes `app.terminal_area`. `app.sync_panes()` reconciles
+   the split-view layout with the live sessions. Every session is `drain`ed (so
+   background tabs keep up); each session on screen is `resize`d to the grid of
+   its pane (`App::session_grids` from `App::pane_views`, a no-op when
+   unchanged), sessions out of view keep their last size and exited ones are
+   never resized. The size comes from `terminal.size()`, not from crossterm
+   resize events.
+2. `app.poll_authentication()` collects secrets answered in auth modals.
+3. `app.relay_visible_session_clipboard()` relays OSC 52 writes of the visible
+   session only (in a split, the focused pane's), dropping the rest (before
+   diagnostics are collected, so a failed relay is logged in the same frame).
+4. Session diagnostics (handshake lines kept by `session::keep_diagnostic`)
+   are collected, finished key-push sessions are written to the audit log,
+   a newly connected session clears its host's SSH log, the diagnostics feed
+   the SSH log panel, and a visible session that produced output is promoted
+   from `Connecting` to `Session`.
+5. `app.refresh_agent_info()`, then `terminal.draw(|f| tui::render(f, app))`.
+6. `poll_keys_and_watcher(app)`: drains **all** queued crossterm events
    (`handle_key`, `handle_mouse`, `handle_paste`; draining one per frame made
    pastes crawl at about 20 chars/s), then non-blocking drains in this order:
-   config watcher (any event triggers `reload_hosts`), ping results (30-sample
-   ring per host, `PING_UNREACHABLE` marker), SFTP events (`sftp_rx` then the
-   left pane's `sftp_rx2`), OS-detect results, `poll_update`, `tick_broadcast`,
+   config watcher (any event triggers `reload_hosts`), `poll_test_run`
+   (map / hop-editor test connect), ping results (30-sample ring per host,
+   `PING_UNREACHABLE` marker), SFTP events (`sftp_rx` then the left pane's
+   `sftp_rx2`), OS-detect results, `poll_update`, `tick_broadcast`,
    `tick_tunnels`, selection edge-autoscroll, `refresh_auth_cache` (10 s
    throttle) and finally `detect_tab_switch` (must run after the drains so a
    mode change from a worker event arms its slide in the same tick).
-8. `apply_pending_profile(app, load_profile_app)`: an in-app profile switch
+7. `apply_pending_profile(app, load_profile_app)`: an in-app profile switch
    builds the replacement `App` first and swaps only on success.
-9. `should_quit` → `app.shutdown_all()` and exit.
+8. `should_quit` → `app.shutdown_all()` and exit.
 
 ## App state machine (`src/app/`)
 
@@ -120,7 +124,12 @@ poll window drops to 16 ms. Each iteration:
 - **Tabs are not an enum**: `App.active_tab: usize`, 0 hosts
   (`handle_key_normal`), 1 SFTP (`handle_key_sftp`), 2 tunnels
   (`handle_key_tunnels`), 3 identities (`handle_key_keychain`), 4 audit
-  (`handle_key_audit`). No type safety; grep `active_tab` when adding one.
+  (`handle_key_audit`), 5 network map (`handle_key_map`), dispatched by
+  `handle_key_dashboard_tab`. No type safety; grep `active_tab` when adding
+  one. Tabs 2 and 3 take an inline fuzzy filter (`/`, `list_filter_editing`);
+  the map tab and the host form's hop editor (`App.hop_editor`) are
+  `Normal`/`HostForm` state, not extra modes. While a tab text input is open
+  it owns typed keys (`dashboard_text_input_active`).
 - Keybindings are data: `KeyAction` plus `KeybindsConfig` in `src/keybinds.rs`;
   `App::is_action` matches a key against the configured binds.
 
@@ -132,20 +141,26 @@ poll window drops to 16 ms. Each iteration:
    ([sessions](../workflows/sessions-sftp.md)), painted by
    `src/session/render.rs` (including ghost-text suggestions).
 2. Otherwise the bento-grid dashboard from `src/tui/dashboard_layout.rs`:
-   header, tab bar, body, footer. The tab body is dispatched on `active_tab`;
-   footer hints are built per tab in `src/tui/mod.rs`.
+   header, tab bar, body, footer. Panels in a column are separated by
+   `PANEL_GAP` (one blank row, like the column gutter) and every column runs
+   to the last body row. The tab body is dispatched on `active_tab`; footer
+   hints are built per tab in `src/tui/mod.rs`.
 3. Overlays are dispatched on `app.mode`. `fit_popup` clamps popup rects so a
    terminal smaller than the popup cannot panic `u16::clamp`.
 4. Motion: `src/tui/tween.rs` (eased slides), `src/tui/blit.rs` (cell-level
    slide/fade copies), `TAB_ANIM = 220 ms`; all motion is skipped with
-   `[appearance] disable_animation`. Startup splash: `src/tui/animation.rs`
-   (33 ms poll).
+   `[appearance] disable_animation`. Switching between hosts (0) and the SFTP
+   picker (1) is a morph (`render_hosts_sftp_morph`): the hosts pane keeps its
+   left edge and stretches in place while the other columns slide off right;
+   other switches slide the whole body (`render_tab_slide`). Startup splash:
+   `src/tui/animation.rs` (33 ms poll).
 
 - **Screens** (`src/tui/screens/`): audit, auth, broadcast, field_picker,
-  group_form, group_manage, help, host_form, keybind_editor, keychain, keygen,
-  keys, known_hosts, log_browser, palette, push_key_pickers, session_picker,
-  settings, sftp, snippet_form, snippet_manage, snippet_picker, tag_filter,
-  theme_picker, tunnel_reconnect, tunnels.
+  group_form, group_manage, help, hop_lines, host_form, keybind_editor,
+  keychain, keygen, keys, known_hosts, log_browser, map, palette,
+  push_key_pickers, session_picker, settings, sftp, snippet_form,
+  snippet_manage, snippet_picker, tag_filter, theme_picker, tunnel_reconnect,
+  tunnels.
 - **Widgets** (`src/tui/widgets/`): footer, header, hosts_panel, middle_stack,
   panel_box, right_stack, tab_bar.
 - **Colours** come only from the active `ResolvedTheme` (`app.theme()`);
@@ -161,6 +176,7 @@ poll window drops to 16 ms. Each iteration:
 | OS detect (`src/osinfo/detect.rs`) | `new_with_profile` | `os_detect_rx` | same |
 | Release check / install (`src/update.rs`) | `start_update_check`, `press_update_key` | `update.rx` | `poll_update` |
 | Broadcast pool (`src/broadcast/mod.rs`) | broadcast wizard | `broadcast: Option<BroadcastState>`, field `rx` | `tick_broadcast` |
+| Test connect (`src/ssh/test_connect.rs`, one `ssh ... true` per hop) | map `t`, hop editor | `test_run: Option<TestRun>`, field `rx` | `poll_test_run` |
 | Tunnels (`src/tunnel/`) | `TunnelManager` children | polled, no channel | `tick_tunnels` |
 | PTY reader/writer (`src/session/pty.rs`) | each session | `PtyRuntime` | `Session::drain` |
 
@@ -174,7 +190,11 @@ poll window drops to 16 ms. Each iteration:
   [tunnels](../workflows/tunnels.md).
 - PTY writes go through a bounded `sync_channel` to a writer thread, so a remote
   that stops reading its input cannot block the frame loop.
-- `src/ssh/probe.rs` now only defines `SshLogEntry` / `LogLevel`; the SSH log
+- ssh's own `-E` log (the `-v` handshake) reaches a session as
+  `PtyEvent::SshLog` on a channel separate from the PTY and stderr; only that
+  channel is parsed for "connected" and host-key facts, so a server banner
+  cannot forge them (`Session::ssh_log`, `has_log_channel`).
+- `src/ssh/probe.rs` only defines `SshLogEntry` / `LogLevel`; the SSH log
   panel is fed by connect/session diagnostics, not by a background probe.
 
 ## File watcher
@@ -190,26 +210,27 @@ debounced (`WATCHER_DEBOUNCE = 300 ms`) and trigger `app.reload_hosts()`.
 |---|---|
 | `src/main.rs` | Dispatch order above, `db purge`, global `--help` |
 | `src/lib.rs` | `run_app_with`, picker loop, event loop, headless loop, `purge_profile_database` |
-| `src/app/` | `App` and one file per concern: `keys.rs` dispatch, `connect.rs` / `session_spawn.rs` / `session.rs` sessions, `auth.rs` auth modal, `adhoc.rs` connect-without-saving, `local_shell.rs`, `session_picker.rs`, `sftp.rs`, `tunnels.rs`, `audit.rs`, `broadcast.rs`, `snippets.rs`, `suggestions.rs` + `ghost.rs` (ghost text), `log_browser.rs`, `keygen.rs`, `push_key.rs`, `identities.rs`, `groups.rs`, `host_crud.rs`, `host_form.rs`, `host_detail.rs`, `hostlist.rs`, `tags.rs`, `import.rs`, `mouse.rs`, `theme_picker.rs`, `profile_manager.rs`, `profile_transfer.rs`, `update.rs`, `util.rs`, `types.rs`, `tests/` |
+| `src/app/` | `App` and one file per concern: `keys.rs` dispatch, `connect.rs` / `session_spawn.rs` / `session.rs` sessions, `panes.rs` (split view) + `workspaces.rs` (saved layouts), `auth.rs` auth modal, `adhoc.rs` connect-without-saving, `local_shell.rs`, `session_picker.rs`, `sftp.rs`, `tunnels.rs`, `audit.rs`, `broadcast.rs`, `snippets.rs`, `suggestions.rs` + `ghost.rs` (ghost text), `log_browser.rs`, `keygen.rs`, `push_key.rs`, `identities.rs`, `groups.rs`, `host_crud.rs`, `host_form.rs`, `hop_editor.rs`, `host_detail.rs`, `hostlist.rs`, `tags.rs`, `import.rs`, `mouse.rs` + `field_click.rs`, `network_map.rs`, `test_connect.rs`, `theme_picker.rs`, `profile_manager.rs`, `profile_transfer.rs`, `update.rs`, `util.rs`, `types.rs`, `tests/` |
 | `src/tui/` | Render pipeline, screens, widgets, layout, motion helpers |
 | `src/theme/` | Runtime theme system ([themes](themes.md)) |
 | `src/profile/` | Profile layout, picker, legacy migration ([profiles](profiles.md)) |
 | `src/store/` | `LauncherStore` and `launcher.db` schema, group defaults, snippets, log bookmarks, command history, cross-profile transfer engine ([data model](data-model.md)) |
 | `src/metadata/` | `metadata.db` for legacy ssh_config aliases |
+| `src/map/` | Pure network-map model: jump-host forest (`build.rs`, `Map`), hop-editor helpers (`hops.rs`), map filter grammar (`filter.rs`), Graphviz export (`dot.rs`, `sshub map --dot`) |
 | `src/hosts/` | `load_merged_hosts`, host CRUD helpers |
-| `src/ssh/` | Resolver, argv builders (`host.rs`, `safe_ssh_target`), agent, key files, certificates (`cert.rs`), ssh_config import/export |
-| `src/session/` | Embedded PTY sessions: `pty.rs`, `parser.rs` (vt100 plus query answers and OSC 52 capture), `render.rs`, `askpass.rs` (staged file), `askpass_channel.rs` (private socket), `interactive_auth.rs`, `auth_prompt.rs`, `history.rs`, `keys.rs` |
+| `src/ssh/` | Resolver, argv builders (`host.rs`, `safe_ssh_target`, the destination allowlist), agent, key files, certificates (`cert.rs`), ssh_config import/export, per-hop test connect (`test_connect.rs`) |
+| `src/session/` | Embedded PTY sessions: `pty.rs`, `parser.rs` (vt100 plus query answers and OSC 52 capture), `render.rs`, `askpass.rs` (staged file with hop references), `askpass_channel.rs` (private socket), `hop_auth.rs` (jump-hop credentials), `interactive_auth.rs`, `auth_prompt.rs`, `history.rs`, `keys.rs` |
 | `src/session_log.rs`, `src/log_browser.rs` | Session log writer and read-only browser backend |
 | `src/suggestions.rs`, `src/command_safety.rs` | Local suggestion ranking and the shared command indexing classifier |
 | `src/broadcast/` | Pure broadcast engine and bounded worker pool |
 | `src/sftp/` | libssh2 transport, worker thread, pure model |
-| `src/tunnel/` | `TunnelManager`, spawn, PID files, reconnect audit |
+| `src/tunnel/` | `TunnelManager`, spawn, PID files (with process start time), reconnect audit |
 | `src/known_hosts.rs` | Known hosts manager backend |
-| `src/credentials.rs` | `PasswordStore` implementations and Secret Service lookup |
+| `src/credentials.rs` | `PasswordStore` implementations (file store under a lock), `StoreLocator` / `SecretRef`, Secret Service lookup |
 | `src/update.rs` | Release check and in-place update |
 | `src/import/` | Termius CSV, PuTTY, mRemoteNG importers |
 | `src/osinfo/` | OS detection and logos |
-| `src/cli/` | Headless CLI (including `exec.rs`, `theme.rs`, `transfer.rs`) |
+| `src/cli/` | Headless CLI (including `exec.rs`, `map.rs`, `theme.rs`, `transfer.rs`) |
 | `src/config.rs`, `src/keybinds.rs` | `config.toml` model and keybindings |
 | `src/osc52.rs`, `src/secure_fs.rs`, `src/text_input.rs`, `src/search.rs`, `src/ping.rs`, `src/session_transport.rs`, `src/watcher.rs` | Small shared helpers |
 

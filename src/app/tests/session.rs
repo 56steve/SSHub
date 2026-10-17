@@ -17,6 +17,7 @@ pub(crate) fn enter_starts_embedded_session() {
     app.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
 
     let config = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec!["true".into()],
         display_name: "edge".into(),
         meta: crate::session::SessionMeta::default(),
@@ -64,6 +65,7 @@ pub(crate) fn ctrl_t_opens_host_picker() {
     app.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
 
     let cfg = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec!["true".into()],
         display_name: "edge".into(),
         meta: crate::session::SessionMeta::default(),
@@ -107,6 +109,7 @@ pub(crate) fn session_tabs_switch_detach_and_focus() {
     app.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
 
     let cfg = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec!["true".into()],
         display_name: "edge".into(),
         meta: crate::session::SessionMeta::default(),
@@ -163,6 +166,7 @@ pub(crate) fn shutdown_all_kills_detached_sessions() {
     app.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
 
     let cfg = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec!["sleep".into(), "30".into()],
         display_name: "edge".into(),
         meta: crate::session::SessionMeta::default(),
@@ -273,6 +277,7 @@ fn app_with_sessions(names: &[&str]) -> App {
     app.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
     for name in names {
         let cfg = crate::session::SessionConfig {
+            hops: Vec::new(),
             argv: vec!["true".into()],
             display_name: (*name).into(),
             meta: crate::session::SessionMeta::default(),
@@ -305,6 +310,7 @@ fn app_with_background_session(hosts: Vec<(&str, SshHost)>) -> App {
 
     let name = app.hosts[0].name().to_string();
     let cfg = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec!["true".into()],
         display_name: name.clone(),
         meta: crate::session::SessionMeta::default(),
@@ -790,7 +796,7 @@ pub(crate) fn session_switcher_hotkey_works_from_every_dashboard_tab() {
 pub(crate) fn session_strip_binds_work_on_every_dashboard_tab() {
     // Footer advertises resume / new tab on every tab once a session exists;
     // those used to only fire on hosts (active_tab == 0).
-    for tab in 0..=4u8 {
+    for tab in 0..=5u8 {
         let mut app = app_with_background_session(vec![("edge", host("edge"))]);
         app.active_tab = tab as usize;
 
@@ -826,6 +832,7 @@ pub(crate) fn session_strip_cycle_and_sftp_from_non_hosts_tab() {
     let mut app = app_with_background_session(vec![("edge", host("edge"))]);
     // Second session so tab cycling is observable.
     let cfg = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec!["true".into()],
         display_name: "edge".into(),
         meta: crate::session::SessionMeta::default(),
@@ -888,6 +895,7 @@ fn app_with_pending_clipboard_writes(n: usize) -> App {
     app.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
     for i in 0..n {
         let cfg = crate::session::SessionConfig {
+            hops: Vec::new(),
             argv: vec!["true".into()],
             display_name: format!("s{i}"),
             meta: crate::session::SessionMeta::default(),
@@ -1000,6 +1008,7 @@ pub(crate) fn the_config_opt_out_drops_every_relay() {
 #[test]
 pub(crate) fn a_wheel_that_cannot_scroll_leaves_the_selection_where_it_is() {
     let cfg = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec!["true".into()],
         display_name: "edge".into(),
         meta: crate::session::SessionMeta::default(),
@@ -1027,6 +1036,7 @@ pub(crate) fn a_wheel_that_cannot_scroll_leaves_the_selection_where_it_is() {
 
     // On the primary screen, with scrollback to walk, it does follow the view.
     let cfg = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec!["true".into()],
         display_name: "edge".into(),
         meta: crate::session::SessionMeta::default(),
@@ -1058,6 +1068,7 @@ pub(crate) fn a_wheel_on_the_alternate_screen_names_the_tmux_switch_once() {
     let mut app = test_app(vec![("edge", host("edge"))]);
     app.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
     let cfg = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec!["true".into()],
         display_name: "edge".into(),
         meta: crate::session::SessionMeta::default(),
@@ -1101,6 +1112,7 @@ pub(crate) fn a_wheel_on_the_alternate_screen_names_the_tmux_switch_once() {
 
     // And on the primary screen it never fires — the wheel scrolls for real.
     let cfg = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec!["true".into()],
         display_name: "plain".into(),
         meta: crate::session::SessionMeta::default(),

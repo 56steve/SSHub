@@ -14,6 +14,9 @@ pub struct AuthModal {
     pub checkbox_focused: bool,
     pub changed_key: bool,
     pub scroll: u16,
+    /// The prompt is a jump hop's, not the destination's: the saved hop host's
+    /// name, or `None` inside `Some` for a hop that is not a saved host.
+    pub hop: Option<Option<String>>,
 }
 
 impl App {
@@ -81,13 +84,26 @@ impl App {
         };
         let session = &mut self.sessions[index];
         let changed_key = session.phase.is_terminal() && session.host_key_changed();
+        // What `A` would delete, shown before it can be pressed: the lookup
+        // name and the file ssh itself named, never text from a server banner.
+        let repair = if changed_key {
+            match session.changed_key_target() {
+                Some((spec, path)) => {
+                    format!("\nA removes the entry for {spec}\nfrom {}", path.display())
+                }
+                None => "\nThe known_hosts entry cannot be identified safely: repair it by hand."
+                    .to_string(),
+            }
+        } else {
+            String::new()
+        };
         let auth = session
             .auth
             .as_mut()
             .expect("candidate has authentication state");
         let prompt = if changed_key {
             auth.changed_key_shown = true;
-            "WARNING: the server identity changed. This may be an attack. Verify the new fingerprint independently before removing the old key and reconnecting.".into()
+            format!("WARNING: the server identity changed. This may be an attack. Verify the new fingerprint independently before removing the old key and reconnecting.\n{repair}")
         } else {
             auth.request
                 .as_ref()
@@ -106,6 +122,8 @@ impl App {
         // deliberate act. A pre-checked box stored key passphrases as host
         // passwords for people who never asked for either.
         let can_remember = auth.save_target(class).is_some();
+        let hop = (!changed_key && auth.request_is_from_a_hop())
+            .then(|| auth.request_hop().map(|h| h.name.clone()));
         self.auth_modal = Some(AuthModal {
             session: index,
             prompt,
@@ -118,6 +136,7 @@ impl App {
             checkbox_focused: false,
             changed_key,
             scroll: 0,
+            hop,
         });
         self.active_session = Some(index);
         self.mode = AppMode::AuthPrompt;
@@ -319,6 +338,7 @@ mod tests {
     fn channel_modal_masks_paste_reopens_and_caps_attempts() {
         let mut app = crate::app::tests::test_app(vec![]);
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 30".into()],
             display_name: "offline".into(),
             meta: SessionMeta::default(),
@@ -393,6 +413,7 @@ mod tests {
         let mut channels = Vec::new();
         for name in ["alpha", "beta"] {
             let config = SessionConfig {
+                hops: Vec::new(),
                 argv: vec!["sh".into(), "-c".into(), "sleep 30".into()],
                 display_name: name.into(),
                 meta: SessionMeta::default(),
@@ -524,6 +545,7 @@ mod tests {
             // The child cannot emit an authenticated marker until after the
             // helper received the modal answer and the pre-success assertions.
             let config = SessionConfig {
+                hops: Vec::new(),
                 argv: vec![
                     "sh".into(), "-c".into(),
                     "while [ ! -f \"$1\" ]; do sleep 0.01; done; if [ \"$2\" = yes ]; then printf 'Authenticated to offline using password.\\n' >&2; exec cat; else exit 1; fi".into(),
@@ -730,6 +752,7 @@ mod tests {
         // Delivery leg: the helper receives the saved value, no modal remains.
         app.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 24);
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 30".into()],
             display_name: "restored".into(),
             meta: SessionMeta::default(),
@@ -837,6 +860,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let gate = root.path().join("release-child");
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),
@@ -932,6 +956,7 @@ mod tests {
     fn cancellation_closes_helper_then_child_and_fails_open_screen() {
         let mut app = crate::app::tests::test_app(vec![]);
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 30".into()],
             display_name: "offline".into(),
             meta: SessionMeta::default(),
@@ -989,6 +1014,7 @@ mod tests {
         let prompt = "The authenticity of host '[127.0.0.1]:2222 ([127.0.0.1]:2222)' can't be established.\nED25519 key fingerprint is: SHA256:MXUTTgmDROalky/NE8jlcGeW+758bjK3+hOz3jbY4l4\nThis key is not known by any other names.\nAre you sure you want to continue connecting (yes/no/[fingerprint])?";
         let mut app = crate::app::tests::test_app(vec![]);
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 30".into()],
             display_name: "offline".into(),
             meta: SessionMeta::default(),
@@ -1033,8 +1059,14 @@ mod tests {
         std::fs::write(&keys, original).unwrap();
         let mut app = crate::app::tests::test_app(vec![]);
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "printf 'WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\\nOffending ED25519 key in %s:1\\nHost key for [alias]:2222 has changed and you have requested strict checking.\\n' \"$1\" >&2; sleep 30".into(), "fixture".into(), keys.to_string_lossy().into_owned()],
-            display_name: "Ad-hoc label".into(), meta: SessionMeta::default(),
+            display_name: "Ad-hoc label".into(),
+            meta: SessionMeta {
+                address: Some("alias".into()),
+                port: Some(2222),
+                ..SessionMeta::default()
+            },
             pending_secret: None, key_push_identity: None, host_name: "original-adhoc-target".into(),
         };
         let mut session = Session::spawn(config, (24, 100), None).unwrap();
@@ -1052,6 +1084,10 @@ mod tests {
         ];
         app.poll_authentication();
         assert!(app.auth_modal.as_ref().unwrap().changed_key);
+        // The modal names exactly what `A` will delete, and from which file.
+        let shown = &app.auth_modal.as_ref().unwrap().prompt;
+        assert!(shown.contains("[alias]:2222"), "{shown}");
+        assert!(shown.contains(&keys.display().to_string()), "{shown}");
         for code in [KeyCode::Enter, KeyCode::Char('a')] {
             app.handle_key(KeyEvent::new(code, KeyModifiers::empty()))
                 .unwrap();
@@ -1091,6 +1127,7 @@ mod tests {
                 checkbox_focused: false,
                 changed_key: false,
                 scroll: 0,
+                hop: None,
             });
             app.mode = AppMode::AuthPrompt;
             for &code in keys {
