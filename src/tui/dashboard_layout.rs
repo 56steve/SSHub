@@ -16,12 +16,16 @@ use ratatui::layout::Rect;
 
 use super::widgets::{middle_stack, right_stack};
 
+/// Blank rows between stacked panels, and between the stacks and the SSH log:
+/// the same single cell as the gutter between columns.
+pub const PANEL_GAP: u16 = 1;
 /// Natural height of the middle and right stacks (host + agent + latency, and
-/// recent + auth + ping). The two must agree or the SSH log below them would
-/// start at a different row in each column.
-pub const STACK_H: u16 = middle_stack::HOST_H + middle_stack::AGENT_H + middle_stack::LATENCY_H;
+/// recent + auth + ping, a gap between each). The two must agree or the SSH log
+/// below them would start at a different row in each column.
+pub const STACK_H: u16 =
+    middle_stack::HOST_H + middle_stack::AGENT_H + middle_stack::LATENCY_H + 2 * PANEL_GAP;
 const _: () = assert!(
-    STACK_H == right_stack::RECENT_H + right_stack::AUTH_H + right_stack::PING_H,
+    STACK_H == right_stack::RECENT_H + right_stack::AUTH_H + right_stack::PING_H + 2 * PANEL_GAP,
     "the middle and right stacks must be equally tall"
 );
 /// Smallest SSH log panel worth drawing: borders plus two rows.
@@ -86,14 +90,14 @@ pub fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
 /// when there is no room for one, the stacks take the whole body instead.
 pub fn hosts_stack_split(areas: &DashboardAreas) -> (u16, Option<Rect>) {
     let body_h = areas.col_mid.height;
-    if body_h < STACK_H + MIN_LOG_H {
+    if body_h < STACK_H + PANEL_GAP + MIN_LOG_H {
         return (body_h, None);
     }
     let log = Rect::new(
         areas.col_mid.x,
-        areas.col_mid.y + STACK_H,
+        areas.col_mid.y + STACK_H + PANEL_GAP,
         areas.col_mid.width + 1 + areas.col_right.width,
-        body_h - STACK_H,
+        body_h - STACK_H - PANEL_GAP,
     );
     (STACK_H, Some(log))
 }
@@ -196,7 +200,7 @@ mod tests {
 
     #[test]
     fn hosts_columns_tile_the_body_to_the_bottom() {
-        for (w, h) in [(132u16, 38u16), (100, 30), (80, 24), (200, 60), (132, 28)] {
+        for (w, h) in [(132u16, 38u16), (100, 34), (80, 24), (200, 60), (132, 28)] {
             let a = dashboard_layout(Rect::new(0, 0, w, h));
             let (stack_h, log) = hosts_stack_split(&a);
             let bottom = a.body.bottom();
@@ -205,8 +209,8 @@ mod tests {
                     assert_eq!(stack_h, STACK_H, "{w}x{h}");
                     assert_eq!(
                         log.y,
-                        a.col_mid.y + stack_h,
-                        "{w}x{h}: log under the stacks"
+                        a.col_mid.y + stack_h + PANEL_GAP,
+                        "{w}x{h}: log one gap row under the stacks"
                     );
                     assert_eq!(log.bottom(), bottom, "{w}x{h}: log reaches the body bottom");
                     assert_eq!(log.x, a.col_mid.x);

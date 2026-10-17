@@ -16,7 +16,8 @@ All notable changes to SSHub are documented in this file.
 - **Hosts dashboard has no empty strip under the SSH log** - the log panel
   stopped one row short of the hosts list, and in terminals a few rows too
   short for it the middle and right columns ended early, leaving a blank band.
-  Every column now runs to the last row of the body.
+  Every column now runs to the last row of the body, and the stacked panes
+  and the log are separated by one blank row, the same as the column gutter.
 - **Hosts to SFTP no longer re-lays out the hosts list** - the SFTP host
   picker now shares the hosts tab's left edge. Switching tabs stretches the
   list in place while the dashboard columns slide off to the right, and the

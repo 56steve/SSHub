@@ -1879,6 +1879,7 @@ pub fn panel_zoom_source(
     use widgets::middle_stack::{AGENT_H, HOST_H};
     use widgets::right_stack::{AUTH_H, RECENT_H};
     let (stack_h, log) = dashboard_layout::hosts_stack_split(areas);
+    let gap = dashboard_layout::PANEL_GAP;
     let mid = areas.col_mid;
     let right = areas.col_right;
     // Each stacked panel's real slot (same heights the stacks lay out), so the
@@ -1886,23 +1887,25 @@ pub fn panel_zoom_source(
     match panel {
         PanelId::Hosts => areas.col_left,
         PanelId::Detail => Rect::new(mid.x, mid.y, mid.width, HOST_H),
-        PanelId::Agent => Rect::new(mid.x, mid.y + HOST_H, mid.width, AGENT_H),
+        PanelId::Agent => Rect::new(mid.x, mid.y + HOST_H + gap, mid.width, AGENT_H),
         PanelId::Latency => Rect::new(
             mid.x,
-            mid.y + HOST_H + AGENT_H,
+            mid.y + HOST_H + AGENT_H + 2 * gap,
             mid.width,
-            stack_h.saturating_sub(HOST_H + AGENT_H),
+            stack_h.saturating_sub(HOST_H + AGENT_H + 2 * gap),
         ),
         PanelId::Recent => Rect::new(right.x, right.y, right.width, RECENT_H),
-        PanelId::Auth => Rect::new(right.x, right.y + RECENT_H, right.width, AUTH_H),
+        PanelId::Auth => Rect::new(right.x, right.y + RECENT_H + gap, right.width, AUTH_H),
         PanelId::Ping => Rect::new(
             right.x,
-            right.y + RECENT_H + AUTH_H,
+            right.y + RECENT_H + AUTH_H + 2 * gap,
             right.width,
-            stack_h.saturating_sub(RECENT_H + AUTH_H),
+            stack_h.saturating_sub(RECENT_H + AUTH_H + 2 * gap),
         ),
         // SSH log spans mid+right along the bottom (see render_hosts_body).
-        PanelId::SshLog => log.unwrap_or_else(|| Rect::new(mid.x, mid.y + stack_h, mid.width, 0)),
+        PanelId::SshLog => {
+            log.unwrap_or_else(|| Rect::new(mid.x, mid.y + stack_h + gap, mid.width, 0))
+        }
         // Broadcast morphs from its own docked rect, handled elsewhere.
         PanelId::Broadcast => screens::broadcast::docked_rect(areas.body),
     }
@@ -2820,26 +2823,38 @@ mod tests {
     }
 
     #[test]
-    fn hosts_dashboard_columns_fill_the_body_without_gaps() {
-        for (w, h) in [(132u16, 38u16), (120, 28), (160, 60), (132, 27)] {
+    fn hosts_dashboard_panes_are_separated_by_one_blank_cell() {
+        use widgets::middle_stack::{AGENT_H, HOST_H};
+        use widgets::right_stack::{AUTH_H, RECENT_H};
+        let gap = dashboard_layout::PANEL_GAP;
+        for (w, h) in [(132u16, 38u16), (132, 32), (160, 60)] {
             let app = test_app_with_hosts();
             let buffer = render_to_buffer(&app, w, h);
             let areas = dashboard_layout::dashboard_layout_zoomed(Rect::new(0, 0, w, h), 0);
             let (stack_h, log) = dashboard_layout::hosts_stack_split(&areas);
+            let top = areas.body.y;
+            // Rows (relative to the body) that must be blank in each column.
+            let mid_gaps = [HOST_H, HOST_H + AGENT_H + gap];
+            let right_gaps = [RECENT_H, RECENT_H + AUTH_H + gap];
             for y in areas.body.top()..areas.body.bottom() {
-                let in_stack = y < areas.body.y + stack_h;
+                let rel = y - top;
+                let in_stack = rel < stack_h;
+                let mid_gap = mid_gaps.contains(&rel) || (log.is_some() && rel == stack_h);
+                let right_gap = right_gaps.contains(&rel) || (log.is_some() && rel == stack_h);
                 assert!(
                     drawn(&buffer, areas.col_left.x, y),
                     "{w}x{h} hosts edge, row {y}"
                 );
-                assert!(
+                assert_eq!(
                     drawn(&buffer, areas.col_mid.x, y),
-                    "{w}x{h} middle edge, row {y}"
+                    !mid_gap,
+                    "{w}x{h} middle column, row {y}"
                 );
-                if in_stack {
-                    assert!(
+                if in_stack || log.is_some() && rel == stack_h {
+                    assert_eq!(
                         drawn(&buffer, areas.col_right.x, y),
-                        "{w}x{h} right edge, row {y}"
+                        !right_gap,
+                        "{w}x{h} right column, row {y}"
                     );
                 }
             }
