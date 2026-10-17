@@ -73,7 +73,8 @@ man:
 install-completions: build
     #!/usr/bin/env bash
     set -euo pipefail
-    bin=target/release/sshub
+    # Ask cargo: worktrees build into a shared dir (see setup-shared-target).
+    bin="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')/release/sshub"
     bash_dir="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
     fish_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions"
     install -d "$bash_dir" "$fish_dir"
@@ -384,8 +385,9 @@ install: build install-completions
     #!/usr/bin/env bash
     set -euo pipefail
     bin="$HOME/.local/bin/sshub"
+    built="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')/release/sshub"
     term="$(command -v kitty || command -v ghostty || command -v alacritty || command -v foot || echo xterm)"
-    install -Dm755 target/release/sshub "$bin"
+    install -Dm755 "$built" "$bin"
     install -Dm644 man/sshub.1 "$HOME/.local/share/man/man1/sshub.1"
     install -Dm644 assets/sshub.svg "$HOME/.local/share/icons/hicolor/scalable/apps/sshub.svg"
     mkdir -p "$HOME/.local/share/applications"
