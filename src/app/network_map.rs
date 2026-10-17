@@ -81,6 +81,7 @@ pub enum UsePurpose {
 }
 
 /// `u`: pick the host that should use a hop as its jump.
+#[derive(Clone)]
 pub struct UsePicker {
     pub purpose: UsePurpose,
     /// The jump token to apply (host name or `user@host:port`); empty unless
@@ -107,6 +108,7 @@ impl UsePicker {
 }
 
 /// `#` tag picker: feeds `tag:` terms into the filter.
+#[derive(Clone)]
 pub struct TagPicker {
     pub items: Vec<String>,
     pub selected: usize,
@@ -409,7 +411,20 @@ impl MapView {
                 .iter()
                 .map(|&r| match r {
                     Row::Node(n) => {
-                        matches!(map.nodes[n].key, HopKey::Saved(h) if matched.contains(&h))
+                        // A folded hop draws no row of its own: its match
+                        // shows on the first row below it.
+                        let mut folded_match = false;
+                        let mut p = map.nodes[n].parent;
+                        while let Some(f) = p.filter(|&f| map.folded[f]) {
+                            if matches!(map.nodes[f].key, HopKey::Saved(h) if matched.contains(&h))
+                            {
+                                folded_match = true;
+                                break;
+                            }
+                            p = map.nodes[f].parent;
+                        }
+                        folded_match
+                            || matches!(map.nodes[n].key, HopKey::Saved(h) if matched.contains(&h))
                             || map.row_hosts(r).iter().any(|h| matched.contains(h))
                     }
                     Row::Cluster(c) => map.clusters[c].roots.iter().any(|&r| self.match_node[r]),
@@ -647,6 +662,9 @@ impl MapView {
             .hosts
             .iter()
             .flat_map(|h| h.tags.iter().cloned())
+            // The filter splits on spaces and has no quoting: a tag with one
+            // could only be offered as several terms.
+            .filter(|t| !t.contains(char::is_whitespace))
             .collect();
         tags.sort();
         tags.dedup();
@@ -658,14 +676,18 @@ impl App {
     pub(crate) fn switch_to_map_tab(&mut self) {
         self.active_tab = 5;
         // The tunnel lens and the facts read the tunnel list.
-        let _ = self.reload_tunnels();
+        if let Err(e) = self.reload_tunnels() {
+            self.host_notice = Some(format!("tunnels: {e:#}"));
+        }
         if self.map_view.is_none() {
             self.rebuild_map();
         }
     }
 
-    /// Rebuild the map from the current host list, keeping the cursor row, the
-    /// filter and the lens.
+    /// Rebuild the map from the current host list, keeping what the user has
+    /// open: cursor, filter, lens, folds and pickers. Host indexes belong to
+    /// one build of the map, so everything that holds one is carried over by
+    /// host name.
     pub(crate) fn rebuild_map(&mut self) {
         let hosts = match crate::map::collect_hosts(&self.store, &self.hosts) {
             Ok(h) => h,
@@ -682,19 +704,80 @@ impl App {
             .enumerate()
             .filter_map(|(i, h)| Some((h.managed_id()?, i)))
             .collect();
-        if let Some(old) = self.map_view.take() {
+        let old = self.map_view.take();
+        // A test owner names a hop or host of the map it ran on.
+        if old.as_ref().is_none_or(|o| o.map.hosts != view.map.hosts)
+            && self
+                .test_run
+                .as_ref()
+                .is_some_and(|r| matches!(r.owner, crate::app::test_connect::TestOwner::Map(_)))
+        {
+            self.test_run = None;
+        }
+        if let Some(old) = old {
+            let by_name: HashMap<String, usize> = view
+                .map
+                .hosts
+                .iter()
+                .enumerate()
+                .map(|(i, h)| (h.name.clone(), i))
+                .collect();
+            let remap = |h: usize| {
+                old.map
+                    .hosts
+                    .get(h)
+                    .and_then(|x| by_name.get(&x.name).copied())
+            };
+            let before = old.selection();
             view.row = old.row;
             view.pos = old.pos;
             view.zoomed = old.zoomed;
-            view.query = old.query;
+            view.open_clusters = old.open_clusters.clone();
+            view.revealed = old.revealed.clone();
+            view.direct_open = old.direct_open;
+            view.query = old.query.clone();
             view.editing = old.editing;
             view.apply_filter();
-            view.lens = match old.lens {
+            if let Some(h) = match before {
+                Some(MapSel::Host(h)) => remap(h),
+                _ => None,
+            } {
+                view.jump_to_host(h);
+            }
+            let tags = view.all_tags();
+            view.picker = old.picker.clone().and_then(|mut p| {
+                p.items.retain(|t| tags.contains(t));
+                p.selected = p.selected.min(p.items.len().saturating_sub(1));
+                (!p.items.is_empty()).then_some(p)
+            });
+            view.use_picker = old.use_picker.as_ref().and_then(|p| {
+                let mut p = p.clone();
+                p.hosts = p
+                    .hosts
+                    .iter()
+                    .filter_map(|&(h, loops)| Some((remap(h)?, loops)))
+                    .collect();
+                p.selected = p.selected.min(p.hosts.len().saturating_sub(1));
+                (!p.hosts.is_empty()).then_some(p)
+            });
+            view.lens = match &old.lens {
                 Lens::Blast(b) => {
-                    let hosts: HashSet<usize> = view.map.blast_radius(&b.key).into_iter().collect();
-                    Lens::Blast(BlastLens { key: b.key, hosts })
+                    let key = match &b.key {
+                        HopKey::Saved(h) => remap(*h).map(HopKey::Saved),
+                        HopKey::ProxyCmd(h) => remap(*h).map(HopKey::ProxyCmd),
+                        other => Some(other.clone()),
+                    };
+                    match key {
+                        Some(key) => {
+                            let hosts: HashSet<usize> =
+                                view.map.blast_radius(&key).into_iter().collect();
+                            Lens::Blast(BlastLens { key, hosts })
+                        }
+                        None => Lens::None,
+                    }
                 }
-                other => other,
+                Lens::Tunnel => Lens::Tunnel,
+                Lens::None => Lens::None,
             };
         }
         self.map_view = Some(view);
@@ -750,6 +833,10 @@ impl App {
         }
         if self.map_view.as_ref().is_some_and(|v| v.editing) {
             self.handle_key_map_filter(key);
+            return Ok(());
+        }
+        // Broadcast cancel is claimed on every tab, as the footer says.
+        if self.try_broadcast_cancel(&key) {
             return Ok(());
         }
 
@@ -974,6 +1061,10 @@ impl App {
                 return;
             }
         };
+        if let Some(issue) = crate::map::hops::token_issue(&token) {
+            self.host_notice = Some(format!("{token:?} cannot be a jump hop: {issue}"));
+            return;
+        }
         // A loop forms when the hop itself depends on the target.
         let depends: HashSet<usize> = own
             .map(|h| {
@@ -1106,15 +1197,26 @@ impl App {
             tokens.push(token.to_string());
         }
         let value = crate::map::hops::join(&tokens);
-        self.store.update_host(
-            id,
-            &crate::store::HostUpdate {
-                proxy_jump: Some(Some(value.clone())),
-                ..Default::default()
-            },
-        )?;
-        self.reload_hosts()?;
-        self.host_notice = Some(format!("{name}: ProxyJump = {value}"));
+        // The form refuses to save what ssh -J must not get; so does this.
+        if let Some(problem) = crate::map::hops::jump_problem(&value) {
+            self.host_notice = Some(format!("{name}: {problem}"));
+            return Ok(());
+        }
+        // A store failure is a message, not the end of every embedded session.
+        let saved = self
+            .store
+            .update_host(
+                id,
+                &crate::store::HostUpdate {
+                    proxy_jump: Some(Some(value.clone())),
+                    ..Default::default()
+                },
+            )
+            .and_then(|_| self.reload_hosts());
+        self.host_notice = Some(match saved {
+            Ok(()) => format!("{name}: ProxyJump = {value}"),
+            Err(e) => format!("{name}: cannot save ProxyJump: {e:#}"),
+        });
         Ok(())
     }
 
@@ -1164,15 +1266,28 @@ impl App {
             },
             _ => None,
         });
-        let id = host
+        let host_id = host
             .and_then(|h| self.hosts.get(h))
-            .and_then(|e| e.managed_id())
-            .and_then(|hid| self.tunnels.iter().find(|t| t.host_id == Some(hid)))
+            .and_then(|e| e.managed_id());
+        let mut on_host = self
+            .tunnels
+            .iter()
+            .filter(|t| host_id.is_some() && t.host_id == host_id)
             .map(|t| t.id);
+        let id = on_host.next();
+        if on_host.next().is_some() {
+            // Which one is meant is not clear from the map.
+            self.host_notice = Some("several tunnels on this host: use the tunnels tab".into());
+            return Ok(());
+        }
         match id {
             Some(id) => {
                 self.tunnel_notice = None;
-                self.toggle_tunnel_by_id(id)?;
+                // A store or ssh failure is a message, not the end of every
+                // embedded session.
+                if let Err(e) = self.toggle_tunnel_by_id(id) {
+                    self.tunnel_notice = Some(format!("tunnel: {e:#}"));
+                }
                 self.host_notice = self.tunnel_notice.take();
             }
             None => self.host_notice = Some("no tunnel on this host".into()),
@@ -1334,6 +1449,29 @@ impl App {
         self.map_move_row(delta);
     }
 
+    /// Bracketed paste into the map's text inputs (the host picker, the filter
+    /// line). `true` when the map took the text. Newlines and tabs become
+    /// single spaces: both inputs are one line.
+    pub(crate) fn map_paste(&mut self, text: &str) -> bool {
+        if self.active_tab != 5 || self.mode != AppMode::Normal {
+            return false;
+        }
+        let Some(v) = self.map_view.as_mut() else {
+            return false;
+        };
+        let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if let Some(p) = v.use_picker.as_mut() {
+            p.query.push_str(&line);
+            p.selected = 0;
+        } else if v.editing && v.picker.is_none() {
+            v.query.push_str(&line);
+            v.apply_filter();
+        } else {
+            return false;
+        }
+        true
+    }
+
     fn map_move_row(&mut self, delta: isize) {
         if let Some(v) = self.map_view.as_mut() {
             v.move_row(delta);
@@ -1410,5 +1548,174 @@ impl App {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::tests::{host, key_char, test_app};
+    use crate::map::MapHost;
+
+    fn jump_fleet() -> App {
+        let mut leaf = host("leaf");
+        leaf.proxy_jump = Some("hub".into());
+        let mut app = test_app(vec![
+            ("aa", host("aa")),
+            ("hub", host("hub")),
+            ("leaf", leaf),
+        ]);
+        app.switch_to_map_tab();
+        app
+    }
+
+    fn idx(v: &MapView, name: &str) -> usize {
+        v.map.hosts.iter().position(|h| h.name == name).unwrap()
+    }
+
+    fn mh(name: &str, jump: Option<&str>) -> MapHost {
+        MapHost {
+            name: name.into(),
+            address: format!("{name}.x"),
+            port: 22,
+            group: "g".into(),
+            jump: jump.map(String::from),
+            jump_source: jump.map(|_| crate::map::JumpSource::Own),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rebuild_carries_lens_and_picker_by_host_name_not_index() {
+        let mut app = jump_fleet();
+        let v = app.map_view.as_mut().unwrap();
+        let (hub, leaf) = (idx(v, "hub"), idx(v, "leaf"));
+        let key = HopKey::Saved(hub);
+        let hosts: HashSet<usize> = v.map.blast_radius(&key).into_iter().collect();
+        v.lens = Lens::Blast(BlastLens { key, hosts });
+        v.use_picker = Some(UsePicker {
+            purpose: UsePurpose::PickHop,
+            token: String::new(),
+            query: "le".into(),
+            selected: 0,
+            append: false,
+            hosts: vec![(leaf, false)],
+        });
+        // A host sorted before both disappears: every index shifts.
+        app.hosts.retain(|h| h.name() != "aa");
+        app.rebuild_map();
+
+        let v = app.map_view.as_ref().unwrap();
+        let Lens::Blast(b) = &v.lens else {
+            panic!("the lens must survive the rebuild")
+        };
+        let HopKey::Saved(k) = b.key else {
+            panic!("a saved hop stays saved")
+        };
+        assert_eq!(v.map.hosts[k].name, "hub");
+        let radius: Vec<&str> = b
+            .hosts
+            .iter()
+            .map(|&h| v.map.hosts[h].name.as_str())
+            .collect();
+        assert_eq!(radius, ["leaf"]);
+        let p = v.use_picker.as_ref().expect("the open picker survives");
+        assert_eq!(p.query, "le");
+        let listed: Vec<&str> = p
+            .hosts
+            .iter()
+            .map(|&(h, _)| v.map.hosts[h].name.as_str())
+            .collect();
+        assert_eq!(listed, ["leaf"]);
+    }
+
+    #[test]
+    fn typing_in_the_use_picker_is_not_taken_by_global_binds() {
+        let mut app = jump_fleet();
+        app.handle_key(key_char('u')).unwrap();
+        assert!(app.map_view.as_ref().unwrap().use_picker.is_some());
+        // `S` / `L` open snippets / the log browser when nothing is typing.
+        for c in ['S', 'L'] {
+            app.handle_key(key_char(c)).unwrap();
+        }
+        assert_eq!(app.mode, AppMode::Normal);
+        let p = app.map_view.as_ref().unwrap().use_picker.as_ref().unwrap();
+        assert_eq!(p.query, "SL");
+    }
+
+    #[test]
+    fn broadcast_cancel_key_acts_on_the_map_tab_instead_of_toggling_a_tunnel() {
+        let mut app = jump_fleet();
+        app.broadcast_toasts.push(BroadcastToast {
+            host: "h".into(),
+            text: "t".into(),
+            born: std::time::Instant::now(),
+        });
+        app.handle_key(key_char('x')).unwrap();
+        assert!(app.broadcast_toasts.is_empty());
+        assert!(
+            app.host_notice.is_none(),
+            "x must not reach the tunnel toggle"
+        );
+    }
+
+    #[test]
+    fn leaving_the_tab_closes_the_map_inputs() {
+        let mut app = jump_fleet();
+        let v = app.map_view.as_mut().unwrap();
+        v.editing = true;
+        v.picker = Some(TagPicker {
+            items: vec!["a".into()],
+            selected: 0,
+        });
+        app.reset_tab_input_state();
+        let v = app.map_view.as_ref().unwrap();
+        assert!(!v.editing && v.picker.is_none() && v.use_picker.is_none());
+    }
+
+    #[test]
+    fn paste_lands_in_the_filter_line_only_while_it_is_open() {
+        let mut app = jump_fleet();
+        assert!(!app.map_paste("hub"));
+        app.map_view.as_mut().unwrap().editing = true;
+        assert!(app.map_paste("tag:x\nhub"));
+        assert_eq!(app.map_view.as_ref().unwrap().query, "tag:x hub");
+    }
+
+    #[test]
+    fn filter_matching_a_folded_hop_keeps_a_row() {
+        // edge -> mid -> leaf: `edge` has one child and no hosts of its own,
+        // so it is folded and draws no row.
+        let map = Map::build(vec![
+            mh("edge-gw", None),
+            mh("mid", None),
+            mh("leaf", Some("edge-gw,mid")),
+        ]);
+        let mut v = MapView::new(map);
+        v.query = "edge-gw".into();
+        v.apply_filter();
+        assert!(
+            !v.rows.is_empty(),
+            "the match must not vanish with the fold"
+        );
+    }
+
+    #[test]
+    fn loop_row_walks_hosts_in_drawn_group_order() {
+        let mut a = mh("a", Some("b"));
+        let mut b = mh("b", Some("a"));
+        a.group = "zeta".into();
+        b.group = "alpha".into();
+        // Only ssh_config hops follow their own jump, so only they can loop.
+        a.ssh_config = true;
+        b.ssh_config = true;
+        let map = Map::build(vec![a, b]);
+        let row = Row::Cycle(0);
+        let order: Vec<&str> = map
+            .row_hosts(row)
+            .into_iter()
+            .map(|h| map.hosts[h].group.as_str())
+            .collect();
+        assert_eq!(order, ["alpha", "zeta"]);
     }
 }

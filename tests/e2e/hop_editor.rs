@@ -291,13 +291,17 @@ fn a_hostile_hop_is_refused_in_the_test_result_and_the_form_not_called_ok() {
     assert!(text.contains("invalid hop"), "{text}");
     assert!(!text.contains("stays in a$IFS"), "{text}");
     press(&mut app, 't');
-    for _ in 0..200 {
+    for _ in 0..1000 {
         app.poll_test_run();
         if app.test_run.as_ref().is_some_and(|r| !r.running()) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    assert!(
+        app.test_run.as_ref().is_some_and(|r| !r.running()),
+        "the test run did not finish"
+    );
     let text = screen(&app);
     assert!(text.contains("refused: invalid hop"), "{text}");
     assert!(

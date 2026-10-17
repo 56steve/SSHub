@@ -42,4 +42,4 @@
  │ lenses: o tunnels  B blast  t test - they re-skin glyphs and edges          │ │ tokens    group: tag: via: !  plain = name                                 │ 
  └─────────────────────────────────────────────────────────────────────────────┘ └────────────────────────────────────────────────────────────────────────────┘ 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- type filter   Tab complete   ↵ keep   Esc clear   # tags   ? help                                                                                              
+ type filter   Tab complete   ↵ keep   Esc clear   ? help                                                                                              

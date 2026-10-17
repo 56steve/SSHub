@@ -620,10 +620,22 @@ impl App {
     pub(crate) fn detect_tab_switch(&mut self) {
         if self.active_tab != self.anim_prev_tab {
             if self.motion_enabled() {
+                let now = std::time::Instant::now();
+                let mut at = now;
+                // Reversing a switch still in flight resumes from where it
+                // stands instead of jumping to the endpoint: solve
+                // `ease_out(p') = 1 - ease_out(p)` for the new progress `p'`.
+                if let Some(prev) = self.tab_switch {
+                    let p = crate::tui::tween::progress(prev.at, crate::tui::TAB_ANIM, now);
+                    if p < 1.0 && prev.from == self.active_tab && prev.to == self.anim_prev_tab {
+                        let back = 1.0 - (1.0 - (1.0 - p).powi(3)).cbrt();
+                        at = now - crate::tui::TAB_ANIM.mul_f32(back);
+                    }
+                }
                 self.tab_switch = Some(TabSwitch {
                     from: self.anim_prev_tab,
                     to: self.active_tab,
-                    at: std::time::Instant::now(),
+                    at,
                 });
             }
             self.anim_prev_tab = self.active_tab;

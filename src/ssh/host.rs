@@ -161,7 +161,11 @@ pub fn build_mosh_from_ssh_argv(ssh_argv: &[String]) -> Vec<String> {
     let ssh_cmd = if base.len() <= 1 {
         "ssh".to_string()
     } else {
-        base[..base.len() - 1].join(" ")
+        base[..base.len() - 1]
+            .iter()
+            .map(|a| shellword(a))
+            .collect::<Vec<_>>()
+            .join(" ")
     };
 
     let mut out = vec!["mosh".into(), format!("--ssh={ssh_cmd}"), target];
@@ -170,6 +174,27 @@ pub fn build_mosh_from_ssh_argv(ssh_argv: &[String]) -> Vec<String> {
         out.push(cmd);
     }
     out
+}
+
+/// Quote one argument for mosh's `--ssh=` value, which mosh splits with Perl's
+/// `shellwords`: a path with whitespace (or a quote) must stay one word.
+fn shellword(arg: &str) -> String {
+    if !arg.is_empty()
+        && !arg.contains(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '\\'))
+    {
+        return arg.to_string();
+    }
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+/// `argv` without the trailing `-- <remote command>` pair that
+/// [`build_ssh_argv`] adds for a host's stored `remote_command`. A one-shot
+/// probe appends its own command, so the stored one must not run first.
+pub fn without_remote_command(argv: &[String]) -> &[String] {
+    match argv {
+        [rest @ .., sep, _] if sep == "--" => rest,
+        _ => argv,
+    }
 }
 
 fn split_ssh_remote_command(ssh_argv: &[String]) -> (Vec<String>, Option<String>) {
@@ -317,6 +342,25 @@ mod tests {
                 "deploy@10.0.0.5".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn mosh_ssh_value_keeps_a_spaced_path_one_word() {
+        let mut host = SshHost::new("prod");
+        host.hostname = Some("10.0.0.5".into());
+        host.identity_file = Some("/Users/Mary Ann/.ssh/id".into());
+        let argv = build_mosh_argv(&host);
+        assert_eq!(argv[1], "--ssh=ssh -i '/Users/Mary Ann/.ssh/id'");
+    }
+
+    #[test]
+    fn without_remote_command_drops_only_the_trailing_pair() {
+        let mut host = SshHost::new("prod");
+        host.remote_command = Some("tmux attach".into());
+        let argv = build_ssh_argv(&host);
+        assert_eq!(without_remote_command(&argv), &["ssh", "prod"]);
+        let alias = build_ssh_alias_argv(&host);
+        assert_eq!(without_remote_command(&alias), &alias[..]);
     }
 
     #[test]

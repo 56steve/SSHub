@@ -219,6 +219,7 @@ impl FilePasswordStore {
                     anyhow::anyhow!("Failed to create secure temp credentials file: {e}")
                 })?;
             file.write_all(content.as_bytes())?;
+            file.sync_all()?;
         }
         #[cfg(not(unix))]
         {

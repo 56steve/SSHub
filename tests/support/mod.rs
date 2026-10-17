@@ -48,3 +48,23 @@ pub fn isolate_home() {
         dir
     });
 }
+
+/// A loopback port nothing listens on right now, never handed out twice by this
+/// process: the bind-and-drop probe alone let two parallel tests (or two
+/// calls in one test) receive the same port.
+#[allow(dead_code)]
+pub fn free_port() -> u16 {
+    static HANDED_OUT: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    let mut handed = HANDED_OUT.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        if !handed.contains(&port) {
+            handed.push(port);
+            return port;
+        }
+    }
+}

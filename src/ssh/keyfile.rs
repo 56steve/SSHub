@@ -33,8 +33,16 @@ impl KeygenAskpass {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
+        let secret_file = opts.open(&secret)?;
+        // From here every early return drops `guard`, which removes what exists.
+        // `script` stays empty until that file is really ours (`create_new`
+        // succeeded), so a failed open never deletes someone else's file.
+        let mut guard = Self {
+            secret,
+            script: PathBuf::new(),
+        };
         // ssh strips the trailing newline from the askpass output.
-        writeln!(opts.open(&secret)?, "{passphrase}")?;
+        writeln!(&secret_file, "{passphrase}")?;
 
         let mut sopts = std::fs::OpenOptions::new();
         sopts.write(true).create_new(true);
@@ -43,13 +51,12 @@ impl KeygenAskpass {
             use std::os::unix::fs::OpenOptionsExt;
             sopts.mode(0o700);
         }
+        let mut script_file = sopts.open(&script)?;
+        guard.script = script;
         // The secret path is passed via env so the script needs no quoting.
-        write!(
-            sopts.open(&script)?,
-            "#!/bin/sh\nexec cat \"$SSHUB_KG_SECRET\"\n"
-        )?;
+        write!(script_file, "#!/bin/sh\nexec cat \"$SSHUB_KG_SECRET\"\n")?;
 
-        Ok(Self { secret, script })
+        Ok(guard)
     }
 
     fn env(&self) -> Vec<(String, String)> {
@@ -217,7 +224,16 @@ pub fn write_key_material(name: &str, contents: &str) -> Result<PathBuf> {
     let home =
         std::env::var("HOME").map_err(|_| anyhow::anyhow!("HOME environment variable not set"))?;
     let ssh_dir = PathBuf::from(home).join(".ssh");
-    std::fs::create_dir_all(&ssh_dir).context("create ~/.ssh")?;
+    {
+        let mut dir = std::fs::DirBuilder::new();
+        dir.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            dir.mode(0o700);
+        }
+        dir.create(&ssh_dir).context("create ~/.ssh")?;
+    }
 
     let safe_name: String = name
         .trim()
@@ -255,13 +271,24 @@ pub fn write_key_material(name: &str, contents: &str) -> Result<PathBuf> {
             }
         }
 
-        std::fs::write(&dest, &body)
-            .with_context(|| format!("write key file {}", dest.display()))?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600))?;
+            use std::os::unix::fs::OpenOptionsExt;
+            // 0600 from the first byte: never a window where the key is
+            // readable under the process umask.
+            opts.mode(0o600);
         }
+        let mut file = match opts.open(&dest) {
+            Ok(f) => f,
+            // Lost a race for this name: take the next suffix.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("write key file {}", dest.display())),
+        };
+        use std::io::Write as _;
+        file.write_all(body.as_bytes())
+            .with_context(|| format!("write key file {}", dest.display()))?;
         return Ok(dest);
     }
     anyhow::bail!("too many conflicting sshub_{safe_name}* key files in ~/.ssh")

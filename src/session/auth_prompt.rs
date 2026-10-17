@@ -10,8 +10,14 @@ pub enum PromptClass {
 }
 
 impl PromptClass {
+    /// Classify an ssh prompt by its *shape*, not by words found anywhere in
+    /// it: a credential prompt starts with `Enter passphrase…` or ends with
+    /// `password:`. A server-sent keyboard-interactive prompt arrives prefixed
+    /// `(user@host) `, and a remote banner can say anything, so neither can
+    /// pass for a passphrase prompt just by containing the words.
     pub fn classify(prompt: &str) -> Self {
         let lower = prompt.to_ascii_lowercase();
+        let tail = lower.trim();
         // Trust decisions take precedence over credential needles in host text.
         if super::HOST_VERIFY_NEEDLES
             .iter()
@@ -21,12 +27,12 @@ impl PromptClass {
             Self::HostKey
         } else if super::PASSPHRASE_NEEDLES
             .iter()
-            .any(|needle| lower.contains(needle))
+            .any(|needle| tail.starts_with(needle))
         {
             Self::Passphrase
         } else if super::PASSWORD_NEEDLES
             .iter()
-            .any(|needle| lower.contains(needle))
+            .any(|needle| tail.ends_with(needle.trim_end()))
         {
             Self::Password
         } else {
@@ -143,5 +149,29 @@ mod tests {
             PromptClass::classify("The authenticity of host 'password:' can't be established."),
             PromptClass::HostKey
         );
+    }
+
+    #[test]
+    fn a_credential_prompt_is_recognised_by_its_shape_not_by_a_word_inside_it() {
+        for (prompt, class) in [
+            ("ops@10.0.4.11's password: ", PromptClass::Password),
+            ("(ops@10.0.4.11) Password: ", PromptClass::Password),
+            (
+                "Enter passphrase for key '/home/u/.ssh/id': ",
+                PromptClass::Passphrase,
+            ),
+            // Words inside other text: not a credential prompt.
+            (
+                "(ops@h) Enter passphrase for key '/home/u/.ssh/id': ",
+                PromptClass::Generic,
+            ),
+            (
+                "Your password: expires soon, enter the code",
+                PromptClass::Generic,
+            ),
+            ("Verification code: ", PromptClass::Generic),
+        ] {
+            assert_eq!(PromptClass::classify(prompt), class, "{prompt}");
+        }
     }
 }

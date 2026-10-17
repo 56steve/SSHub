@@ -45,9 +45,12 @@ pub struct SshProbeRunner;
 
 impl ProbeRunner for SshProbeRunner {
     fn run(&self, argv: &[String], secret: Option<&PendingSecret>) -> Option<String> {
-        if argv.is_empty() {
+        // mosh has no one-shot mode; a stored `remote_command` would run
+        // instead of the probe.
+        if argv.first().map(String::as_str) != Some("ssh") {
             return None;
         }
+        let argv = crate::ssh::without_remote_command(argv);
 
         // Splice BatchMode-friendly options right after the program name and
         // append the remote command as the final argument. With no stored
@@ -73,6 +76,7 @@ impl ProbeRunner for SshProbeRunner {
             full.push(opt.to_string());
         }
         full.extend(argv[1..].iter().cloned());
+        full.push("--".to_string());
         full.push("cat /etc/os-release 2>/dev/null || uname -s".to_string());
 
         let mut cmd = Command::new(&full[0]);
@@ -84,7 +88,7 @@ impl ProbeRunner for SshProbeRunner {
         let mut _askpass = None;
         if let Some(secret) = secret {
             if let Ok(exe) = crate::session::askpass::helper_exe() {
-                if let Ok(guard) = crate::session::askpass::AskpassSecret::new(secret.value()) {
+                if let Ok(guard) = crate::session::askpass::AskpassSecret::new(secret) {
                     for (k, v) in guard.env(&exe) {
                         cmd.env(k, v);
                     }

@@ -302,6 +302,10 @@ pub fn render_map(frame: &mut Frame, area: Rect, app: &App) {
     // `area` is the dashboard body: the terminal minus 8 rows of chrome, so the
     // design's "80x24" is a body of 80 columns by 16 rows, and "40x12" is 4.
     if area.width < 40 || area.height < 4 {
+        // Nothing is drawn for the pickers either: they must not open unseen.
+        if let Some(v) = app.map_view.as_ref() {
+            v.outline.set(true);
+        }
         let buf = frame.buffer_mut();
         put(
             buf,

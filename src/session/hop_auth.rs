@@ -117,24 +117,23 @@ pub enum Asker<'a> {
     Key(&'a str),
 }
 
-/// Read the asker out of an ssh prompt.
+/// Read the asker out of an ssh prompt. Only ssh's own two prompts count, and
+/// only whole: `user@host's password: ` and `Enter passphrase for key '<path>': `
+/// with nothing before them. A hostile jump host can make ssh show any
+/// keyboard-interactive text, but ssh puts `(user@host) ` in front of it.
 pub fn asker(prompt: &str) -> Option<Asker<'_>> {
-    let lower = prompt.to_ascii_lowercase();
-    if let Some(at) = lower.find("'s password") {
-        // `Warning ... \nroot@10.0.4.11's password: `: the last word before it.
-        let head = &prompt[..at];
-        let word = head.split_whitespace().next_back()?;
-        let word = word.trim_start_matches('(');
-        let (user, host) = word.rsplit_once('@')?;
+    let prompt = prompt.trim_end();
+    if let Some(login) = prompt.strip_suffix("'s password:") {
+        if login.contains(char::is_whitespace) {
+            return None;
+        }
+        let (user, host) = login.rsplit_once('@')?;
         return (!user.is_empty() && !host.is_empty()).then_some(Asker::Login { user, host });
     }
-    if let Some(at) = lower.find("passphrase for key '") {
-        let rest = &prompt[at + "passphrase for key '".len()..];
-        let end = rest.rfind("':")?;
-        let path = &rest[..end];
-        return (!path.is_empty()).then_some(Asker::Key(path));
-    }
-    None
+    let path = prompt
+        .strip_prefix("Enter passphrase for key '")?
+        .strip_suffix("':")?;
+    (!path.is_empty()).then_some(Asker::Key(path))
 }
 
 /// The one hop `prompt` names, `None` when it names none or several.
@@ -215,13 +214,26 @@ mod tests {
                 host: "10.0.4.11"
             })
         );
+        // Anything around the prompt makes it not ssh's own: a banner line in
+        // front, or the `(user@host) ` prefix every keyboard-interactive
+        // prompt carries (a server picks that text, so it can name any hop).
         assert_eq!(
             asker("Warning: x\r\njohn@corp.com@10.0.4.12's password: "),
+            None
+        );
+        assert_eq!(asker("(ops@bastion) ops@10.0.4.12's password: "), None);
+        assert_eq!(
+            asker("john@corp.com@10.0.4.12's password: "),
             Some(Asker::Login {
                 user: "john@corp.com",
                 host: "10.0.4.12"
             })
         );
+        assert_eq!(
+            asker("(ops@bastion) Enter passphrase for key '/home/u/.ssh/id': "),
+            None
+        );
+        assert_eq!(asker("Please Enter passphrase for key '/k': "), None);
         assert_eq!(
             asker("Enter passphrase for key '/home/u/.ssh/id_ed25519': "),
             Some(Asker::Key("/home/u/.ssh/id_ed25519"))

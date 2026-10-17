@@ -14,7 +14,7 @@ pub use export::{
 };
 pub use host::{
     build_mosh_alias_argv, build_mosh_argv, build_ssh_alias_argv, build_ssh_argv,
-    inject_mosh_ssh_accept_new, safe_ssh_target, SshHost,
+    inject_mosh_ssh_accept_new, safe_ssh_target, without_remote_command, SshHost,
 };
 pub use import::{
     compute_ssh_config_hash, import_ssh_config, materialize_ssh_config_host,

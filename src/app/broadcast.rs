@@ -339,7 +339,12 @@ impl App {
                     host_id,
                     host_name: entry.name().to_string(),
                     argv: match (entry.managed(), effective.as_ref()) {
-                        (Some(m), Some(r)) => resolved_session_argv(m, r),
+                        // A one-shot command needs ssh: mosh has no such mode.
+                        (Some(m), Some(r)) => {
+                            let mut r = r.clone();
+                            r.transport = crate::session_transport::SessionTransport::Ssh;
+                            resolved_session_argv(m, &r)
+                        }
                         _ => ssh_argv_for_entry(entry),
                     },
                     secret,

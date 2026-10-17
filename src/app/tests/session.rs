@@ -796,7 +796,7 @@ pub(crate) fn session_switcher_hotkey_works_from_every_dashboard_tab() {
 pub(crate) fn session_strip_binds_work_on_every_dashboard_tab() {
     // Footer advertises resume / new tab on every tab once a session exists;
     // those used to only fire on hosts (active_tab == 0).
-    for tab in 0..=4u8 {
+    for tab in 0..=5u8 {
         let mut app = app_with_background_session(vec![("edge", host("edge"))]);
         app.active_tab = tab as usize;
 

@@ -78,7 +78,7 @@ impl App {
     }
 
     pub(crate) fn remove_selected_from_agent(&mut self) -> Result<()> {
-        let Some(identity) = self.identities.get(self.identity_selected) else {
+        let Some(identity) = self.selected_identity().cloned() else {
             return Ok(());
         };
         let Some(ref key_path) = identity.private_key else {
@@ -118,7 +118,7 @@ impl App {
     }
 
     pub(crate) fn add_selected_to_agent(&mut self) -> Result<()> {
-        let Some(identity) = self.identities.get(self.identity_selected) else {
+        let Some(identity) = self.selected_identity().cloned() else {
             return Ok(());
         };
         let Some(ref key_path) = identity.private_key else {
@@ -470,6 +470,7 @@ impl App {
         if let Some(pos) = self.identities.iter().position(|i| i.name == name) {
             self.identity_selected = pos;
         }
+        self.snap_identity_selection();
         Ok(())
     }
 
@@ -662,7 +663,6 @@ impl App {
     pub(crate) fn move_identity_grid(&mut self, dr: i32, dc: i32) {
         let view = self.identity_view();
         if view.is_empty() {
-            self.identity_selected = 0;
             return;
         }
         let cpr = self.identity_cards_per_row();
@@ -711,7 +711,12 @@ impl App {
         self.snap_identity_selection();
     }
 
+    /// The selected identity, or `None` when the filter hides it (or hides
+    /// every card), so no action can reach a card the user cannot see.
     pub fn selected_identity(&self) -> Option<&Identity> {
-        self.identities.get(self.identity_selected)
+        self.identity_view()
+            .contains(&self.identity_selected)
+            .then(|| self.identities.get(self.identity_selected))
+            .flatten()
     }
 }

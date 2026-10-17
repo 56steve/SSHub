@@ -270,7 +270,32 @@ impl App {
         (self.active_tab == 1
             && (self.sftp_picker_searching || self.sftp.as_ref().is_some_and(|s| s.searching)))
             || (matches!(self.active_tab, 2 | 3) && self.list_filter_editing)
-            || (self.active_tab == 5 && self.map_view.as_ref().is_some_and(|v| v.editing))
+            || (self.active_tab == 5
+                && self
+                    .map_view
+                    .as_ref()
+                    .is_some_and(|v| v.editing || v.use_picker.is_some()))
+    }
+
+    /// The broadcast cancel key does double duty: cancel a live run, or
+    /// (nothing running) clear the error toasts. Works regardless of focus or
+    /// tab, matching the always-shown footer hint. `true` when it acted.
+    pub(crate) fn try_broadcast_cancel(&mut self, key: &KeyEvent) -> bool {
+        if !self.is_action(KeyAction::BroadcastCancel, key)
+            || (self.broadcast.is_none() && self.broadcast_toasts.is_empty())
+        {
+            return false;
+        }
+        if self
+            .broadcast
+            .as_ref()
+            .is_some_and(|b| !crate::broadcast::all_terminal(&b.results))
+        {
+            self.cancel_broadcast();
+        } else {
+            self.broadcast_toasts.clear();
+        }
+        true
     }
 
     pub(crate) fn handle_key_normal(&mut self, key: KeyEvent) -> Result<()> {
@@ -280,22 +305,8 @@ impl App {
             return Ok(());
         }
 
-        // Broadcast (#3). The cancel key does double duty, claimed before any
-        // other binding: cancel a live run, or (nothing running) clear the error
-        // toasts. Works regardless of focus, matching the always-shown footer
-        // hint. `open_broadcast` refuses a second concurrent run.
-        if self.is_action(KeyAction::BroadcastCancel, &key)
-            && (self.broadcast.is_some() || !self.broadcast_toasts.is_empty())
-        {
-            if self
-                .broadcast
-                .as_ref()
-                .is_some_and(|b| !crate::broadcast::all_terminal(&b.results))
-            {
-                self.cancel_broadcast();
-            } else {
-                self.broadcast_toasts.clear();
-            }
+        // Broadcast (#3). Claimed before any other binding.
+        if self.try_broadcast_cancel(&key) {
             return Ok(());
         }
         if self.is_action(KeyAction::Broadcast, &key) {
@@ -600,10 +611,21 @@ impl App {
         let tab = self.active_tab;
         let switched = self.try_tab_switch_binds(key)?;
         if self.active_tab != tab {
-            // A filter bar belongs to the tab it was opened on.
-            self.list_filter_editing = false;
+            self.reset_tab_input_state();
         }
         Ok(switched)
+    }
+
+    /// Close the text inputs and pickers a tab owns; run on every tab change
+    /// (keys and mouse) so none stays open, swallowing keys, on a hidden tab.
+    pub(crate) fn reset_tab_input_state(&mut self) {
+        // A filter bar belongs to the tab it was opened on.
+        self.list_filter_editing = false;
+        if let Some(v) = self.map_view.as_mut() {
+            v.editing = false;
+            v.picker = None;
+            v.use_picker = None;
+        }
     }
 
     fn try_tab_switch_binds(&mut self, key: &KeyEvent) -> Result<bool> {

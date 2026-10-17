@@ -42,6 +42,15 @@ impl App {
         }
     }
 
+    /// The selected tunnel, or `None` when the filter hides it (or hides
+    /// every row), so no action can reach a row the user cannot see.
+    pub(crate) fn selected_tunnel(&self) -> Option<&crate::store::Tunnel> {
+        self.tunnel_view()
+            .contains(&self.tunnel_selected)
+            .then(|| self.tunnels.get(self.tunnel_selected))
+            .flatten()
+    }
+
     /// Step the selection through the visible rows.
     pub(crate) fn move_tunnel_selection(&mut self, delta: i32) {
         let view = self.tunnel_view();
@@ -120,7 +129,7 @@ impl App {
                 self.mode = AppMode::TunnelForm;
             }
             _ if self.is_action(KeyAction::Edit, &key) => {
-                if let Some(tunnel) = self.tunnels.get(self.tunnel_selected) {
+                if let Some(tunnel) = self.selected_tunnel().cloned() {
                     self.tunnel_form = Some(TunnelFormEdit {
                         editing_id: Some(tunnel.id),
                         tunnel_type: tunnel.tunnel_type,
@@ -140,7 +149,7 @@ impl App {
                 }
             }
             _ if self.is_action(KeyAction::Delete, &key) => {
-                if let Some(tunnel) = self.tunnels.get(self.tunnel_selected) {
+                if let Some(tunnel) = self.selected_tunnel().cloned() {
                     let label = tunnel
                         .label
                         .clone()
@@ -167,7 +176,7 @@ impl App {
     }
 
     pub(crate) fn toggle_tunnel(&mut self) -> Result<()> {
-        let Some(id) = self.tunnels.get(self.tunnel_selected).map(|t| t.id) else {
+        let Some(id) = self.selected_tunnel().map(|t| t.id) else {
             return Ok(());
         };
         self.toggle_tunnel_by_id(id)
@@ -282,7 +291,7 @@ impl App {
     }
 
     pub(crate) fn kill_selected_tunnel(&mut self) -> Result<()> {
-        let Some(tunnel) = self.tunnels.get(self.tunnel_selected).cloned() else {
+        let Some(tunnel) = self.selected_tunnel().cloned() else {
             return Ok(());
         };
         let host_name = tunnel
@@ -633,6 +642,16 @@ impl App {
         }
 
         self.reload_tunnels()?;
+        let hidden = !self.tunnel_filter.is_empty()
+            && !self
+                .tunnel_view()
+                .iter()
+                .any(|&i| self.tunnels[i].local_port == local_port);
+        if hidden {
+            if let Some(n) = self.tunnel_notice.as_mut() {
+                n.push_str(" (hidden by the filter)");
+            }
+        }
         self.mode = AppMode::Normal;
         Ok(())
     }
@@ -779,6 +798,7 @@ impl App {
             .and_then(|id| self.tunnels.iter().position(|t| t.id == id))
             .unwrap_or(self.tunnel_selected)
             .min(self.tunnels.len().saturating_sub(1));
+        self.snap_tunnel_selection();
         Ok(())
     }
 

@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -34,9 +34,6 @@ const WRITE_QUEUE_LEN: usize = 64;
 /// Env var carrying the stderr FIFO path into the `sh` wrapper.
 const STDERR_FIFO_ENV: &str = "SSHUB_STDERR_FIFO";
 
-/// Monotonic counter for unique FIFO names within this process.
-static FIFO_SEQ: AtomicU64 = AtomicU64::new(0);
-
 /// Event from the PTY reader thread to the main thread.
 #[derive(Debug)]
 pub enum PtyEvent {
@@ -49,20 +46,28 @@ pub enum PtyEvent {
     Exited(String),
 }
 
-/// A named FIFO used to siphon the child's stderr away from the PTY. Created in
-/// the temp dir, opened non-blocking on the read side, and unlinked on drop.
+/// A named FIFO used to siphon the child's stderr away from the PTY. Created
+/// inside a private `0700` random-named temp dir (a predictable name in a
+/// shared `/tmp` can be pre-created by another user), opened non-blocking on
+/// the read side, and removed with its dir on drop.
 struct StderrFifo {
+    _dir: tempfile::TempDir,
     path: PathBuf,
     read: File,
 }
 
 impl StderrFifo {
     fn create() -> Result<Self> {
-        let mut path = std::env::temp_dir();
-        let seq = FIFO_SEQ.fetch_add(1, Ordering::Relaxed);
-        path.push(format!("sshub-stderr-{}-{seq}.fifo", std::process::id()));
-        // Best-effort remove of a stale path so mkfifo doesn't EEXIST.
-        let _ = std::fs::remove_file(&path);
+        let dir = tempfile::Builder::new()
+            .prefix("sshub-stderr-")
+            .tempdir()
+            .context("create private dir for the stderr fifo")?;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+                .context("restrict the stderr fifo dir")?;
+        }
+        let path = dir.path().join("stderr.fifo");
 
         let c_path = CString::new(path.as_os_str().as_bytes()).context("fifo path nul")?;
         // SAFETY: c_path is a valid NUL-terminated C string.
@@ -89,13 +94,11 @@ impl StderrFifo {
             .open(&path)
             .with_context(|| format!("open fifo {}", path.display()))?;
 
-        Ok(Self { path, read })
-    }
-}
-
-impl Drop for StderrFifo {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        Ok(Self {
+            _dir: dir,
+            path,
+            read,
+        })
     }
 }
 
@@ -137,10 +140,10 @@ impl PtyRuntime {
         }
 
         // Route the child's stderr through a side FIFO so ssh's `-v` debug
-        // output never lands on the PTY grid. Falls back to the plain PTY
-        // (stderr merged with stdout) if the FIFO can't be set up, so a connect
-        // never fails just because of the debug split.
-        let stderr_fifo = siphon_stderr.then(StderrFifo::create).and_then(Result::ok);
+        // output never lands on the PTY grid. Without it the session could
+        // never see `Authenticated to …`, so it would never accept keystrokes:
+        // fail the spawn loudly instead of producing a dead session.
+        let stderr_fifo = siphon_stderr.then(StderrFifo::create).transpose()?;
 
         let (program, prog_args): (String, Vec<String>) = if stderr_fifo.is_some() {
             // sh redirects fd 2 to the FIFO (opened by path, after portable-pty's
@@ -390,5 +393,25 @@ impl Drop for PtyRuntime {
         if let Some(handle) = self.reader_thread.take() {
             let _ = handle.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn the_stderr_fifo_lives_in_a_private_random_dir_and_goes_with_it() {
+        // A fixed name in a shared /tmp can be pre-created by another user,
+        // which used to leave the session without its debug stream.
+        let a = StderrFifo::create().unwrap();
+        let b = StderrFifo::create().unwrap();
+        let dir = a.path.parent().unwrap().to_path_buf();
+        assert_ne!(dir, b.path.parent().unwrap());
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        drop(a);
+        assert!(!dir.exists());
     }
 }

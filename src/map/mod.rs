@@ -571,7 +571,13 @@ impl Map {
                     _ => None,
                 })
                 .collect(),
-            Row::Cycle(i) => self.cycles[i].hosts.clone(),
+            // The strip groups a loop's hosts by group name (sorted): walk
+            // them in that drawn order.
+            Row::Cycle(i) => {
+                let mut hs = self.cycles[i].hosts.clone();
+                hs.sort_by(|a, b| self.hosts[*a].group.cmp(&self.hosts[*b].group));
+                hs
+            }
             Row::DirectGroup(i) => self.direct_groups[i].1.clone(),
             Row::Direct | Row::More(_) => Vec::new(),
         }

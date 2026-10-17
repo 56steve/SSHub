@@ -198,6 +198,14 @@ impl CommandRunner for SshCommandRunner {
         if argv.is_empty() {
             return Err("empty ssh argv".to_string());
         }
+        if argv[0] != "ssh" {
+            return Err(format!(
+                "{} cannot run a one-shot command (ssh transport only)",
+                argv[0]
+            ));
+        }
+        // The host's stored `remote_command` would run instead of ours.
+        let argv = crate::ssh::without_remote_command(argv);
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".to_string());
         }
@@ -246,6 +254,8 @@ impl CommandRunner for SshCommandRunner {
             _config = Some(file);
         }
         full.extend(argv[1..].iter().cloned());
+        // `--`: a command that starts with `-` must not be read as an ssh option.
+        full.push("--".to_string());
         full.push(command.to_string());
 
         let mut cmd = Command::new(&full[0]);
@@ -270,10 +280,7 @@ impl CommandRunner for SshCommandRunner {
         let mut _askpass = None;
         if askpass {
             if let Ok(exe) = crate::session::askpass::helper_exe() {
-                let staged = crate::session::askpass::AskpassSecret::staged(
-                    secret.map(crate::session::PendingSecret::value),
-                    hops,
-                );
+                let staged = crate::session::askpass::AskpassSecret::staged(secret, hops);
                 if let Ok(guard) = staged {
                     for (k, v) in guard.env(&exe) {
                         cmd.env(k, v);
@@ -319,7 +326,12 @@ impl CommandRunner for SshCommandRunner {
             thread::sleep(POLL_INTERVAL);
         };
 
-        // Killing the child closes the pipes, so the reader threads finish.
+        // Killing the child closes the pipes, so the reader threads finish. A
+        // `-W` helper of a black-holed jump host can outlive ssh and keep them
+        // open: kill the group, and bound the wait for the readers regardless.
+        if self.kill_process_group {
+            crate::cli::exec::kill_group(&child);
+        }
         let stdout = stdout_reader.map(join_pipe_reader).unwrap_or_default();
         let stderr = stderr_reader.map(join_pipe_reader).unwrap_or_default();
 
@@ -332,19 +344,28 @@ impl CommandRunner for SshCommandRunner {
     }
 }
 
-/// Spawn a thread that reads a child pipe to EOF into a `String`
-/// (lossy UTF-8), returning its join handle.
-fn spawn_pipe_reader<R: Read + Send + 'static>(mut pipe: R) -> thread::JoinHandle<String> {
+/// Most output kept per stream; the rest is drained and dropped so a chatty
+/// host can neither fill memory nor block ssh on a full pipe.
+const MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
+/// How long to wait for a reader after the child is gone.
+const PIPE_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Spawn a thread that reads a child pipe to EOF into a `String` (lossy UTF-8,
+/// capped at [`MAX_OUTPUT_BYTES`]), delivering it on the returned channel.
+fn spawn_pipe_reader<R: Read + Send + 'static>(mut pipe: R) -> Receiver<String> {
+    let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut buf = Vec::new();
-        let _ = pipe.read_to_end(&mut buf);
-        String::from_utf8_lossy(&buf).into_owned()
-    })
+        let _ = (&mut pipe).take(MAX_OUTPUT_BYTES).read_to_end(&mut buf);
+        let _ = std::io::copy(&mut pipe, &mut std::io::sink());
+        let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+    });
+    rx
 }
 
-/// Join a pipe-reader thread, tolerating a panicked reader (empty string).
-fn join_pipe_reader(handle: thread::JoinHandle<String>) -> String {
-    handle.join().unwrap_or_default()
+/// Wait (bounded) for a pipe reader; a stuck or panicked reader yields "".
+fn join_pipe_reader(rx: Receiver<String>) -> String {
+    rx.recv_timeout(PIPE_JOIN_TIMEOUT).unwrap_or_default()
 }
 
 /// Seed one `Pending` row per task, in task order (stable per-target order).
@@ -578,6 +599,13 @@ pub fn done_count(results: &[HostResult]) -> usize {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn pipe_reader_caps_output_and_still_drains() {
+        let big = vec![b'x'; MAX_OUTPUT_BYTES as usize + 4096];
+        let out = join_pipe_reader(spawn_pipe_reader(std::io::Cursor::new(big)));
+        assert_eq!(out.len(), MAX_OUTPUT_BYTES as usize);
+    }
 
     fn task(id: i64, name: &str) -> BroadcastTask {
         BroadcastTask {

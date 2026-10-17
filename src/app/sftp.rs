@@ -89,12 +89,12 @@ impl App {
     }
 
     /// SFTP tab key dispatch. `try_tab_switch` runs first so the tab digits
-    /// (`1`-`5`) still work while this tab is focused, exactly like the other
+    /// (`1`-`6`) still work while this tab is focused, exactly like the other
     /// dashboard tabs. Then we branch on whether a live browser session exists:
     /// no `app.sftp` → the host **picker**; `Some` → the dual-pane **browser**.
     pub fn handle_key_sftp(&mut self, key: KeyEvent) -> Result<()> {
         // While a search input is active, capture keys BEFORE try_tab_switch so
-        // typed letters that happen to be tab-switch binds (h, i, 1-5) filter
+        // typed letters that happen to be tab-switch binds (h, i, 1-6) filter
         // instead of switching tabs.
         if self.sftp_picker_searching {
             return self.handle_key_sftp_picker_search(key);

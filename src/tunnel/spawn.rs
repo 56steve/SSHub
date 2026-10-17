@@ -131,6 +131,10 @@ pub fn splice_tunnel_ssh_options(args: &mut Vec<String>, has_stored_secret: bool
         "ServerAliveCountMax=3".to_string(),
         "-o".to_string(),
         "TCPKeepAlive=yes".to_string(),
+        "-o".to_string(),
+        // Without it a failed bind or a refused forward leaves ssh running with
+        // no forward while the tunnel reads "up", and nothing retries it.
+        "ExitOnForwardFailure=yes".to_string(),
     ];
     if has_stored_secret {
         opts.push("-o".to_string());
@@ -150,7 +154,7 @@ pub fn stage_tunnel_askpass(
         return Ok(None);
     }
     let exe = askpass::helper_exe()?;
-    let guard = askpass::AskpassSecret::staged(secret.map(PendingSecret::value), hops)?;
+    let guard = askpass::AskpassSecret::staged(secret, hops)?;
     for (k, v) in guard.env(&exe) {
         cmd.env(k, v);
     }
@@ -370,6 +374,17 @@ mod tests {
     }
 
     #[test]
+    fn a_tunnel_whose_forward_fails_exits_instead_of_reporting_up() {
+        for secret in [false, true] {
+            let mut args = vec!["ssh".into(), "-N".into(), "host".into()];
+            splice_tunnel_ssh_options(&mut args, secret);
+            assert!(args
+                .windows(2)
+                .any(|w| w == ["-o", "ExitOnForwardFailure=yes"]));
+        }
+    }
+
+    #[test]
     fn detached_tunnel_keeps_its_staged_secret_until_stopped() {
         // #144: `tunnel start` returned, dropped the staged askpass file, and
         // the detached ssh found nothing when it asked for the password. The
@@ -416,7 +431,7 @@ mod tests {
 
         let pid_path = tunnel_pid_path(&ensure_tunnel_pid_dir(data.path()).unwrap(), 7);
         let staged = PathBuf::from(fs::read_to_string(staged_secret_record(&pid_path)).unwrap());
-        assert_eq!(fs::read_to_string(&staged).unwrap(), "s3cr3t\n");
+        assert_eq!(fs::read_to_string(&staged).unwrap(), "s3cr3t\nC\tp\n");
 
         stop_detached_tunnel(data.path(), 7).unwrap();
         assert!(!staged.exists(), "stop must remove the staged secret");
@@ -539,6 +554,8 @@ mod tests {
             "ServerAliveCountMax=3",
             "-o",
             "TCPKeepAlive=yes",
+            "-o",
+            "ExitOnForwardFailure=yes",
             "-N",
             "-L",
             "8080:localhost:80",

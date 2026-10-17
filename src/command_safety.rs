@@ -54,6 +54,7 @@ pub fn classify_command(command: &str) -> CommandSafety {
         "private key",
         "private_key",
         "private-key",
+        "passcode",
     ]
     .iter()
     .any(|pattern| lower.contains(pattern))
@@ -103,6 +104,27 @@ pub fn classify_command(command: &str) -> CommandSafety {
             return reject("authentication argument");
         }
     }
+    // Tools that take a secret as a short flag, which the generic rules above
+    // cannot tell from a benign one (`-a`, `-w`, `-N` mean other things elsewhere).
+    let tool = |name: &str| {
+        lower
+            .split_whitespace()
+            .any(|w| w.trim_matches(['\'', '"']).rsplit('/').next() == Some(name))
+    };
+    let flag = |f: &str| {
+        lower.split_whitespace().any(|w| {
+            let w = w.trim_matches(['\'', '"']);
+            w == f || (w.starts_with(f) && !w.starts_with("--") && f.len() == 2)
+        })
+    };
+    if (tool("redis-cli") && flag("-a"))
+        || ((tool("ldapsearch") || tool("ldapmodify") || tool("ldapadd")) && flag("-w"))
+        || (tool("ssh-keygen") && flag("-n"))
+        || (tool("rar") && lower.split_whitespace().any(|w| w.starts_with("-hp")))
+        || (tool("smbclient") && lower.split_whitespace().any(|w| w.contains('%')))
+    {
+        return reject("authentication argument");
+    }
     CommandSafety::Safe
 }
 
@@ -138,6 +160,12 @@ mod tests {
             "curl --header 'X-Custom-Token: abc' https://example.org",
             "curl --header 'X-Key: abc123' https://example.org",
             "curl -H'X-Key: abc123' https://example.org",
+            "redis-cli -h db -a s3cr3t get k",
+            "ldapsearch -x -D cn=admin -w s3cr3t",
+            "ssh-keygen -t ed25519 -N s3cr3t",
+            "rar a -hpS3cr3t x.rar f",
+            "smbclient //h/share -U user%S3cr3t",
+            "vpn login --passcode 123456",
             "APP_TOKEN=abc command",
             "AWS_SECRET_ACCESS_KEY=abc aws s3 ls",
             "docker login -p abc",

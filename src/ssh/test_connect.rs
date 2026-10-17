@@ -108,6 +108,12 @@ pub fn classify_failure(exit: i32, stderr: &str) -> (String, String) {
             "host key changed".into(),
             at.unwrap_or_else(|| last.clone()),
         );
+    } else if lower.contains("permission denied (") {
+        // The server's verdict: `Permission denied (publickey,password).`
+        "auth failed"
+    } else if lower.contains("load key") && lower.contains("permission denied") {
+        // `Load key "k": Permission denied` is a local file problem, not a login.
+        "key unreadable"
     } else if lower.contains("permission denied") {
         "auth failed"
     } else if lower.contains("host key verification failed") {
@@ -208,7 +214,11 @@ pub fn spawn_test(
             let result = runner.run_with_hops(&step.argv, "true", secret.as_ref(), &hops, &cancel);
             drop((secret, hops));
             let state = match result {
-                Ok((0, _, _)) => StepState::Ok {
+                // 255 is ssh's own failure. Any other non-zero status is the
+                // remote command's: the login worked, but a `nologin` /
+                // `ForceCommand` / restricted bastion did not run `true`, and
+                // such a host still forwards for the next hop.
+                Ok((exit, _, _)) if exit == 0 || (0..255).contains(&exit) => StepState::Ok {
                     ms: started.elapsed().as_millis() as u64,
                 },
                 Ok((exit, _, stderr)) => {
@@ -437,6 +447,52 @@ mod tests {
             StepState::Failed { reason, .. } => assert_eq!(reason, "timeout"),
             s => panic!("{s:?}"),
         }
+    }
+
+    #[test]
+    fn remote_command_exit_is_a_working_hop_and_unreadable_key_is_not_auth_failed() {
+        struct Fake;
+        impl CommandRunner for Fake {
+            fn run(
+                &self,
+                _: &[String],
+                _: &str,
+                _: Option<&crate::session::PendingSecret>,
+                _: &AtomicBool,
+            ) -> Result<(i32, String, String), String> {
+                // `nologin` / `ForceCommand` bastion: ssh itself succeeded.
+                Ok((1, String::new(), "This account is not available.".into()))
+            }
+        }
+        let step = TestStep {
+            label: "h".into(),
+            host: None,
+            argv: vec!["ssh".into()],
+            secret: None,
+            hops: None,
+            cmd: String::new(),
+            shown: String::new(),
+            skip: None,
+        };
+        let rx = spawn_test(vec![step], Arc::new(Fake), Arc::new(AtomicBool::new(false)));
+        let mut last = StepState::Pending;
+        while let Ok(TestEvent::Step { state, .. }) = rx.recv() {
+            last = state;
+        }
+        assert!(matches!(last, StepState::Ok { .. }), "{last:?}");
+
+        assert_eq!(
+            classify_failure(255, "Load key \"/k\": Permission denied").0,
+            "key unreadable"
+        );
+        assert_eq!(
+            classify_failure(
+                255,
+                "Load key \"/k\": Permission denied\nu@h: Permission denied (publickey)."
+            )
+            .0,
+            "auth failed"
+        );
     }
 
     #[test]

@@ -36,7 +36,12 @@ pub fn render_middle_stack(frame: &mut Frame, area: Rect, app: &App) {
 
     // ── Panel 2: Agent info ─────────────────────────────
     let remaining = area.y + area.height - y;
-    let agent_area = Rect::new(area.x, y, w, AGENT_H.min(remaining));
+    let agent_area = Rect::new(
+        area.x,
+        y,
+        w,
+        crate::tui::dashboard_layout::middle_panel_h(AGENT_H, remaining),
+    );
     render_agent_panel(buf, agent_area, app);
     y += agent_area.height + crate::tui::dashboard_layout::PANEL_GAP;
 

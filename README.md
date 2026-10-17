@@ -447,7 +447,7 @@ arrives as arrow keys, exactly as in a real terminal.
 
 | Key       | Action                           |
 |-----------|----------------------------------|
-| `/`       | Fuzzy filter (label, host, ports, type; `Enter` keeps, `Esc` clears) |
+| `/`       | Fuzzy filter (label, host, ports, type; words may match different fields; `Enter` keeps, `Esc` clears) |
 | `a`       | Add tunnel                       |
 | `e`       | Edit tunnel                      |
 | `d`       | Delete tunnel                    |

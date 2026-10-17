@@ -582,11 +582,12 @@ mod hop_tests {
         ]);
         let mut stored = Some(PendingSecret::Password("target-pw".into()));
 
+        // One ask at a time: two threads started back to back connect in
+        // whichever order the scheduler picks, and the channel queues by that.
         let first = rig.ask("ops@10.0.4.11's password: ", HOP_1);
+        rig.poll_until(&mut stored, |_, _| first.is_finished());
         let second = rig.ask("ops@10.0.4.12's password: ", HOP_2);
-        rig.poll_until(&mut stored, |_, _| {
-            first.is_finished() && second.is_finished()
-        });
+        rig.poll_until(&mut stored, |_, _| second.is_finished());
         assert_eq!(first.join().unwrap().unwrap(), "lb-1-pw");
         assert_eq!(second.join().unwrap().unwrap(), "lb-2-pw");
         // The target's password went to neither, and no modal was needed.
@@ -644,6 +645,35 @@ mod hop_tests {
             assert_eq!(asking.join().unwrap().unwrap(), "typed");
         }
         assert!(asked.lock().unwrap().is_empty(), "nothing was fetched");
+    }
+
+    #[test]
+    fn a_server_chosen_prompt_naming_a_hop_never_fetches_that_hops_password() {
+        // A hostile bastion can make ssh show any keyboard-interactive text,
+        // but ssh prefixes it `(user@host) `. A prompt that merely names lb-2
+        // (or carries a banner line in front) is the user's to answer.
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let mut rig = Rig::new(vec![hop("lb-2", "10.0.4.12", Some("lb-2-pw"), &asked)]);
+        let mut stored = Some(PendingSecret::Password("target-pw".into()));
+        for prompt in [
+            "(ops@10.0.4.11) ops@10.0.4.12's password: ",
+            "Welcome\nops@10.0.4.12's password: ",
+        ] {
+            let asking = rig.ask(prompt, HOP_1);
+            rig.poll_until(&mut stored, |r, _| r.auth.request.is_some());
+            assert!(
+                rig.auth.request_hop().is_none(),
+                "{prompt:?} was taken for lb-2"
+            );
+            assert_eq!(rig.auth.save_target(PromptClass::Password), None);
+            rig.auth.answer("typed".into(), false).unwrap();
+            assert_eq!(asking.join().unwrap().unwrap(), "typed");
+        }
+        assert!(
+            asked.lock().unwrap().is_empty(),
+            "lb-2's secret was fetched"
+        );
+        assert!(stored.is_some());
     }
 
     #[test]

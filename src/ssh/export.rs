@@ -38,25 +38,62 @@ pub fn render_launcher_hosts(store: &LauncherStore) -> Result<String> {
     for host in hosts {
         // Materialize the effective values: an exported static config cannot
         // express inheritance, so group defaults are baked into each block.
-        // Resolution never fails closed here — fall back to the stored row.
+        // Fail closed: a row that does not resolve or validate is never
+        // written, since every later `ssh` run would read the file.
         let resolved = store
             .resolve_connection(&host)
-            .unwrap_or_else(|_| crate::store::ResolvedConnection::from_stored(&host));
-        out.push_str(&render_host_block(&host, &resolved));
+            .with_context(|| format!("host '{}'", host.name))?;
+        out.push_str(
+            &render_host_block(&host, &resolved)
+                .with_context(|| format!("host '{}' cannot be exported", host.name))?,
+        );
         out.push('\n');
     }
     Ok(out)
 }
-/// Collapse anything that could break out of a single ssh_config line. A field
-/// carrying an embedded newline would otherwise inject arbitrary directives
-/// (e.g. a `Host *` stanza) into the exported file, so flatten CR/LF to spaces.
-fn conf_val(s: &str) -> String {
-    s.replace(['\n', '\r'], " ")
+
+/// A value for a single-token ssh_config field (`Host` pattern, `HostName`,
+/// `User`): no whitespace/control/quote/`#` that would split or end the line,
+/// plus (for the `Host` line) none of the pattern characters `*?!,`.
+fn token(field: &str, s: &str, pattern: bool) -> Result<String> {
+    let bad = |c: char| {
+        c.is_whitespace()
+            || c.is_control()
+            || matches!(c, '"' | '\'' | '\\' | '#')
+            || (pattern && matches!(c, '*' | '?' | '!' | ','))
+    };
+    if s.is_empty() || s.starts_with('-') || s.contains(bad) {
+        anyhow::bail!("{field} {s:?} is not safe to write into ssh_config");
+    }
+    Ok(s.replace('%', "%%"))
 }
 
-fn render_host_block(host: &ManagedHost, resolved: &crate::store::ResolvedConnection) -> String {
-    let mut lines = vec![format!("Host {}", conf_val(&host.name))];
-    lines.push(format!("    HostName {}", conf_val(&host.address)));
+/// A path field (`IdentityFile`, `CertificateFile`): quoted when it has
+/// spaces, `%` doubled so ssh does not expand tokens.
+fn path_val(field: &str, p: &Path) -> Result<String> {
+    let s = p.to_string_lossy();
+    if s.contains(|c: char| c.is_control()) {
+        anyhow::bail!("{field} {s:?} contains control characters");
+    }
+    let s = s.replace('%', "%%");
+    Ok(
+        if s.contains(|c: char| c.is_whitespace() || matches!(c, '"' | '\\')) {
+            format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+        } else {
+            s
+        },
+    )
+}
+
+fn render_host_block(
+    host: &ManagedHost,
+    resolved: &crate::store::ResolvedConnection,
+) -> Result<String> {
+    let mut lines = vec![format!("Host {}", token("name", &host.name, true)?)];
+    lines.push(format!(
+        "    HostName {}",
+        token("address", &host.address, false)?
+    ));
 
     let user = resolved.username.as_deref().or_else(|| {
         resolved
@@ -65,7 +102,7 @@ fn render_host_block(host: &ManagedHost, resolved: &crate::store::ResolvedConnec
             .and_then(|i| i.username.as_deref())
     });
     if let Some(user) = user {
-        lines.push(format!("    User {}", conf_val(user)));
+        lines.push(format!("    User {}", token("username", user, false)?));
     }
 
     if resolved.port != 22 {
@@ -79,7 +116,7 @@ fn render_host_block(host: &ManagedHost, resolved: &crate::store::ResolvedConnec
     {
         lines.push(format!(
             "    IdentityFile {}",
-            conf_val(&key.to_string_lossy())
+            path_val("IdentityFile", key)?
         ));
     }
 
@@ -90,13 +127,16 @@ fn render_host_block(host: &ManagedHost, resolved: &crate::store::ResolvedConnec
     {
         lines.push(format!(
             "    CertificateFile {}",
-            conf_val(&cert.to_string_lossy())
+            path_val("CertificateFile", cert)?
         ));
     }
 
     if let Some(jump) = &resolved.proxy_jump {
         if !jump.is_empty() {
-            lines.push(format!("    ProxyJump {}", conf_val(jump)));
+            if let Some(problem) = crate::map::hops::jump_problem(jump) {
+                anyhow::bail!("{problem}");
+            }
+            lines.push(format!("    ProxyJump {jump}"));
         }
     }
 
@@ -106,14 +146,20 @@ fn render_host_block(host: &ManagedHost, resolved: &crate::store::ResolvedConnec
 
     if let Some(cmd) = &host.remote_command {
         if !cmd.is_empty() {
+            if cmd.contains(|c: char| c.is_control()) {
+                anyhow::bail!("remote command contains control characters");
+            }
             lines.push(format!(
                 "    {}",
-                crate::ssh::host::format_ssh_config_option("RemoteCommand", &conf_val(cmd))
+                crate::ssh::host::format_ssh_config_option(
+                    "RemoteCommand",
+                    &cmd.replace('%', "%%")
+                )
             ));
         }
     }
 
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
 /// Write `content` to `path` atomically, backing up an existing file to `path.bak`.
@@ -229,6 +275,60 @@ mod tests {
 
         let content = render_launcher_hosts(&store).unwrap();
         assert!(content.contains("RemoteCommand=\"tmux attach\""));
+    }
+
+    fn launcher_host(
+        store: &LauncherStore,
+        name: &str,
+        address: &str,
+    ) -> crate::store::ManagedHost {
+        store
+            .create_host(&NewHost {
+                name: name.into(),
+                address: address.into(),
+                port: Some(22),
+                ..Default::default()
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn export_refuses_an_invalid_proxy_jump() {
+        let store = LauncherStore::open_in_memory().unwrap();
+        let mut h = launcher_host(&store, "evil", "10.0.0.1");
+        h.proxy_jump = Some("a$IFS-oProxyCommand=touch$IFS/tmp/x@h".into());
+        let err =
+            render_host_block(&h, &crate::store::ResolvedConnection::from_stored(&h)).unwrap_err();
+        assert!(format!("{err:#}").contains("ProxyJump"), "{err:#}");
+    }
+
+    #[test]
+    fn export_refuses_pattern_and_whitespace_values() {
+        let store = LauncherStore::open_in_memory().unwrap();
+        for (n, name) in ["*", "a *", "a,b", "!x", "a b"].into_iter().enumerate() {
+            let h = launcher_host(&store, &format!("ok{n}"), "10.0.0.1");
+            let h = crate::store::ManagedHost {
+                name: name.into(),
+                ..h
+            };
+            let r = crate::store::ResolvedConnection::from_stored(&h);
+            assert!(render_host_block(&h, &r).is_err(), "name {name:?}");
+        }
+        let mut h = launcher_host(&store, "ws", "10.0.0.1");
+        h.address = "10.0.0.1 extra".into();
+        let r = crate::store::ResolvedConnection::from_stored(&h);
+        assert!(render_host_block(&h, &r).is_err());
+    }
+
+    #[test]
+    fn export_escapes_percent_and_quotes_spaced_paths() {
+        let mut p = PathBuf::from("/home/Mary Ann/.ssh/id%h");
+        assert_eq!(
+            path_val("IdentityFile", &p).unwrap(),
+            "\"/home/Mary Ann/.ssh/id%%h\""
+        );
+        p = PathBuf::from("/k/id");
+        assert_eq!(path_val("IdentityFile", &p).unwrap(), "/k/id");
     }
 
     #[test]

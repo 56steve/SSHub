@@ -84,13 +84,23 @@ pub struct SessionConfig {
     pub hops: Vec<hop_auth::HopSecret>,
 }
 
-/// Auto-respond once to either a password or passphrase prompt.
-#[derive(Debug, Clone)]
+/// Auto-respond once to either a password or passphrase prompt. `Debug` is
+/// written by hand: the value never reaches `{:?}`, a log or a panic message.
+#[derive(Clone)]
 pub enum PendingSecret {
     /// Sent on `password:`-style prompts only.
     Password(String),
     /// Sent on `Enter passphrase for …` prompts only.
     Passphrase(String),
+}
+
+impl std::fmt::Debug for PendingSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            PendingSecret::Password(_) => "PendingSecret::Password(..)",
+            PendingSecret::Passphrase(_) => "PendingSecret::Passphrase(..)",
+        })
+    }
 }
 
 impl PendingSecret {
@@ -286,8 +296,12 @@ impl Session {
         siphon_stderr: bool,
     ) -> Result<Self> {
         let (pty_rows, pty_cols) = floor_grid(grid);
-        let interactive = config.key_push_identity.is_none()
-            && matches!(config.argv.first().map(String::as_str), Some("ssh"));
+        // OpenSSH before 8.4 ignores `SSH_ASKPASS_REQUIRE` and asks on the PTY,
+        // where no answer ever arrives: leave such an ssh to the live terminal.
+        let program = config.argv.first().map(String::as_str);
+        let askpass_ok = program != Some("ssh") || ssh_honors_askpass_require();
+        let interactive =
+            askpass_ok && config.key_push_identity.is_none() && matches!(program, Some("ssh"));
         let mut auth = if interactive {
             Some(interactive_auth::InteractiveAuth::new()?)
         } else {
@@ -304,10 +318,10 @@ impl Session {
         if let Some(auth) = auth.as_ref() {
             env = auth.channel_env(&askpass::helper_exe()?);
             use_askpass = true;
-        } else if config.pending_secret.is_some() || !config.hops.is_empty() {
+        } else if askpass_ok && (config.pending_secret.is_some() || !config.hops.is_empty()) {
             match askpass::helper_exe() {
                 Ok(exe) => {
-                    let secret = config.pending_secret.as_ref().map(PendingSecret::value);
+                    let secret = config.pending_secret.as_ref();
                     if let Ok(guard) = askpass::AskpassSecret::staged(secret, &config.hops) {
                         env = guard.env(&exe);
                         askpass = Some(guard);
@@ -926,6 +940,24 @@ impl Session {
         self.host_key_fingerprint.as_deref()
     }
 
+    /// Whether `spec` (ssh's lookup name: `host` or `[host]:port`) is the host
+    /// this session connects to: its address, a host argument of the command,
+    /// or an explicit `HostKeyAlias`.
+    fn names_this_session(&self, spec: &str) -> bool {
+        let host = spec
+            .strip_prefix('[')
+            .and_then(|rest| rest.split_once("]:"))
+            .map_or(spec, |(host, _)| host);
+        self.meta.address.as_deref() == Some(host)
+            || self.config.argv.iter().skip(1).any(|arg| {
+                arg.rsplit_once('@').map_or(arg.as_str(), |(_, h)| h) == host
+                    || arg
+                        .strip_prefix("HostKeyAlias=")
+                        .or_else(|| arg.strip_prefix("-oHostKeyAlias="))
+                        == Some(spec)
+            })
+    }
+
     /// True when ssh refused because the server's host key CHANGED versus
     /// known_hosts (a mismatch), as opposed to a merely-unknown first-time host.
     /// This is the case worth offering to accept — a changed key can be a
@@ -945,6 +977,11 @@ impl Session {
                 .map(|(host, _)| host)
         });
         let spec = specs.next()?;
+        // ssh's stderr also carries whatever a server's banner prints, so the
+        // name must be one this session connects to, not just any host.
+        if !self.names_this_session(spec) {
+            return None;
+        }
         if spec.is_empty()
             || spec.starts_with('-')
             || spec.contains([',', '*', '?'])
@@ -1210,6 +1247,29 @@ const REVEAL_TIMEOUT: Duration = Duration::from_secs(6);
 /// secret is typed, or until the reveal timeout fails open.
 fn should_reveal(armed: bool, secret_sent: bool, elapsed: Duration) -> bool {
     !armed || secret_sent || elapsed >= REVEAL_TIMEOUT
+}
+
+/// `(major, minor)` of an `ssh -V` banner (`OpenSSH_8.2p1 Ubuntu-4…`).
+fn openssh_version(banner: &str) -> Option<(u32, u32)> {
+    let rest = banner.split("OpenSSH_").nth(1)?;
+    let (major, rest) = rest.split_once('.')?;
+    let minor: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// Whether the installed `ssh` honours `SSH_ASKPASS_REQUIRE` (OpenSSH 8.4+).
+/// An older one asks on the PTY and never calls the helper, so no stored or
+/// typed answer can reach it. Unknown versions count as supported.
+fn ssh_honors_askpass_require() -> bool {
+    static HONORED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        let Ok(out) = std::process::Command::new("ssh").arg("-V").output() else {
+            return true;
+        };
+        let banner = String::from_utf8_lossy(&out.stderr).into_owned()
+            + &String::from_utf8_lossy(&out.stdout);
+        openssh_version(&banner).is_none_or(|version| version >= (8, 4))
+    });
+    *HONORED
 }
 
 /// Things ssh / sshd actually say when asking for a password. Keep the
@@ -1576,7 +1636,11 @@ mod prompt_tests {
             hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 30".into()],
             display_name: "offline".into(),
-            meta: SessionMeta::default(),
+            meta: SessionMeta {
+                address: Some("alias".into()),
+                port: Some(2222),
+                ..SessionMeta::default()
+            },
             pending_secret: None,
             key_push_identity: None,
             host_name: "offline".into(),
@@ -1592,10 +1656,26 @@ mod prompt_tests {
             "Offending ED25519 key in /tmp/keys:0\nHost key for alias has changed\n",
             "Offending ED25519 key in /tmp/keys:1\nHost key for alias has changed\nHost key for other has changed\n",
             "Offending ED25519 key in /tmp/keys:1\nOffending RSA key in /tmp/other:2\nHost key for alias has changed\n",
+            // A banner naming another host must not aim the repair at that host.
+            "Offending ED25519 key in /home/u/.ssh/known_hosts:1\nHost key for github.com has changed and you have requested strict checking.\n",
         ] {
             session.debug_log = log.into();
             assert!(session.changed_key_target().is_none(), "ambiguous or invalid target must not be repaired");
         }
+    }
+
+    #[test]
+    fn openssh_versions_are_read_from_the_ssh_v_banner() {
+        assert_eq!(
+            openssh_version("OpenSSH_8.2p1 Ubuntu-4ubuntu0.5, OpenSSL 1.1.1f"),
+            Some((8, 2))
+        );
+        assert_eq!(
+            openssh_version("OpenSSH_10.0p2 Debian-7, OpenSSL 3.5.1"),
+            Some((10, 0))
+        );
+        assert_eq!(openssh_version("OpenSSH_for_Windows_9.5p1"), None);
+        assert_eq!(openssh_version("dropbear"), None);
     }
 
     #[test]

@@ -30,6 +30,11 @@ impl App {
             return Ok(());
         }
 
+        // The map tab's filter line and host picker take pasted text too.
+        if self.map_paste(text) {
+            return Ok(());
+        }
+
         // Only insert into modes that own a focused text field. Everywhere else
         // a paste is meaningless and must NOT be run as commands.
         let text_entry = matches!(
@@ -46,7 +51,9 @@ impl App {
                 | AppMode::ImportPrompt
                 | AppMode::SnippetForm
                 | AppMode::SnippetPicker
-        );
+        ) || (self.mode == AppMode::Normal
+            && matches!(self.active_tab, 2 | 3)
+            && self.list_filter_editing);
         if !text_entry {
             return Ok(());
         }
@@ -103,7 +110,7 @@ impl App {
         // so the 3-column routing below must not run (it would select a host
         // "through" the panel). Route the wheel to the zoomed panel's scroll and
         // swallow clicks.
-        if self.panel_zoomed {
+        if self.panel_zoomed && self.active_tab == 0 {
             match mouse.kind {
                 MouseEventKind::ScrollDown => self.scroll_zoomed(true, 3),
                 MouseEventKind::ScrollUp => self.scroll_zoomed(false, 3),
@@ -203,8 +210,9 @@ impl App {
 
         // Tab bar clicks
         if y == areas.tab_bar.y {
-            if let Some(tab) = tab_from_x(x) {
-                self.list_filter_editing = false;
+            let has_profile = self.profile.as_ref().is_some_and(|p| !p.compat);
+            if let Some(tab) = crate::tui::widgets::tab_bar::tab_at(x, areas.tab_bar, has_profile) {
+                self.reset_tab_input_state();
                 match tab {
                     0 => self.active_tab = 0,
                     1 => self.switch_to_sftp_tab(),
@@ -283,6 +291,11 @@ impl App {
                     );
                     let card_h = 6u16;
                     let rel_y = y.saturating_sub(areas.body.y);
+                    // Below the card grid are the agent strip and the filter bar.
+                    let grid_h = crate::tui::screens::keys::grid_height(areas.body.height);
+                    if rel_y >= grid_h {
+                        return Ok(());
+                    }
                     let row_idx = rel_y / (card_h + 1);
                     let col_idx = if cards_per_row > 1 {
                         let card_w = inner_w.saturating_sub((cards_per_row as u16 - 1) * 2)
@@ -299,8 +312,7 @@ impl App {
                     } else {
                         0
                     };
-                    let row_offset =
-                        self.keys_scroll_row_offset(areas.body.height, cards_per_row, card_h + 1);
+                    let row_offset = self.keys_scroll_row_offset(grid_h, cards_per_row, card_h + 1);
                     let pos = (row_idx as usize + row_offset) * cards_per_row + col_idx as usize;
                     if let Some(&idx) = view.get(pos) {
                         self.identity_selected = idx;

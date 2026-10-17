@@ -102,6 +102,8 @@ pub struct HopEditor {
     /// The map of every host, built on first use and kept while the form is
     /// open (the picker and the raw-hop loop check both read it).
     map_cache: std::cell::RefCell<Option<Map>>,
+    /// Set when the host list could not be read for `map_cache`.
+    map_error: std::cell::RefCell<Option<String>>,
 }
 
 /// One row of the hop list as drawn.
@@ -785,6 +787,11 @@ impl App {
                     t.remove(sel);
                     self.set_form_hops(&t);
                     self.hop_editor.selected = sel.saturating_sub(1);
+                    if t.is_empty() {
+                        self.hop_editor.notice = Some(
+                            "no own hops left: inherits the group's ProxyJump (n = direct)".into(),
+                        );
+                    }
                 }
             }
             KeyCode::Char('n') if plain => {
@@ -800,6 +807,8 @@ impl App {
                     f.dirty = true;
                 }
                 self.hop_editor.selected = 0;
+                self.hop_editor.notice =
+                    Some("cleared: the host inherits its group's ProxyJump".into());
             }
             // Typing must not leak into the value: the list is the editor.
             KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Left | KeyCode::Right => {}
@@ -812,8 +821,14 @@ impl App {
     /// `\u{3a3}` line under the list reads it).
     fn editor_map(&self) -> std::cell::Ref<'_, Map> {
         if self.hop_editor.map_cache.borrow().is_none() {
-            let hosts: Vec<MapHost> =
-                crate::map::collect_hosts(&self.store, &self.hosts).unwrap_or_default();
+            let hosts: Vec<MapHost> = match crate::map::collect_hosts(&self.store, &self.hosts) {
+                Ok(h) => h,
+                Err(e) => {
+                    *self.hop_editor.map_error.borrow_mut() =
+                        Some(format!("cannot check for loops: {e:#}"));
+                    Vec::new()
+                }
+            };
             *self.hop_editor.map_cache.borrow_mut() = Some(Map::build(hosts));
         }
         std::cell::Ref::map(self.hop_editor.map_cache.borrow(), |m| {
@@ -821,7 +836,22 @@ impl App {
         })
     }
 
+    /// Why the loop guard has no host list, if it has none. The failed (empty)
+    /// map is dropped so the next attempt reads the store again.
+    fn editor_map_failure(&self) -> Option<String> {
+        drop(self.editor_map());
+        let err = self.hop_editor.map_error.borrow_mut().take();
+        if err.is_some() {
+            *self.hop_editor.map_cache.borrow_mut() = None;
+        }
+        err
+    }
+
     fn open_hop_picker(&mut self, target: PickTarget) {
+        if let Some(e) = self.editor_map_failure() {
+            self.hop_editor.notice = Some(e);
+            return;
+        }
         let edited = self
             .host_form
             .as_ref()
@@ -834,6 +864,9 @@ impl App {
             .hosts
             .iter()
             .enumerate()
+            // A name ssh -J cannot take as a hop (spaces, non-ASCII) would be
+            // saved, then refused at connect: not offered.
+            .filter(|(_, h)| hops::token_issue(&h.name).is_none())
             .map(|(i, h)| PickHost {
                 name: h.name.clone(),
                 group: h.group.clone(),
@@ -949,6 +982,11 @@ impl App {
             KeyCode::Enter => {
                 if let Ok(token) = hops::validate_raw(&r.text) {
                     let target = r.target;
+                    if let Some(e) = self.editor_map_failure() {
+                        self.hop_editor.notice = Some(e);
+                        self.hop_editor.raw = None;
+                        return;
+                    }
                     let host_part = crate::map::parse_raw_hop(&token).map(|h| h.host);
                     let edited = self
                         .host_form

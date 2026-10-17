@@ -1048,7 +1048,12 @@ mod tests {
         let config = SessionConfig {
             hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "printf 'WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\\nOffending ED25519 key in %s:1\\nHost key for [alias]:2222 has changed and you have requested strict checking.\\n' \"$1\" >&2; sleep 30".into(), "fixture".into(), keys.to_string_lossy().into_owned()],
-            display_name: "Ad-hoc label".into(), meta: SessionMeta::default(),
+            display_name: "Ad-hoc label".into(),
+            meta: SessionMeta {
+                address: Some("alias".into()),
+                port: Some(2222),
+                ..SessionMeta::default()
+            },
             pending_secret: None, key_push_identity: None, host_name: "original-adhoc-target".into(),
         };
         let mut session = Session::spawn(config, (24, 100), None).unwrap();

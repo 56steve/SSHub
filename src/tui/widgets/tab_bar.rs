@@ -65,6 +65,36 @@ const TABS: [(&str, &str); 6] = [
     ("6", "map"),
 ];
 
+/// Compact tab spacing leaves room for the profile and badges at 120 columns.
+fn tabs_compact(width: u16, has_profile: bool) -> bool {
+    has_profile && width < 132
+}
+
+/// Blank columns after each tab.
+fn tab_gap(compact: bool) -> u16 {
+    if compact {
+        0
+    } else {
+        3
+    }
+}
+
+/// The tab (0-based) under column `x` of a tab bar drawn into `area`. Walks the
+/// same widths [`render_tab_bar`] advances by: one margin column, then per tab
+/// four columns of number and padding, the label, and the gap.
+pub fn tab_at(x: u16, area: Rect, has_profile: bool) -> Option<usize> {
+    let gap = tab_gap(tabs_compact(area.width, has_profile));
+    let mut cx = area.x + 1;
+    for (i, (_, label)) in TABS.iter().enumerate() {
+        let w = 4 + label.len() as u16 + gap;
+        if x >= cx && x < cx + w {
+            return Some(i);
+        }
+        cx += w;
+    }
+    None
+}
+
 /// Render the tab bar into a 1-row `area`.
 ///
 /// * `active_tab` — 1-based index (1 = hosts, 2 = tunnels, …)
@@ -103,7 +133,7 @@ pub fn render_tab_bar(
     let dim = theme.style(StyleRole::TextDim);
     let muted = theme.style(StyleRole::TextMuted);
 
-    let compact = profile_name.is_some() && area.width < 132;
+    let compact = tabs_compact(area.width, profile_name.is_some());
     for (i, (num, label)) in TABS.iter().enumerate() {
         let tab_num = i + 1;
         let is_active = tab_num == active_tab;
@@ -136,9 +166,9 @@ pub fn render_tab_bar(
         // Compact tab spacing leaves room for the profile and badges at 120
         // columns: every inactive tab already opens with a space, which is the
         // only separation then.
-        let gap = if compact { "" } else { "   " };
-        buf.set_string(x, y, gap, dim);
-        x += gap.len() as u16;
+        let gap = tab_gap(compact);
+        buf.set_string(x, y, &"   "[..gap as usize], dim);
+        x += gap;
     }
     // Where the tabs end: the scope and version go before a tab does.
     let tabs_end = x;

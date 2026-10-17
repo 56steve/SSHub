@@ -383,13 +383,12 @@ impl crate::app::App {
     }
 
     pub(crate) fn transfer_identity_name(&self) -> Option<String> {
-        self.identities
-            .get(self.identity_selected)
+        self.selected_identity()
             .map(|identity| identity.name.clone())
     }
 
     pub(crate) fn transfer_tunnel_name(&self) -> Option<String> {
-        self.tunnels.get(self.tunnel_selected).map(|tunnel| {
+        self.selected_tunnel().map(|tunnel| {
             tunnel
                 .label
                 .clone()

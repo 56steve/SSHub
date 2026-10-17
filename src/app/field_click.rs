@@ -103,6 +103,8 @@ impl App {
                 if form.field != field {
                     // Walking away re-masks, as with Tab.
                     form.password_revealed = false;
+                    self.hop_editor.picker = None;
+                    self.hop_editor.raw = None;
                     form.field = field;
                 }
                 form.cursor = place(form.active_field(), glyph, masked);
