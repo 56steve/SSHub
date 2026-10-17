@@ -258,6 +258,7 @@ impl App {
             2 => self.handle_key_tunnels(key),
             3 => self.handle_key_keychain(key),
             4 => self.handle_key_audit(key),
+            5 => self.handle_key_map(key),
             _ => self.handle_key_normal(key),
         }
     }
@@ -266,8 +267,9 @@ impl App {
     /// in `AppMode::Normal`, unlike overlay inputs, which have their own mode
     /// and never see the global binds.
     fn dashboard_text_input_active(&self) -> bool {
-        self.active_tab == 1
-            && (self.sftp_picker_searching || self.sftp.as_ref().is_some_and(|s| s.searching))
+        (self.active_tab == 1
+            && (self.sftp_picker_searching || self.sftp.as_ref().is_some_and(|s| s.searching)))
+            || (self.active_tab == 5 && self.map_view.as_ref().is_some_and(|v| v.editing))
     }
 
     pub(crate) fn handle_key_normal(&mut self, key: KeyEvent) -> Result<()> {
@@ -613,6 +615,10 @@ impl App {
         if self.is_action(KeyAction::TabAudit, key) {
             self.active_tab = 4;
             self.refresh_audit_events();
+            return Ok(true);
+        }
+        if self.is_action(KeyAction::TabMap, key) {
+            self.switch_to_map_tab();
             return Ok(true);
         }
         Ok(false)
@@ -1020,7 +1026,7 @@ impl App {
                     state.selected = 0;
                 } else {
                     self.known_hosts = None;
-                    self.mode = AppMode::Normal;
+                    self.mode = self.known_hosts_return.take().unwrap_or(AppMode::Normal);
                 }
             }
             KeyCode::Up => {

@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result};
 
 use crate::secure_fs;
+use crate::session::hop_auth::HopSecret;
 use crate::session::{askpass, PendingSecret};
 use crate::store::{ManagedHost, ResolvedConnection, Tunnel, TunnelType};
 
@@ -41,6 +42,12 @@ pub fn build_tunnel_argv(
     resolved: &ResolvedConnection,
     has_stored_secret: bool,
 ) -> Result<Vec<String>> {
+    // A jump that is not valid hops would be dropped from the argv, and a
+    // tunnel that skips the configured bastion is a direct connection nobody
+    // asked for: refuse.
+    if let Some(problem) = &resolved.jump_error {
+        anyhow::bail!("{}: {problem}", host.name);
+    }
     let mut args: Vec<String> = vec!["ssh".into(), "-N".into()];
     splice_tunnel_ssh_options(&mut args, has_stored_secret);
 
@@ -69,7 +76,7 @@ pub fn build_tunnel_argv(
         args.push("-p".into());
         args.push(port.to_string());
     }
-    if let Some(jump) = resolved.proxy_jump.as_ref() {
+    if let Some(jump) = resolved.jump_argv.as_ref() {
         if !jump.is_empty() {
             args.push("-J".into());
             args.push(jump.clone());
@@ -137,12 +144,13 @@ pub fn splice_tunnel_ssh_options(args: &mut Vec<String>, has_stored_secret: bool
 pub fn stage_tunnel_askpass(
     cmd: &mut Command,
     secret: Option<&PendingSecret>,
+    hops: &[HopSecret],
 ) -> Result<Option<askpass::AskpassSecret>> {
-    let Some(secret) = secret else {
+    if secret.is_none() && hops.is_empty() {
         return Ok(None);
-    };
+    }
     let exe = askpass::helper_exe()?;
-    let guard = askpass::AskpassSecret::new(secret.value())?;
+    let guard = askpass::AskpassSecret::staged(secret.map(PendingSecret::value), hops)?;
     for (k, v) in guard.env(&exe) {
         cmd.env(k, v);
     }
@@ -274,6 +282,7 @@ pub fn spawn_detached_tunnel(
     host: &ManagedHost,
     resolved: &ResolvedConnection,
     secret: Option<&PendingSecret>,
+    hops: &[HopSecret],
     data_dir: &Path,
 ) -> Result<u32> {
     let pid_dir = ensure_tunnel_pid_dir(data_dir)?;
@@ -290,14 +299,14 @@ pub fn spawn_detached_tunnel(
         anyhow::bail!("local port {} already in use", tunnel.local_port);
     }
 
-    let args = build_tunnel_argv(tunnel, host, resolved, secret.is_some())?;
+    let args = build_tunnel_argv(tunnel, host, resolved, secret.is_some() || !hops.is_empty())?;
     let mut cmd = Command::new(&args[0]);
     cmd.args(&args[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    let staged = stage_tunnel_askpass(&mut cmd, secret)?;
+    let staged = stage_tunnel_askpass(&mut cmd, secret, hops)?;
     if staged.is_some() {
         cmd.env(askpass::READ_ONCE_ENV, "1");
     }
@@ -367,7 +376,7 @@ mod tests {
         // ssh here dials a closed port, so it never asks.
         use crate::store::{LauncherStore, NewHost};
         if Command::new("ssh").arg("-V").output().is_err() {
-            eprintln!("skipping: no ssh binary");
+            crate::test_support::tool_missing("ssh");
             return;
         }
         let free_port = || {
@@ -400,6 +409,7 @@ mod tests {
             &host,
             &ResolvedConnection::from_stored(&host),
             Some(&secret),
+            &[],
             data.path(),
         )
         .unwrap();
@@ -423,6 +433,43 @@ mod tests {
         remove_tunnel_pid(&path).unwrap();
         assert_eq!(read_tunnel_pid(&path).unwrap(), None);
     }
+    #[test]
+    fn a_tunnel_through_an_invalid_stored_jump_is_refused_not_run_direct() {
+        // `from_stored` is what callers fall back to when resolving fails; it
+        // drops the bad jump from the argv, so the tunnel itself must refuse.
+        let store = crate::store::LauncherStore::open_in_memory().unwrap();
+        let mut nh = crate::store::NewHost::launcher("web", "10.0.0.1");
+        nh.proxy_jump = Some("bastion,-oProxyCommand=id".into());
+        let host = store.create_host(&nh).unwrap();
+        let tunnel = Tunnel {
+            id: 1,
+            host_id: Some(host.id),
+            tunnel_type: TunnelType::Local,
+            local_port: 8080,
+            remote_host: "localhost".into(),
+            remote_port: 80,
+            label: None,
+            auto_connect: false,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let err = build_tunnel_argv(
+            &tunnel,
+            &host,
+            &ResolvedConnection::from_stored(&host),
+            false,
+        )
+        .expect_err("must refuse");
+        assert!(format!("{err:#}").contains("not a valid"), "{err:#}");
+        // A good jump still builds, with -J.
+        let mut ok = crate::store::NewHost::launcher("ok", "10.0.0.2");
+        ok.proxy_jump = Some("bastion".into());
+        let ok = store.create_host(&ok).unwrap();
+        let argv =
+            build_tunnel_argv(&tunnel, &ok, &ResolvedConnection::from_stored(&ok), false).unwrap();
+        assert!(argv.windows(2).any(|w| w == ["-J", "bastion"]));
+    }
+
     #[test]
     fn tunnel_argv_carries_group_inherited_connection_values() {
         // Oracle: hand-computed — the host sets no connection field itself;

@@ -53,6 +53,42 @@ pub fn render_header(frame: &mut Frame, area: Rect, stats: HeaderStats<'_>, them
     let dim = theme.style(StyleRole::TextDim);
     let color = |role| Style::default().fg(theme.color(role));
 
+    // One row (narrow terminals): the name, the figures, the clock. The
+    // wordmark's three rows are not worth two body rows below 120 columns, and
+    // the clock must never land on the stats.
+    if area.height == 1 {
+        let y = area.y;
+        let online_style = color(ColorRole::HeaderSessionSuccess);
+        let slow_style = color(ColorRole::HeaderSessionWarning);
+        let down_style = color(ColorRole::HeaderSessionError);
+        let mut x = put(
+            buf,
+            area.x + 1,
+            y,
+            "sshub",
+            theme.style(StyleRole::TextBright),
+        );
+        x = put(buf, x, y, "  ", dim);
+        for (text, style) in [
+            (stats.host_count.to_string(), value),
+            (" hosts".to_string(), muted),
+            (" \u{b7} ".to_string(), dim),
+            (format!("{} up", stats.online), online_style),
+            (" \u{b7} ".to_string(), dim),
+            (format!("{} slow", stats.slow), slow_style),
+            (" \u{b7} ".to_string(), dim),
+            (format!("{} down", stats.down), down_style),
+        ] {
+            x = put(buf, x, y, &text, style);
+        }
+        let clock_len = stats.clock.len() as u16;
+        let clock_x = (area.x + area.width).saturating_sub(clock_len + 1);
+        if clock_x > x + 1 {
+            buf.set_string(clock_x, y, stats.clock, muted);
+        }
+        return;
+    }
+
     // ── Wordmark (left side, 3 rows) ──────────────────────
     //
     // The two halves take the bright text role and the "online" green, which
@@ -140,8 +176,10 @@ pub fn render_session_strip(
     let mut name_spans: Vec<(u16, u16)> = Vec::with_capacity(chips.len());
     let buf = frame.buffer_mut();
     let y = area.y; // top row, alongside the wordmark
-    let start_x = area.x + 16; // clear of the widest wordmark line
-    let end_x = area.x + area.width; // right edge (exclusive)
+                    // One-row header: after the figures, before the clock.
+    let narrow = area.height == 1;
+    let start_x = area.x + if narrow { 46 } else { 16 }; // clear of the wordmark / stats
+    let end_x = (area.x + area.width).saturating_sub(if narrow { 13 } else { 0 });
     if start_x + 6 >= end_x {
         return; // too narrow to say anything useful
     }

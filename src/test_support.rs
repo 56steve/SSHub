@@ -1,9 +1,11 @@
 //! Neutral fixtures shared by the renderer tests.
 //!
-//! Everything here is in-memory: themes are parsed from strings beside the
-//! embedded `default`, the app is backed by an in-memory SQLite store and a
+//! The renderer fixtures are in-memory: themes are parsed from strings beside
+//! the embedded `default`, the app is backed by an in-memory SQLite store and a
 //! no-op password store, and buffers come from ratatui's `TestBackend`. No test
-//! using these helpers touches a real HOME, config file, database or keyring.
+//! using them touches a real HOME, config file, database or keyring. The
+//! exception is [`tempdir_sshd`], which starts a real `sshd` on loopback inside
+//! a temp dir (own keys, own `known_hosts`, never `~/.ssh`).
 //!
 //! The helpers live here rather than in one widget's test module because they
 //! belong to no single widget: `panel_box`, `hosts_panel`, `middle_stack`,
@@ -415,4 +417,171 @@ pub(crate) fn assert_panel_wears(buf: &Buffer, area: Rect, proof: PanelProof<'_>
         panel_marker(family, 4),
         "{family_path} ({state}): panel background at {body:?}"
     );
+}
+
+/// A key-auth `sshd` on a free 127.0.0.1 port, configured in a tempdir;
+/// `None` (test skipped) without sshd, ssh or ssh-keygen. Killed on drop.
+pub(crate) struct TempdirSshd {
+    pub(crate) dir: tempfile::TempDir,
+    pub(crate) port: u16,
+    pub(crate) user_key: std::path::PathBuf,
+    pub(crate) host_key: std::path::PathBuf,
+    pub(crate) log: std::path::PathBuf,
+    child: std::process::Child,
+}
+
+impl Drop for TempdirSshd {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A tool an oracle test needs is missing: skip, or fail when `CI` is set, so a
+/// runner without `sshd` or `dot` cannot turn the oracles into silent no-ops.
+pub(crate) fn tool_missing(what: &str) -> bool {
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "{what} is missing on a CI runner: the oracle tests would silently skip"
+    );
+    eprintln!("skipping: no {what}");
+    true
+}
+
+/// The login name of the current uid (`$USER` is often unset in containers).
+pub(crate) fn current_user() -> String {
+    std::process::Command::new("id")
+        .arg("-un")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .or_else(|| std::env::var("USER").ok())
+        .unwrap_or_else(|| "root".into())
+}
+
+pub(crate) fn tempdir_sshd() -> Option<TempdirSshd> {
+    tempdir_sshd_with(false)
+}
+
+/// Like [`tempdir_sshd`], but it asks for a password instead of a key. An
+/// unprivileged sshd cannot check one, so every answer is refused: enough to
+/// see which prompt ssh raises and what it is answered with.
+pub(crate) fn tempdir_sshd_asking_for_a_password() -> Option<TempdirSshd> {
+    tempdir_sshd_with(true)
+}
+
+fn tempdir_sshd_with(password: bool) -> Option<TempdirSshd> {
+    use std::process::Command;
+    let sshd_bin = ["sshd", "/usr/sbin/sshd", "/usr/bin/sshd"]
+        .into_iter()
+        .filter_map(|bin| {
+            Command::new("sh")
+                .arg("-c")
+                .arg(format!("command -v {bin}"))
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        })
+        .find(|path| path.starts_with('/'));
+    let Some(sshd_bin) = sshd_bin else {
+        tool_missing("sshd binary");
+        return None;
+    };
+    for bin in ["ssh", "ssh-keygen"] {
+        if Command::new("sh")
+            .arg("-c")
+            .arg(format!("command -v {bin} >/dev/null"))
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        tool_missing(&format!("{bin} binary"));
+        return None;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let host_key = dir.path().join("host_key");
+    let user_key = dir.path().join("id");
+    for (key, kind) in [(&host_key, "host"), (&user_key, "user")] {
+        let out = Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-f", key.to_str().unwrap(), "-q"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{kind} keygen failed: {out:?}");
+    }
+    let auth_keys = dir.path().join("auth_keys");
+    std::fs::copy(user_key.with_extension("pub"), &auth_keys).unwrap();
+    let cfg = dir.path().join("sshd_config");
+    let log = dir.path().join("sshd.log");
+    // The probe port is free when picked but not reserved: another process
+    // can take it before sshd binds. sshd then exits, so try a fresh port.
+    let mut attempts = 0;
+    let (port, child) = loop {
+        attempts += 1;
+        let port = {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            probe.local_addr().unwrap().port()
+        };
+        std::fs::write(
+            &cfg,
+            format!(
+                "Port {port}\nListenAddress 127.0.0.1\nHostKey {}\nPidFile {}\n\
+                 AuthorizedKeysFile {}\nStrictModes no\n\
+                 PasswordAuthentication {}\nKbdInteractiveAuthentication no\n\
+                 PubkeyAuthentication {}\nUsePAM no\n",
+                host_key.display(),
+                dir.path().join("sshd.pid").display(),
+                auth_keys.display(),
+                if password { "yes" } else { "no" },
+                if password { "no" } else { "yes" },
+            ),
+        )
+        .unwrap();
+        let mut sshd = Command::new(sshd_bin.as_str())
+            .args([
+                "-D",
+                "-f",
+                cfg.to_str().unwrap(),
+                "-E",
+                log.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let listening = loop {
+            if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+                break true;
+            }
+            if sshd.try_wait().unwrap().is_some() {
+                break false;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "tempdir sshd never listened: {}",
+                std::fs::read_to_string(&log).unwrap_or_default(),
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        if listening {
+            break (port, sshd);
+        }
+        assert!(
+            attempts < 5,
+            "tempdir sshd exited on {attempts} ports: {}",
+            std::fs::read_to_string(&log).unwrap_or_default(),
+        );
+    };
+    Some(TempdirSshd {
+        dir,
+        port,
+        user_key,
+        host_key,
+        log,
+        child,
+    })
 }

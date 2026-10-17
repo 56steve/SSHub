@@ -77,6 +77,9 @@ pub enum ClickHit {
         pane: crate::sftp::model::Focus,
         pos: Option<usize>,
     },
+    /// A hop or host glyph of the network map: `row` indexes the map's visible
+    /// rows, `pos` the cursor slot along it (see `MapView::pos`).
+    MapCell { row: usize, pos: usize },
 }
 
 /// A clickable region recorded by a renderer (#116): always a single row, so
@@ -671,8 +674,18 @@ pub enum BroadcastPhase {
 /// A pickable broadcast target (menu row).
 #[derive(Debug, Clone)]
 pub enum BroadcastTarget {
-    Group { id: i64, label: String },
-    Tag { name: String },
+    Group {
+        id: i64,
+        label: String,
+    },
+    Tag {
+        name: String,
+    },
+    /// An explicit host set (managed ids), e.g. the map's blast radius.
+    Hosts {
+        ids: Vec<i64>,
+        label: String,
+    },
 }
 
 /// One resolved target host in the preview (managed hosts only; entries with no
@@ -686,6 +699,9 @@ pub struct BroadcastCandidate {
     /// picked; threaded into the run so password hosts authenticate via
     /// SSH_ASKPASS. `None` => key/agent only.
     pub secret: Option<crate::session::PendingSecret>,
+    /// The jump hosts' own stored secrets, so a hop's prompt is not left to
+    /// fail and never answered with `secret`.
+    pub hops: Vec<crate::session::hop_auth::HopSecret>,
     pub selected: bool, // toggled in edit-targets
 }
 

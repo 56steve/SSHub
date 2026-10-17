@@ -131,6 +131,12 @@ fn cmd_add(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
         .transpose()?;
     let default_proxy_jump =
         take_opt(&mut rest, "--default-proxy-jump").and_then(|s| optional_field(&s));
+    if let Some(problem) = default_proxy_jump
+        .as_deref()
+        .and_then(crate::map::hops::jump_problem)
+    {
+        fail(&problem);
+    }
     let default_transport = take_opt(&mut rest, "--default-transport")
         .map(|s| parse_transport(&s).ok_or_else(|| anyhow::anyhow!("invalid --default-transport")))
         .transpose()?;
@@ -222,6 +228,13 @@ fn cmd_edit(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
         default_proxy_jump = Some(None);
     } else if let Some(v) = take_opt(&mut rest, "--set-default-proxy-jump") {
         default_proxy_jump = Some(optional_field(&v));
+        if let Some(problem) = default_proxy_jump
+            .as_ref()
+            .and_then(|j| j.as_deref())
+            .and_then(crate::map::hops::jump_problem)
+        {
+            fail(&problem);
+        }
     }
 
     let mut default_transport: Option<Option<crate::session_transport::SessionTransport>> = None;

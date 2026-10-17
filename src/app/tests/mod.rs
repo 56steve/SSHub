@@ -83,7 +83,7 @@ pub(crate) fn test_app_with_secrets(
 }
 
 /// Lets the test keep a handle on the store the app owns.
-struct SharedStore(Arc<MemoryPasswordStore>);
+pub(crate) struct SharedStore(pub(crate) Arc<MemoryPasswordStore>);
 
 impl crate::credentials::PasswordStore for SharedStore {
     fn get(&self, key: &str) -> Result<Option<String>> {

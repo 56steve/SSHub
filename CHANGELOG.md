@@ -4,6 +4,49 @@ All notable changes to SSHub are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Network map (tab 6) and a hop editor** (#79) - the jump hosts as a tree, with
+  every host as a status glyph behind its last hop and a column counting what
+  depends on each hop. Only real jumps are drawn: a host's own ProxyJump, a
+  group default, or an ssh_config `ProxyJump`. `B` shows a hop's blast radius
+  (and `b` broadcasts to it), `o` the tunnels riding on it (`x` starts or stops
+  one), `/` filters with `group:`, `tag:`, `via:` and `!name`, `u` makes a hop
+  the jump of another host, and `t` tests the path hop by hop with `ssh -J`,
+  reporting `auth failed`, `timeout`, `refused`, `host key changed` (with the
+  known_hosts line), `host key unknown` or `unknown host`. A jump loop is
+  flagged and not connectable, and a ProxyCommand shows as one opaque
+  `proxy cmd` hop. Big fleets cluster by group and fold the long tail; narrow
+  terminals get a compact layout and an outline below 80x24. In the host form
+  the ProxyJump field is now a hop list with a fuzzy picker (reuse a route,
+  add a host or a raw hop), a loop guard, per-hop test connect and a `direct`
+  option that overrides a group jump; it still saves the same comma separated
+  string. `sshub map --dot` prints the map for Graphviz. The ssh_config sync
+  now also records whether a host has a `ProxyCommand`, so the first start after
+  the upgrade rewrites each ssh_config row once (tags, notes and favorites stay).
+
+### Fixed
+
+- **Jump hosts with a saved password asked for it again** - connecting through
+  `lb-1 -> lb-2` to a host showed the SSH authentication modal for each hop,
+  although both hops' passwords were stored. A hop that asks for a password is
+  now answered with that hop host's own stored password (or key passphrase),
+  fetched when it asks; when it has none the modal names the hop and Remember
+  saves to that hop host. The destination's password still never goes to a hop,
+  and one hop's never to another. Tunnels, `sshub exec`, `sshub connect`,
+  broadcast, test connect and key push do the same.
+- **A ProxyJump hop with a shell-active user could run commands** - OpenSSH runs
+  the `-J` hop helper through a shell without quoting the user, so a stored or
+  imported ProxyJump such as `a$IFS-oProxyCommand=touch$IFS/tmp/x@host` ran
+  `touch` on connect, tunnel, broadcast and push-key. A hop must now be a
+  `[user@]host[:port]` of login and host-name characters only, everywhere a
+  jump reaches ssh; anything else is refused with a message.
+- **ProxyJump through a host that only exists in SSHub** - `ssh -J name` looked
+  the name up in DNS and `~/.ssh/config`, so a jump host saved only in SSHub
+  failed to resolve. The connect, tunnel and broadcast commands now hand ssh
+  `user@address:port` for such a hop. The hop's own identity is not sent: ssh
+  uses its defaults for every hop.
+
 ## [0.18.2] - 2026-10-13
 
 ### Fixed

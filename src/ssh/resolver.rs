@@ -53,6 +53,11 @@ impl HostResolver for SshConfigResolver {
     }
 
     fn resolve_host(&self, name: &str) -> Result<SshHost> {
+        // `ssh -G` has no `--`: a name like `-oLocalCommand=id` would be read
+        // as an option, so only a plain alias may reach it.
+        if name.starts_with('-') {
+            anyhow::bail!("refusing to resolve option-like host name {name:?}");
+        }
         let output = Command::new("ssh")
             .arg("-F")
             .arg(&self.config_path)
@@ -255,6 +260,7 @@ pub fn parse_ssh_g_output(name: &str, output: &str) -> SshHost {
             "user" => host.user = Some(value.to_string()),
             "port" => host.port = value.parse().ok(),
             "proxyjump" if value != "none" => host.proxy_jump = Some(value.to_string()),
+            "proxycommand" => host.has_proxy_command = true,
             "identityfile" if host.identity_file.is_none() => {
                 host.identity_file = Some(value.to_string());
             }
@@ -384,6 +390,7 @@ Host valid-one valid-two
                 forward_agent: None,
                 remote_command: None,
                 certificate_file: None,
+                has_proxy_command: false,
             }
         );
     }
@@ -408,6 +415,19 @@ identityfile /home/user/.ssh/id_rsa
             host.identity_file.as_deref(),
             Some("/home/user/.ssh/id_ed25519")
         );
+    }
+
+    #[test]
+    fn resolve_host_refuses_option_like_names() {
+        let resolver = SshConfigResolver::with_config_path("/nonexistent/config");
+        assert!(resolver.resolve_host("-oLocalCommand=id").is_err());
+    }
+
+    #[test]
+    fn parse_ssh_g_output_records_proxycommand_presence_only() {
+        let host = parse_ssh_g_output("h", "hostname x\nproxycommand cloudflared access ssh %h\n");
+        assert!(host.has_proxy_command);
+        assert!(host.proxy_jump.is_none());
     }
 
     #[test]
@@ -446,7 +466,7 @@ remotecommand tmux attach
     fn listed_aliases_round_trip_through_real_ssh() {
         use std::io::Write;
         if Command::new("ssh").arg("-V").output().is_err() {
-            eprintln!("skipping: no ssh binary");
+            crate::test_support::tool_missing("ssh");
             return;
         }
 

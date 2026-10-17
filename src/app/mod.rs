@@ -7,6 +7,7 @@ mod field_click;
 mod field_picker;
 pub(crate) mod ghost;
 mod groups;
+pub mod hop_editor;
 mod host_crud;
 mod host_detail;
 mod host_form;
@@ -18,6 +19,7 @@ mod keys;
 mod local_shell;
 mod log_browser;
 mod mouse;
+pub mod network_map;
 pub(crate) mod panes;
 mod profile_manager;
 pub(crate) mod profile_transfer;
@@ -29,6 +31,7 @@ mod sftp;
 mod snippets;
 mod suggestions;
 mod tags;
+pub mod test_connect;
 mod theme_picker;
 mod tunnels;
 mod types;
@@ -492,6 +495,16 @@ pub struct App {
     pub audit_filter: AuditFilter,
     pub audit_range: AuditRange,
     pub audit_selected: usize,
+    /// The network map tab's model and cursor; `None` until the tab is first
+    /// opened and after any host change while another tab is on screen.
+    pub map_view: Option<network_map::MapView>,
+    /// The structured ProxyJump editor of the host form.
+    pub hop_editor: hop_editor::HopEditor,
+    /// The running or last test connect (map or hop editor).
+    pub test_run: Option<test_connect::TestRun>,
+    /// Where the known-hosts manager returns to when it was opened from a
+    /// form (the hop editor's `H`); `Normal` otherwise.
+    pub known_hosts_return: Option<AppMode>,
     pub audit_scroll: usize,
     pub agent_info: Option<crate::ssh::agent::AgentInfo>,
     agent_info_updated: std::time::Instant,
@@ -533,7 +546,7 @@ pub struct App {
     resolver: Box<dyn HostResolver>,
     metadata: Arc<dyn MetadataStore>,
     store: Arc<LauncherStore>,
-    password_store: Box<dyn crate::credentials::PasswordStore>,
+    password_store: Arc<dyn crate::credentials::PasswordStore>,
     search: HostSearch,
 }
 
@@ -1109,6 +1122,10 @@ impl App {
             audit_filter: AuditFilter::default(),
             audit_range: AuditRange::default(),
             audit_selected: 0,
+            map_view: None,
+            hop_editor: hop_editor::HopEditor::default(),
+            test_run: None,
+            known_hosts_return: None,
             audit_scroll: 0,
             agent_info: None,
             agent_info_updated: std::time::Instant::now() - std::time::Duration::from_secs(60),
@@ -1131,7 +1148,7 @@ impl App {
             resolver: deps.resolver,
             metadata: deps.metadata,
             store: deps.store,
-            password_store: deps.password_store,
+            password_store: Arc::from(deps.password_store),
             search: HostSearch::new(),
         }
     }
@@ -1247,6 +1264,13 @@ impl App {
             self.metadata.as_ref(),
         )?;
         self.load_groups()?;
+        // The map is derived from the host list: rebuild it in place when it is
+        // on screen, otherwise drop it and let the next visit build it.
+        if self.active_tab == 5 {
+            self.rebuild_map();
+        } else {
+            self.map_view = None;
+        }
         self.rebuild_filter();
         if let Some(name) = selected_name {
             self.restore_selection_by_name(&name);

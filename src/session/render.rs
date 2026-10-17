@@ -998,6 +998,7 @@ mod tests {
 
     fn spawned_session() -> Session {
         let cfg = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["true".into()],
             display_name: "web-prod".into(),
             meta: SessionMeta::default(),
@@ -1256,6 +1257,7 @@ mod tests {
         // the buffer snapshot for the rest.
         let theme = session_marker_theme();
         let narrow_cfg = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["true".into()],
             display_name: "narrow".into(),
             meta: SessionMeta::default(),

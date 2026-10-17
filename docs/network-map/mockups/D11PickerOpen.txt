@@ -1,0 +1,45 @@
+  █▀▀ █▀▀ █ █ █ █ █▀▄                                                                                                                                           
+  ▀▀█ ▀▀█ █▀█ █ █ █▀▄   hosts: 214  ·  196 online  ·  9 slow  ·  9 unreachable                                                                Thu 14:02:11 UTC  
+  ▀▀▀ ▀▀▀ ▀ ▀ ▀▀▀ ▀▀                                                                                                                                            
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ [1] hosts    2  sftp    3  tunnels    4  identities    5  audit    6  map                                                            scope: ~/.config/sshub    
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ┌─ hosts ─ 214 ────────────────────────────────┐ ┌─ host · db-9 ────────────────────────────────────────────┐ ┌─ recent sessions ────────────────────────────┐ 
+ │ ▾ prod ············┌─ Edit host · db-9 ───────────────────────────────────────────────────────────────────────────────────────────────┐                    │ 
+ │   ● bastion-eu   10│   Address:        10.20.4.19                                                                                     │                    │ 
+ │   ● web-1        10│   Username:       postgres                                                                                       │                    │ 
+ │   ● web-2        10│   Label:          Primary DB replica 9                                                                           │                    │ 
+ │ ▾ prod/db ·········│   Name (alias):   db-9                                                                                           │                    │ 
+ │   ● db-1         10│   Port:           inherited: 22                                                                                  │                    │ 
+ │   × db-2         10│   Group:          prod/db                                                                                        │                    │ 
+ │ ▾ us ··············│   Identity:       inherit (id_ed25519_prod)                                                                      │                    │ 
+ │ ▸ staging ·········│   Tags:           #db #pci                                                                                       │                    │ 
+ │ ▸ lab ·············│ ▸ ProxyJump:      ┌─ hops ─ own value ───────────────────────────────────────────────────────────────────────┐   │                    │ 
+ │                    │                   │ 1  ● bastion-eu   saved · prod   ops@10.20.0.2:22                                   12ms │   │                    │ 
+ │                    │                   │▸2  ● jump-2       saved · prod   ops@10.20.9.2:22                                   31ms │   │                    │ 
+ │                    │                   │ + a saved host  r raw  │ ↵ replace  d remove  Ctrl+↑↓ move  X clear → inherit            │   │                    │ 
+ │                    │                   └─ saves as: bastion-eu,jump-2 ────────────────────────────────────────────────────────────┘   │                    │ 
+ │                    │                   path   ◉ you ━▶ ● bastion-eu ━▶ ● jump-2 ━▶ db-9                                               │────────────────────┘ 
+ │                    │                         ┌─ add hop after 2 ─ routes first, then hosts ───────────────────────────────────────┐   │────────────────────┐ 
+ │                    │   Agent forward:  inheri│ › ▏                                                       fuzzy · name, group, tag │   │                    │ 
+ │                    │   Startup command:(empty│ reuse a route (replaces all hops)                                                  │   │                    │ 
+ │                    │   Transport:      inheri│ you › bastion-eu            ● 12ms    8 hosts · prod                    ▕████████▏ │   │                    │ 
+ │                    │   Session log:    inheri│ you › bastion-eu › jump-2   ● 31ms    4 hosts · prod/db                 ▕████    ▏ │   │                    │ 
+ │                    │                         │ you › bastion-us            ● 88ms    3 hosts · us                      ▕███     ▏ │   │                    │ 
+ │                    │                         │ you › corp-gw               ● 4ms     3 hosts · ci · ssh_config         ▕███     ▏ │   │                    │ 
+ │                    │                         │┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈│   │                    │ 
+ │                    │                         │ one saved host                                                                     │   │                    │ 
+ │                    │                         │ ● corp-gw       ci       direct · ssh_config   4ms                                 │   │                    │ 
+ │                    │                         │ ● bastion-us    us       direct                88ms                                │   │                    │ 
+ │                    │                         │ ● bastion-eu    prod     direct                12ms                                │   │                    │ 
+ │                    │                         │ ○ db-9          prod/db  ↻ would loop                                              │   │                    │ 
+ │                    │                         │ + raw user@host:port   End                                                         │   │                    │ 
+ │                    │                         │ preview  you ━▶ bastion-eu ━▶ jump-2 ━▶ corp-gw ━▶ db-9                            │   │                    │ 
+ │                    │                         │                                                                                    │   │                    │ 
+ │                    │                         └─ ↵ add  End raw hop  Esc close ────────────────────────────────────────────────────┘   │                    │ 
+ │                    │                                                                                                                  │                    │ 
+ │                    │ F2/Ctrl+S save    Esc cancel                                                                                     │                    │ 
+ │                    └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘                    │ 
+ └──────────────────────────────────────────────┘ └───────────────────────────────────────────────────────────────────────────────────────────────────────────┘ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ↑↓ choose   ↵ add hop / use route   End raw hop   Esc close                                                                                                    

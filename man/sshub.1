@@ -292,6 +292,16 @@ is
 .I V
 is
 .BR all ", " connect ", " tunnel ", " agent ", " exec ", or " broadcast .
+.SS Map
+.TP
+.B sshub map \-\-dot
+Print the jump-host map as a Graphviz
+.B digraph
+(own ProxyJump, group defaults and ssh_config jumps only; jump loops red, a
+ProxyCommand as one opaque
+.B proxy cmd
+box). Pipe it to
+.BR dot (1).
 .SS Themes
 .TP
 .B sshub theme list \fR[\fB\-\-format\fR \fBplain\fR|\fBjson\fR]

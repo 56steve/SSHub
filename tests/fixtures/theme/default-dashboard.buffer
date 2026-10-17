@@ -593,16 +593,16 @@
 64,4, ,rgb:3d4a44,reset,reset,0
 65,4, ,rgb:3d4a44,reset,reset,0
 66,4, ,rgb:3d4a44,reset,reset,0
-67,4, ,reset,reset,reset,0
-68,4, ,reset,reset,reset,0
-69,4, ,reset,reset,reset,0
-70,4, ,reset,reset,reset,0
-71,4, ,reset,reset,reset,0
-72,4, ,reset,reset,reset,0
-73,4, ,reset,reset,reset,0
-74,4, ,reset,reset,reset,0
-75,4, ,reset,reset,reset,0
-76,4, ,reset,reset,reset,0
+67,4, ,rgb:3d4a44,reset,reset,0
+68,4,6,rgb:6a7a72,reset,reset,0
+69,4, ,rgb:3d4a44,reset,reset,0
+70,4, ,rgb:3d4a44,reset,reset,0
+71,4,m,rgb:3d4a44,reset,reset,0
+72,4,a,rgb:3d4a44,reset,reset,0
+73,4,p,rgb:3d4a44,reset,reset,0
+74,4, ,rgb:3d4a44,reset,reset,0
+75,4, ,rgb:3d4a44,reset,reset,0
+76,4, ,rgb:3d4a44,reset,reset,0
 77,4, ,reset,reset,reset,0
 78,4, ,reset,reset,reset,0
 79,4, ,reset,reset,reset,0

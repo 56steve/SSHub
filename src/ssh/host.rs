@@ -9,6 +9,9 @@ pub struct SshHost {
     pub forward_agent: Option<bool>,
     pub remote_command: Option<String>,
     pub certificate_file: Option<String>,
+    /// `ssh -G` reported a `ProxyCommand`. Presence only: the command line is
+    /// never stored or run (the network map shows it as an opaque hop).
+    pub has_proxy_command: bool,
 }
 
 impl SshHost {
@@ -23,6 +26,7 @@ impl SshHost {
             forward_agent: None,
             remote_command: None,
             certificate_file: None,
+            has_proxy_command: false,
         }
     }
 }
@@ -348,7 +352,7 @@ mod tests {
     fn an_option_like_address_is_not_read_as_an_ssh_option() {
         use std::process::Command;
         if Command::new("ssh").arg("-V").output().is_err() {
-            eprintln!("skipping: no ssh binary");
+            crate::test_support::tool_missing("ssh");
             return;
         }
 
