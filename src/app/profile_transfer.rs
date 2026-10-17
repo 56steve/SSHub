@@ -559,6 +559,13 @@ impl crate::app::App {
         if !result.blocked.is_empty() {
             notice.push_str(&format!(" (blocked: {})", result.blocked.join(", ")));
         }
+        let purge_failures = result.purge_source_secrets(self.password_store.as_ref());
+        if !purge_failures.is_empty() {
+            notice.push_str(&format!(
+                " WARNING: {}",
+                crate::store::transfer::secret_purge_warning(&purge_failures)
+            ));
+        }
         self.host_notice = Some(notice);
         self.host_notice_at = Some(std::time::Instant::now());
         self.pending_transfer = None;

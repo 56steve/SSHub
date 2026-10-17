@@ -332,6 +332,7 @@ pub(crate) fn a_chain_resolves_each_hops_own_stored_secret_and_never_the_targets
     let lb1 = mk("lb-1", "10.0.4.11", "ops", None);
     let lb2 = mk("lb-2", "10.0.4.12", "ops", None);
     let target = mk("1c-1", "10.0.4.91", "ops", Some("lb-1,lb-2"));
+    mk("lb-3", "10.0.4.13", "ops", None);
     for (host, pw) in [(&lb1, "lb-1-pw"), (&lb2, "lb-2-pw"), (&target, "1c-1-pw")] {
         secrets
             .set(&crate::credentials::host_key(host.id), pw)
@@ -343,23 +344,36 @@ pub(crate) fn a_chain_resolves_each_hops_own_stored_secret_and_never_the_targets
     let resolved = app.store().resolve_connection(&target).unwrap();
     let jump = resolved.proxy_jump.as_deref();
     let staged = hop_secrets(app.store(), &app.hosts, secrets.as_ref(), jump);
-    let view: Vec<(&str, &str, &str)> = staged
+    // References only: no stored secret is read, nor copied anywhere.
+    let view: Vec<(&str, &str, &[crate::credentials::SecretRef])> = staged
         .iter()
         .map(|h| {
             (
                 h.user.as_deref().unwrap_or(""),
                 h.host.as_str(),
-                h.value.as_str(),
+                h.refs.as_slice(),
             )
         })
         .collect();
+    let key = |id| {
+        [crate::credentials::SecretRef::Key(
+            crate::credentials::host_key(id),
+        )]
+    };
     assert_eq!(
         view,
         [
-            ("ops", "10.0.4.11", "lb-1-pw"),
-            ("ops", "10.0.4.12", "lb-2-pw")
+            ("ops", "10.0.4.11", key(lb1.id).as_slice()),
+            ("ops", "10.0.4.12", key(lb2.id).as_slice())
         ]
     );
+    assert!(!format!("{staged:?}").contains("-pw"));
+    // A saved hop with nothing stored (key auth) is not staged at all, so
+    // callers keep BatchMode and strict host-key checking for key-only chains.
+    let only_lb3 = hop_secrets(app.store(), &app.hosts, secrets.as_ref(), Some("lb-3"));
+    assert!(only_lb3.is_empty());
+    let mixed = hop_secrets(app.store(), &app.hosts, secrets.as_ref(), Some("lb-1,lb-3"));
+    assert_eq!(mixed.len(), 1);
     assert!(staged.iter().all(|h| h.class == PromptClass::Password));
 
     // Lazy form: nothing is read until a hop asks, and then only that hop's.

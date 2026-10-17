@@ -113,6 +113,12 @@ All notable changes to SSHub are documented in this file.
 - **Audit `via` ignored a ProxyJump inherited from the group.**
 - **Test connect** reports a hop that needs a typed password or 2FA as `needs
   interactive auth` instead of `auth failed`.
+- **Moving hosts to another profile left their saved passwords behind** - a move
+  now deletes the moved hosts' passwords (and orphaned identity passphrases)
+  from the source profile's keyring and warns if any cannot be removed.
+- **Jump-host passwords are no longer written to the temp file** used by
+  detached tunnels, `exec`, broadcast and key push: the file holds references
+  and the helper reads the credential store only when a hop asks.
 
 ## [0.18.2] - 2026-10-13
 

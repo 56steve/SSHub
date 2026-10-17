@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use super::auth_prompt::PromptClass;
 use super::PendingSecret;
+use crate::credentials::{SecretRef, StoreLocator};
 
 /// Fetches a hop's stored secret of the asked class, when the hop asks.
 pub type Fetch = Arc<dyn Fn(PromptClass) -> Option<PendingSecret> + Send + Sync>;
@@ -80,8 +81,9 @@ impl HopCred {
     }
 }
 
-/// A hop's secret already fetched, for ssh children that read it from a staged
-/// file (tunnels, exec, broadcast, key push).
+/// Where a hop's secret is kept, for ssh children that read it from a staged
+/// file (tunnels, exec, broadcast, key push). Holds a reference, never the
+/// secret: the helper reads the credential store when this hop actually asks.
 #[derive(Clone)]
 pub struct HopSecret {
     pub user: Option<String>,
@@ -90,37 +92,21 @@ pub struct HopSecret {
     pub via: String,
     pub key_path: Option<String>,
     pub class: PromptClass,
-    pub value: String,
+    /// Store entries to try, in order; the first that holds a secret wins.
+    pub refs: Vec<SecretRef>,
+    /// The store `refs` live in; `None` when no other process can open it, in
+    /// which case this hop is not staged and its prompt is left to the user.
+    pub store: Option<StoreLocator>,
 }
 
 impl std::fmt::Debug for HopSecret {
-    /// The value never reaches a log or a panic message.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HopSecret")
             .field("user", &self.user)
             .field("host", &self.host)
             .field("class", &self.class)
+            .field("refs", &self.refs)
             .finish_non_exhaustive()
-    }
-}
-
-impl HopSecret {
-    /// Every secret `cred` holds, one per prompt class it can answer.
-    pub fn of(cred: &HopCred) -> Vec<HopSecret> {
-        [PromptClass::Password, PromptClass::Passphrase]
-            .into_iter()
-            .filter_map(|class| {
-                let secret = cred.secret(class)?;
-                Some(HopSecret {
-                    user: cred.user.clone(),
-                    host: cred.host.clone(),
-                    via: cred.via.clone(),
-                    key_path: cred.key_path.clone(),
-                    class,
-                    value: secret.value().to_string(),
-                })
-            })
-            .collect()
     }
 }
 
@@ -347,8 +333,15 @@ mod tests {
         assert!(h.secret(PromptClass::Password).is_some());
         assert!(h.secret(PromptClass::Passphrase).is_none());
         assert!(h.secret(PromptClass::HostKey).is_none());
-        let staged = HopSecret::of(&h);
-        assert_eq!(staged.len(), 1);
+        let staged = [HopSecret {
+            user: h.user.clone(),
+            host: h.host.clone(),
+            via: h.via.clone(),
+            key_path: h.key_path.clone(),
+            class: PromptClass::Password,
+            refs: vec![SecretRef::Key("host:1".into())],
+            store: None,
+        }];
         let me = Some(std::process::id());
         let (_child, pid) = fake_hop_ssh("10.0.4.11");
         assert!(find_secret(&staged, "ops@10.0.4.11's password: ", Some(pid)).is_some());

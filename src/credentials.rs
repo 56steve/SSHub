@@ -13,6 +13,68 @@ pub trait PasswordStore: Send + Sync {
     fn lookup(&self, spec: &str) -> Result<String> {
         secret_service_lookup(spec)
     }
+    /// Where this store lives, so another process (the askpass helper that
+    /// ssh runs) can open the same one. `None` for a store that only exists
+    /// inside this process.
+    fn locator(&self) -> Option<StoreLocator> {
+        None
+    }
+}
+
+/// Enough to reopen a [`PasswordStore`] in another process: never a secret.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoreLocator {
+    Keyring {
+        prefix: String,
+    },
+    File {
+        path: std::path::PathBuf,
+        prefix: String,
+    },
+}
+
+impl StoreLocator {
+    pub fn open(&self) -> Box<dyn PasswordStore> {
+        match self {
+            Self::Keyring { prefix } => {
+                Box::new(NamespacedPasswordStore::new(Box::new(OsKeyring), prefix))
+            }
+            Self::File { path, prefix } => Box::new(NamespacedPasswordStore::new(
+                Box::new(FilePasswordStore::new(path.clone())),
+                prefix,
+            )),
+        }
+    }
+
+    fn prefixed(self, outer: &str) -> Self {
+        match self {
+            Self::Keyring { prefix } => Self::Keyring {
+                prefix: format!("{outer}{prefix}"),
+            },
+            Self::File { path, prefix } => Self::File {
+                path,
+                prefix: format!("{outer}{prefix}"),
+            },
+        }
+    }
+}
+
+/// Which credential-store entry holds a secret: a stored key (`host:3`,
+/// `identity:7`) or a host's Secret Service lookup spec (#142).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SecretRef {
+    Key(String),
+    Lookup(String),
+}
+
+impl SecretRef {
+    /// The secret now, `None` when the entry is missing or unreadable.
+    pub fn read(&self, store: &dyn PasswordStore) -> Option<String> {
+        match self {
+            Self::Key(key) => store.get(key).ok().flatten(),
+            Self::Lookup(spec) => store.lookup(spec).ok(),
+        }
+    }
 }
 
 /// Split a secret lookup spec into `(attribute, value)` at the first `=`.
@@ -91,6 +153,9 @@ impl PasswordStore for NamespacedPasswordStore {
     fn lookup(&self, spec: &str) -> Result<String> {
         self.inner.lookup(spec)
     }
+    fn locator(&self) -> Option<StoreLocator> {
+        self.inner.locator().map(|l| l.prefixed(&self.prefix))
+    }
 }
 
 pub fn check_keyring_available() -> bool {
@@ -147,6 +212,11 @@ pub fn migrate_fallback_to_keyring(path: &std::path::Path) -> Result<()> {
 pub struct OsKeyring;
 
 impl PasswordStore for OsKeyring {
+    fn locator(&self) -> Option<StoreLocator> {
+        Some(StoreLocator::Keyring {
+            prefix: String::new(),
+        })
+    }
     fn get(&self, key: &str) -> Result<Option<String>> {
         let entry = keyring::Entry::new(SERVICE, key)?;
         match entry.get_password() {
@@ -275,8 +345,18 @@ impl FilePasswordStore {
 
 impl PasswordStore for FilePasswordStore {
     fn get(&self, key: &str) -> Result<Option<String>> {
+        // Under the same lock as writers; an unlockable directory (read-only)
+        // still reads, since the data file is replaced atomically by rename.
+        let _lock = self.lock().ok();
         let map = self.read_map()?;
         Ok(map.get(key).cloned())
+    }
+
+    fn locator(&self) -> Option<StoreLocator> {
+        Some(StoreLocator::File {
+            path: self.path.clone(),
+            prefix: String::new(),
+        })
     }
 
     fn set(&self, key: &str, password: &str) -> Result<()> {
@@ -454,5 +534,33 @@ mod tests {
                 "{bad:?} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn a_store_reopens_from_its_locator_with_the_same_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = NamespacedPasswordStore::new(
+            Box::new(FilePasswordStore::new(dir.path().join("c.json"))),
+            "profile:4:",
+        );
+        store.set("host:1", "pw").unwrap();
+        let locator = store.locator().unwrap();
+        assert_eq!(
+            locator,
+            StoreLocator::File {
+                path: dir.path().join("c.json"),
+                prefix: "profile:4:".into()
+            }
+        );
+        let reopened = locator.open();
+        assert_eq!(
+            SecretRef::Key("host:1".into()).read(reopened.as_ref()),
+            Some("pw".into())
+        );
+        assert_eq!(
+            SecretRef::Key("host:2".into()).read(reopened.as_ref()),
+            None
+        );
+        assert!(NoopPasswordStore.locator().is_none());
     }
 }

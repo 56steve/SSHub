@@ -1118,13 +1118,14 @@ mod tests {
         use crate::session::PendingSecret;
         use std::sync::Mutex;
 
-        let hop = |user: &str, value: &str| HopSecret {
+        let hop = |user: &str, key: &str| HopSecret {
             user: Some(user.into()),
             host: "10.0.4.11".into(),
             via: "10.0.4.11".into(),
             key_path: None,
             class: crate::session::auth_prompt::PromptClass::Password,
-            value: value.into(),
+            refs: vec![crate::credentials::SecretRef::Key(key.into())],
+            store: None,
         };
         // (target secret, the hop values it came with), per run.
         type Seen = Vec<(Option<String>, Vec<String>)>;
@@ -1149,7 +1150,12 @@ mod tests {
             ) -> Result<(i32, String, String), String> {
                 self.0.lock().unwrap().push((
                     secret.map(|s| s.value().to_string()),
-                    hops.iter().map(|h| h.value.clone()).collect(),
+                    hops.iter()
+                        .map(|h| match &h.refs[0] {
+                            crate::credentials::SecretRef::Key(k) => k.clone(),
+                            other => panic!("unexpected {other:?}"),
+                        })
+                        .collect(),
                 ));
                 Ok((0, String::new(), String::new()))
             }

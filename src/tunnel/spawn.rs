@@ -569,6 +569,48 @@ mod tests {
     }
 
     #[test]
+    fn a_tunnel_stages_hop_references_never_their_secrets() {
+        use crate::credentials::{SecretRef, StoreLocator};
+        use crate::session::auth_prompt::PromptClass;
+        let dir = tempfile::tempdir().unwrap();
+        let store = StoreLocator::File {
+            path: dir.path().join("credentials.json"),
+            prefix: "profile:3:".into(),
+        };
+        store.open().set("host:5", "hop-s3cr3t").unwrap();
+        let hop = HopSecret {
+            user: Some("ops".into()),
+            host: "10.0.4.11".into(),
+            via: "lb-1".into(),
+            key_path: None,
+            class: PromptClass::Password,
+            refs: vec![SecretRef::Key("host:5".into())],
+            store: Some(store),
+        };
+        let mut args: Vec<String> = ["ssh", "-N", "-L", "1:h:2", "target"]
+            .map(String::from)
+            .into();
+        let (guard, _env) = stage_tunnel_askpass(&mut args, None, &[hop])
+            .unwrap()
+            .unwrap();
+        let text = fs::read_to_string(guard.path()).unwrap();
+        assert!(!text.contains("hop-s3cr3t"), "{text}");
+        assert!(text.contains("host:5"), "{text}");
+        // Even with nothing secret staged, ssh's LocalCommand removes the file.
+        let command = args
+            .iter()
+            .find_map(|a| a.strip_prefix("LocalCommand="))
+            .unwrap()
+            .replace("%%", "%");
+        assert!(Command::new("sh")
+            .args(["-c", &command])
+            .status()
+            .unwrap()
+            .success());
+        assert!(!guard.path().exists());
+    }
+
+    #[test]
     fn pid_file_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = ensure_tunnel_pid_dir(tmp.path()).unwrap();

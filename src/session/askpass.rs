@@ -5,10 +5,14 @@
 //! helper for both passphrase and password prompts even on a tty, so the
 //! "Enter passphrase for key …" / "…'s password:" line never appears on the
 //! screen. The helper is this same binary re-executed in askpass mode (see
-//! [`maybe_run_askpass`]); the secret is handed over through a private
-//! `0600` file that is removed when the session ends.
+//! [`maybe_run_askpass`]); the destination's secret is handed over through a
+//! private `0600` file that is removed when the session ends. Jump hops'
+//! secrets are never written: the file holds references into the credential
+//! store, which the helper reads when that hop's prompt arrives.
 
 use std::io::Write;
+
+use crate::credentials::{SecretRef, StoreLocator};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -68,13 +72,15 @@ impl AskpassSecret {
         Self::staged(Some(secret), &[])
     }
 
-    /// Stage the destination's `secret` (if it has one) and the jump hops' own
-    /// secrets. The first line is the destination's; a `C<TAB>p|k` line says
-    /// whether it is a password or a key passphrase; every other line is one
-    /// hop secret (`H<TAB>class<TAB>user<TAB>host<TAB>key<TAB>via<TAB>value`). The
-    /// helper answers a hop's prompt with the line that names that hop, and the
-    /// destination's prompt with the first line, only for a prompt of its
-    /// class: never the other way round.
+    /// Stage the destination's `secret` (if it has one) and references to the
+    /// jump hops' secrets. The first line is the destination's; a `C<TAB>p|k`
+    /// line says whether it is a password or a key passphrase; an `S` line
+    /// names the credential store; every other line is one hop reference
+    /// (`H<TAB>class<TAB>user<TAB>host<TAB>key<TAB>via<TAB>ref…`). A hop's
+    /// secret is never written: the helper reads it from the store when that
+    /// hop's prompt arrives. The helper answers a hop's prompt from the line
+    /// that names that hop, and the destination's prompt with the first line,
+    /// only for a prompt of its class: never the other way round.
     pub fn staged(
         secret: Option<&PendingSecret>,
         hops: &[super::hop_auth::HopSecret],
@@ -109,7 +115,20 @@ impl AskpassSecret {
             Some(PendingSecret::Passphrase(_)) => writeln!(f, "C\tk")?,
             None => {}
         }
+        // One `S` line names the credential store the hop references live in.
+        // The helper opens exactly that store (same profile prefix, same
+        // credentials file), so no profile env has to reach it.
+        let store = hops.iter().find_map(|h| h.store.as_ref());
+        let store_line = store.and_then(store_line);
+        if let Some(line) = &store_line {
+            writeln!(f, "{line}")?;
+        }
         for hop in hops {
+            // Without the store, or with another one than the `S` line names,
+            // the helper could not read the secret: leave the hop out.
+            if store_line.is_none() || hop.store.as_ref() != store {
+                continue;
+            }
             let class = match hop.class {
                 PromptClass::Passphrase => "k",
                 _ => "p",
@@ -118,25 +137,31 @@ impl AskpassSecret {
                 hop.user.as_deref().unwrap_or(""),
                 hop.key_path.as_deref().unwrap_or(""),
             );
+            let refs: Vec<String> = hop
+                .refs
+                .iter()
+                .map(|r| match r {
+                    SecretRef::Key(k) => format!("k:{k}"),
+                    SecretRef::Lookup(s) => format!("l:{s}"),
+                })
+                .collect();
             // The format cannot hold a tab or a line break. Such a hop is left
             // out (its prompt then goes unanswered), never mis-parsed into a
-            // shifted field with another value.
-            if [
-                user,
-                hop.host.as_str(),
-                hop.via.as_str(),
-                key,
-                hop.value.as_str(),
-            ]
-            .iter()
-            .any(|field| field.contains(['\t', '\n', '\r']))
+            // shifted field with another reference.
+            if [user, hop.host.as_str(), hop.via.as_str(), key]
+                .into_iter()
+                .chain(refs.iter().map(String::as_str))
+                .any(|field| field.contains(['\t', '\n', '\r']))
+                || refs.is_empty()
             {
                 continue;
             }
             writeln!(
                 f,
                 "H\t{class}\t{user}\t{}\t{key}\t{}\t{}",
-                hop.host, hop.via, hop.value
+                hop.host,
+                hop.via,
+                refs.join("\t")
             )?;
         }
         Ok(guard)
@@ -293,7 +318,41 @@ struct Staged<'a> {
     hops: Vec<super::hop_auth::HopSecret>,
 }
 
-/// One `H<TAB>class<TAB>user<TAB>host<TAB>key<TAB>via<TAB>value` line.
+/// The `S<TAB>keyring<TAB>prefix` / `S<TAB>file<TAB>prefix<TAB>path` line for
+/// `store`; `None` when a field cannot be held by the format.
+fn store_line(store: &StoreLocator) -> Option<String> {
+    let (kind, prefix, path) = match store {
+        StoreLocator::Keyring { prefix } => ("keyring", prefix.as_str(), None),
+        StoreLocator::File { path, prefix } => ("file", prefix.as_str(), Some(path.to_str()?)),
+    };
+    let bad = |s: &str| s.contains(['\t', '\n', '\r']);
+    if bad(prefix) || path.is_some_and(bad) {
+        return None;
+    }
+    Some(match path {
+        Some(path) => format!("S\t{kind}\t{prefix}\t{path}"),
+        None => format!("S\t{kind}\t{prefix}"),
+    })
+}
+
+fn parse_store(line: &str) -> Option<StoreLocator> {
+    let mut f = line.splitn(4, '\t');
+    (f.next()? == "S").then_some(())?;
+    let kind = f.next()?;
+    let prefix = f.next()?.to_string();
+    match kind {
+        "keyring" => Some(StoreLocator::Keyring { prefix }),
+        "file" => Some(StoreLocator::File {
+            path: PathBuf::from(f.next()?),
+            prefix,
+        }),
+        _ => None,
+    }
+}
+
+/// One `H<TAB>class<TAB>user<TAB>host<TAB>key<TAB>via<TAB>ref[<TAB>ref…]`
+/// line, each ref `k:<store key>` or `l:<secret lookup spec>`. The hop's
+/// `store` is filled in by [`parse_staged`].
 fn parse_hop(line: &str) -> Option<super::hop_auth::HopSecret> {
     let mut f = line.splitn(7, '\t');
     (f.next()? == "H").then_some(())?;
@@ -302,13 +361,29 @@ fn parse_hop(line: &str) -> Option<super::hop_auth::HopSecret> {
         _ => PromptClass::Password,
     };
     let opt = |s: &str| (!s.is_empty()).then(|| s.to_string());
+    let (user, host, key_path, via) = (
+        opt(f.next()?),
+        f.next()?.to_string(),
+        opt(f.next()?),
+        f.next()?.to_string(),
+    );
+    let refs: Vec<SecretRef> = f
+        .next()?
+        .split('\t')
+        .filter_map(|r| match r.split_at_checked(2)? {
+            ("k:", key) => Some(SecretRef::Key(key.to_string())),
+            ("l:", spec) => Some(SecretRef::Lookup(spec.to_string())),
+            _ => None,
+        })
+        .collect();
     Some(super::hop_auth::HopSecret {
         class,
-        user: opt(f.next()?),
-        host: f.next()?.to_string(),
-        key_path: opt(f.next()?),
-        via: f.next()?.to_string(),
-        value: f.next()?.to_string(),
+        user,
+        host,
+        key_path,
+        via,
+        refs,
+        store: None,
     })
 }
 
@@ -316,19 +391,35 @@ fn parse_staged(text: &str) -> Staged<'_> {
     let mut lines = text.lines();
     let destination = lines.next().unwrap_or("");
     let mut class = None;
+    let mut store = None;
     let mut hops = Vec::new();
     for line in lines {
         match line {
             "C\tp" => class = Some(PromptClass::Password),
             "C\tk" => class = Some(PromptClass::Passphrase),
+            _ if line.starts_with("S\t") => store = parse_store(line),
             _ => hops.extend(parse_hop(line)),
         }
+    }
+    for hop in &mut hops {
+        hop.store = store.clone();
     }
     Staged {
         destination,
         class,
         hops,
     }
+}
+
+/// What `hop` references in its credential store, read now. Fails closed:
+/// no store, no reference that resolves, or a value ssh could not take as one
+/// line, and the hop's prompt is left to the user.
+fn hop_value(hop: &super::hop_auth::HopSecret) -> Option<String> {
+    let store = hop.store.as_ref()?.open();
+    hop.refs
+        .iter()
+        .find_map(|r| r.read(store.as_ref()))
+        .filter(|v| !v.is_empty() && !v.contains(['\n', '\r']))
 }
 
 /// Which staged secret the helper just handed to ssh.
@@ -431,12 +522,13 @@ pub fn maybe_run_askpass() -> bool {
             })
             .and_then(|hop| {
                 let n = staged.hops.iter().position(|h| std::ptr::eq(h, hop))?;
-                Some((hop.value.as_str(), n))
+                // The store is read only now, when this hop asks.
+                Some((hop_value(hop)?, n))
             });
         let Some((value, n)) = found else {
             std::process::exit(1)
         };
-        print_answer(value);
+        print_answer(&value);
         if read_once {
             consume(Path::new(&file), &Answered::Hop(n));
         }
@@ -550,23 +642,41 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ssh = dir.path().join("ssh");
         std::fs::copy("/bin/bash", &ssh).unwrap();
-        let hop = |user: &str, host: &str, value: &str| HopSecret {
+        // The hops' secrets sit in a file credential store (as the helper will
+        // reopen it); only references are staged.
+        let creds = dir.path().join("credentials.json");
+        let store = StoreLocator::File {
+            path: creds.clone(),
+            prefix: "profile:7:".into(),
+        };
+        let backing = store.open();
+        backing.set("host:1", "lb-1-pw").unwrap();
+        backing.set("host:2", "lb-2-pw").unwrap();
+        let hop = |user: &str, host: &str, key: &str| HopSecret {
             user: Some(user.into()),
             host: host.into(),
             via: host.into(),
             key_path: None,
             class: PromptClass::Password,
-            value: value.into(),
+            refs: vec![SecretRef::Key(key.into())],
+            store: Some(store.clone()),
         };
         let path = dir.path().join("secret");
         let guard = AskpassSecret::staged(
             Some(&PendingSecret::Password("target-pw".into())),
             &[
-                hop("ops", "10.0.4.11", "lb-1-pw"),
-                hop("ops", "10.0.4.12", "lb-2-pw"),
+                hop("ops", "10.0.4.11", "host:1"),
+                hop("ops", "10.0.4.12", "host:2"),
+                // Nothing is stored under this reference.
+                hop("ops", "10.0.4.13", "host:404"),
             ],
         )
         .unwrap();
+        let staged_text = std::fs::read_to_string(&guard.path).unwrap();
+        assert!(
+            !staged_text.contains("lb-1-pw") && !staged_text.contains("lb-2-pw"),
+            "a hop's secret was written to the staged file: {staged_text}"
+        );
         std::fs::copy(guard.path.clone(), &path).unwrap();
         let guard = AskpassSecret { path };
         let helper = format!(
@@ -623,6 +733,8 @@ mod tests {
         // A hop that is not staged gets nothing, and above all not the target's.
         for prompt in [
             "ops@10.9.9.9's password: ",
+            // Staged, but its reference resolves to nothing: fail closed.
+            "ops@10.0.4.13's password: ",
             "root@10.0.4.11's password: ",
             "Password: ",
         ] {
@@ -646,7 +758,10 @@ mod tests {
                 via: "h".into(),
                 key_path: None,
                 class: PromptClass::Password,
-                value: "hop-pw".into(),
+                refs: vec![SecretRef::Key("host:3".into())],
+                store: Some(StoreLocator::Keyring {
+                    prefix: "profile:2:".into(),
+                }),
             }],
         )
         .unwrap();
@@ -655,7 +770,13 @@ mod tests {
         assert_eq!(staged.destination, "");
         assert_eq!(staged.class, None);
         assert_eq!(staged.hops.len(), 1);
-        assert_eq!(staged.hops[0].value, "hop-pw");
+        assert_eq!(staged.hops[0].refs, [SecretRef::Key("host:3".into())]);
+        assert_eq!(
+            staged.hops[0].store,
+            Some(StoreLocator::Keyring {
+                prefix: "profile:2:".into()
+            })
+        );
         drop(dir);
     }
 
@@ -745,15 +866,15 @@ mod tests {
         let file = dir.path().join("sshub-askpass-test");
         std::fs::write(
             &file,
-            "dest-pw\nC\tp\nH\tp\tops\ta\t\ta\tone-pw\nH\tp\tops\tb\t\tb\ttwo-pw\n",
+            "dest-pw\nC\tp\nS\tkeyring\t\nH\tp\tops\ta\t\ta\tk:one-ref\nH\tp\tops\tb\t\tb\tk:two-ref\n",
         )
         .unwrap();
         consume(&file, &Answered::Hop(0));
         let text = std::fs::read_to_string(&file).unwrap();
-        assert!(!text.contains("one-pw") && text.contains("two-pw") && text.contains("dest-pw"));
+        assert!(!text.contains("one-ref") && text.contains("two-ref") && text.contains("dest-pw"));
         consume(&file, &Answered::Destination);
         let text = std::fs::read_to_string(&file).unwrap();
-        assert!(!text.contains("dest-pw") && text.contains("two-pw"));
+        assert!(!text.contains("dest-pw") && text.contains("two-ref"));
         // The last secret takes the file with it: nothing stays on disk for the
         // life of a detached tunnel.
         consume(&file, &Answered::Hop(0));
@@ -761,6 +882,12 @@ mod tests {
 
         std::fs::write(&file, "only-dest\nC\tp\n").unwrap();
         consume(&file, &Answered::Destination);
+        assert!(!file.exists());
+
+        // References alone (no destination secret) are what a detached tunnel
+        // through a key-auth jump stages: the file still goes with the last one.
+        std::fs::write(&file, "\nS\tkeyring\t\nH\tp\tops\ta\t\ta\tk:one-ref\n").unwrap();
+        consume(&file, &Answered::Hop(0));
         assert!(!file.exists());
     }
 
@@ -772,7 +899,10 @@ mod tests {
             via: "h".into(),
             key_path: Some(key.into()),
             class: PromptClass::Passphrase,
-            value: "phrase".into(),
+            refs: vec![SecretRef::Key("identity:1".into())],
+            store: Some(StoreLocator::Keyring {
+                prefix: String::new(),
+            }),
         };
         let guard =
             AskpassSecret::staged(None, &[hop("/k\twith-tab"), hop("/k\nline"), hop("/ok")])
@@ -781,6 +911,25 @@ mod tests {
         let staged = parse_staged(&text);
         assert_eq!(staged.hops.len(), 1);
         assert_eq!(staged.hops[0].key_path.as_deref(), Some("/ok"));
+    }
+
+    #[test]
+    fn a_hop_without_a_reopenable_store_is_not_staged() {
+        let guard = AskpassSecret::staged(
+            None,
+            &[super::super::hop_auth::HopSecret {
+                user: None,
+                host: "h".into(),
+                via: "h".into(),
+                key_path: None,
+                class: PromptClass::Password,
+                refs: vec![SecretRef::Key("host:1".into())],
+                store: None,
+            }],
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&guard.path).unwrap();
+        assert!(parse_staged(&text).hops.is_empty(), "{text}");
     }
 
     #[test]

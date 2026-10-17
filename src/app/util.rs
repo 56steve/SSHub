@@ -1067,27 +1067,61 @@ impl HopSpec {
         cred
     }
 
-    /// Every secret this hop holds, fetched now, for ssh children that read a
-    /// staged file.
+    /// Where this hop's secrets live, for ssh children that read a staged
+    /// file: references only, and only for a class that has a stored secret
+    /// right now (checked, never kept). The file holds no secret; the helper
+    /// reads the store again when this hop's prompt arrives.
     pub fn secrets(
         &self,
         passwords: &dyn crate::credentials::PasswordStore,
     ) -> Vec<crate::session::hop_auth::HopSecret> {
+        let store = passwords.locator();
+        use crate::credentials::{host_key, identity_key, SecretRef};
         use crate::session::auth_prompt::PromptClass;
-        [PromptClass::Password, PromptClass::Passphrase]
+        let password = match self.managed.secret_lookup.as_deref() {
+            // Authoritative: a failed lookup prompts, no fallback to SSHub's.
+            Some(spec) => vec![SecretRef::Lookup(spec.to_string())],
+            None => {
+                let mut refs = vec![SecretRef::Key(host_key(self.managed.id))];
+                // A keyless identity's secret is a shared login password.
+                if let Some(identity) = self.identity.as_ref().filter(|i| i.private_key.is_none()) {
+                    refs.push(SecretRef::Key(identity_key(identity.id)));
+                }
+                refs
+            }
+        };
+        let passphrase: Vec<SecretRef> = self
+            .identity
+            .as_ref()
+            .filter(|i| i.private_key.is_some())
+            .map(|i| SecretRef::Key(identity_key(i.id)))
             .into_iter()
-            .filter_map(|class| {
-                let secret = self.fetch(class, passwords)?;
-                Some(crate::session::hop_auth::HopSecret {
-                    user: self.user.clone(),
-                    host: self.managed.address.clone(),
-                    via: self.via.clone(),
-                    key_path: self.key_path(),
-                    class,
-                    value: secret.value().to_string(),
-                })
-            })
-            .collect()
+            .collect();
+        [
+            (PromptClass::Password, password),
+            (PromptClass::Passphrase, passphrase),
+        ]
+        .into_iter()
+        .filter(|(_, refs)| !refs.is_empty())
+        .map(|(class, refs)| crate::session::hop_auth::HopSecret {
+            user: self.user.clone(),
+            host: self.managed.address.clone(),
+            via: self.via.clone(),
+            key_path: self.key_path(),
+            class,
+            refs,
+            store: store.clone(),
+        })
+        // Presence only: the value is read to test it and dropped; a hop with
+        // nothing stored (key auth, store error) stays unstaged, so callers'
+        // `hops.is_empty()` still means "no hop secret to answer".
+        .filter(|hop| {
+            hop.refs
+                .iter()
+                .find_map(|r| r.read(passwords))
+                .is_some_and(|v| !v.is_empty() && !v.contains(['\n', '\r']))
+        })
+        .collect()
     }
 }
 
@@ -1145,8 +1179,9 @@ pub fn hop_specs(
         .collect()
 }
 
-/// The jump hosts' own stored secrets for `jump`, fetched now, for ssh children
-/// that read them from a staged file (tunnels, exec, broadcast, key push).
+/// The jump hosts' secret references for `jump`, for ssh children that read
+/// them from a staged file (tunnels, exec, broadcast, key push). Nothing is
+/// read from the credential store here: the helper does that when a hop asks.
 pub fn hop_secrets(
     store: &crate::store::LauncherStore,
     hosts: &[HostEntry],
