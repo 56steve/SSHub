@@ -33,7 +33,8 @@ with `-D warnings`, so any warning fails.
   info for dependencies.
 - Test targets declared explicitly: `smoke` (`tests/smoke/binary_starts.rs`),
   `e2e` (`tests/e2e/mod.rs`), `config_load` (`tests/smoke/config_load.rs`);
-  `tests/transfer_cli.rs` and `tests/transfer_engine.rs` are auto-discovered.
+  `tests/transfer_cli.rs`, `tests/transfer_engine.rs` and
+  `tests/transfer_secrets.rs` are auto-discovered.
   Example `seed-demo` (`demo/seed_demo.rs`).
 
 ## Shared Cargo target for worktrees

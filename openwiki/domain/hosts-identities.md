@@ -24,11 +24,19 @@ the user-facing model:
 - **ssh_config hosts** (`HostSource::SshConfig`): imported and synced from the
   ssh config; metadata is editable, connection fields track the file
   (hot-reloaded by the [file watcher](../architecture/overview.md#file-watcher)).
+  The sync also records whether a host has a `ProxyCommand` (`has_proxy_command`),
+  which the [map tab](../workflows/tui.md#network-map-tab-6) shows as an opaque
+  `proxy cmd` hop.
 - **Legacy aliases**: ssh_config entries with no DB row; surfaced read-only
   with metadata from `metadata.db`.
 - A `name`, `address` or `username` starting with `-` is refused on every write
   path (host form, CLI, importers), and `ssh::safe_ssh_target` rewrites any such
   target that still reaches ssh to the `ssh://` form OpenSSH refuses.
+- A managed host's `address` and effective login must also pass the
+  **destination allowlist** (letters, digits and `. - _ %` only; see
+  [secrets](../security/secrets.md#input-safety)): the host form, `sshub host
+  add/edit` and the importers refuse it, and `build_ssh_argv` hands ssh an
+  unresolvable placeholder instead of such a destination.
 
 Resolution goes through `HostResolver` / `SshConfigResolver`
 (`src/ssh/resolver.rs`), which lists `Host` aliases (following `Include` up to
@@ -38,7 +46,8 @@ depth 16) and resolves effective options with `ssh -G`. `build_ssh_argv` /
 
 **OS auto-detection** (`src/osinfo/`): on first connect a background worker runs
 `cat /etc/os-release 2>/dev/null || uname -s` over ssh (BatchMode without a
-secret, askpass with one); `parse_os` maps the output to a canonical id stored in
+secret, askpass with one; the host's stored `remote_command` is dropped so it
+cannot run instead); `parse_os` maps the output to a canonical id stored in
 `hosts.os_icon`, and the host card renders a vendored logo (Braille set in
 `assets/os_logos.json`, full-colour set for the zoomed panel in
 `assets/os_logos_large.json`). Failures are silent by design.
@@ -121,8 +130,10 @@ passphrases and host passwords live in the credential store under
   to the user's own config. `--dry-run` previews the file-based importers.
 
 Every importer drops entries whose name, address or username starts with `-`
-and counts them in its summary. The PuTTY, mRemoteNG and Termius fixtures are
-agent-authored, not real exports (`docs/oracle-tests.md`).
+or whose address or login fails the destination allowlist
+(`import::check_destination`) and counts them in its summary. The PuTTY,
+mRemoteNG and Termius fixtures are agent-authored, not real exports
+(`docs/oracle-tests.md`).
 
 ## Change guidance
 

@@ -7,16 +7,19 @@ tags: [sshub, tui, ssh, rust, overview]
 
 # SSHub Quickstart
 
-SSHub (`sshub`, v0.17.7 in `Cargo.toml`) is a keyboard-driven terminal UI for
+SSHub (`sshub`, v0.18.2 in `Cargo.toml`) is a keyboard-driven terminal UI for
 managing and connecting to SSH hosts. It merges your read-only `~/.ssh/config`
 with a managed host database per profile (SQLite) and adds embedded in-TUI SSH
-and local shell sessions with a masked authentication modal, an SFTP browser,
-tunnels with keep-alive reconnect, broadcast commands, command snippets and
-ghost-text suggestions, a session log browser, ssh-agent and certificate-aware
-identities, group-inherited connection defaults, OS detection with logos,
-runtime themes, a release notice with in-place update, and a connection audit
-log. A headless CLI covers scripting (`sshub exec`, `sshub host ...`, transfers,
-themes). License: AGPL-3.0-or-later.
+and local shell sessions with a masked authentication modal and a split view
+with saved workspaces, an SFTP browser, tunnels with keep-alive reconnect,
+broadcast commands, command snippets and ghost-text suggestions, a session log
+browser, ssh-agent and certificate-aware identities, group-inherited
+connection defaults, a network map of the jump hosts with a hop editor and
+hop-by-hop test connect, OS detection with logos, runtime themes, a release
+notice with in-place update, and a connection audit log. The dashboard has six
+tabs: hosts, SFTP, tunnels, identities, audit, map. A headless CLI covers
+scripting (`sshub exec`, `sshub host ...`, transfers, themes, `sshub map
+--dot`). License: AGPL-3.0-or-later.
 
 - Crate: `sshub` on crates.io (`cargo install sshub`), npm package
   `sshub-tui`; repo: github.com/Petyok/SSHub.
@@ -55,8 +58,7 @@ without one SSHub falls back to an owner-only `credentials.json`.
 | Fallback credentials | `profiles/<name>/credentials.json` | follows the data dir |
 | Session logs | `profiles/<name>/logs/<host-dir>/` | follows the data dir |
 | Tunnel PID files | `profiles/<name>/tunnels/` | follows the data dir |
-| User themes (TUI) | `profiles/<name>/themes/*.toml` | compat: `<config dir>/themes/` |
-| User themes (TUI and `sshub theme`) | `~/.local/share/sshub/profiles/<name>/themes/*.toml` | `SSHUB_CONFIG_DIR/themes/` |
+| User themes | `profiles/<name>/themes/*.toml` (TUI and `sshub theme`) | compat: `<config dir>/themes/` |
 | SSH config | `~/.ssh/config` | `[ssh] config_path` per profile; `SSHUB_SSH_CONFIG` wins |
 
 One profile starts silently; several show a picker after the splash.
@@ -65,32 +67,33 @@ One profile starts silently; several show a picker after the splash.
 use the last-used profile and never open the picker. Setting `SSHUB_DATA_DIR`
 or `SSHUB_CONFIG_DIR` (or the legacy `SSH_LAUNCHER_*` names) selects
 compatibility mode without profiles. Legacy top-level data migrates into
-`profiles/default`. The two themes rows disagree in profile mode; see
-[themes](architecture/themes.md).
+`profiles/default`. See [themes](architecture/themes.md) for how the themes
+directory is resolved.
 
 ## Where to go next
 
 ### Architecture
 - [Runtime architecture](architecture/overview.md): dispatch, startup, the 50 ms event loop, `AppMode` and `active_tab`, render pipeline, workers and channels, source map.
-- [Data model & storage](architecture/data-model.md): `launcher.db` schema v19 and its migrations, pre-migration snapshots, group defaults, transfer engine, `metadata.db`, the hybrid host model, `config.toml`.
+- [Data model & storage](architecture/data-model.md): `launcher.db` schema v21 and its migrations, pre-migration snapshots, group defaults, transfer engine, `metadata.db`, the hybrid host model, `config.toml`.
 - [Profiles](architecture/profiles.md): layout, compat mode, startup selection, in-app switching, legacy migration, cross-profile transfers.
 - [Theme system internals](architecture/themes.md): registry, resolver, `ThemeManager`, picker; the authoring guide is `docs/theme-system.md`.
 
 ### Workflows
 - [TUI dashboard](workflows/tui.md): tabs, overlays, keybindings, screens.
+- [Network map](workflows/network-map.md): tab 6, the jump-host tree, hop editor, test connect, `sshub map --dot`.
 - [Sessions & SFTP](workflows/sessions-sftp.md): embedded sessions, session switcher, credential delivery, terminal compatibility, OSC 52, logging, mosh, SFTP.
 - [Session tools](workflows/session-tools.md): auth modal, snippets, ghost-text suggestions, command history, session log browser.
 - [Broadcast](workflows/broadcast.md): one command across a group or tag.
 - [Tunnels](workflows/tunnels.md): local/remote/dynamic forwards and keep-alive reconnect.
 - [Known hosts manager](workflows/known-hosts.md): fingerprints, guarded deletion, host-key decisions.
 - [Profiles & themes](workflows/profiles-themes.md): picker, profile manager, transfers, theme picker, `sshub theme`.
-- [Headless CLI](workflows/cli.md): command tree, `exec`, JSON output, exit codes.
+- [Headless CLI](workflows/cli.md): command tree, `exec`, `map --dot`, JSON output, exit codes.
 
 ### Domain
 - [Hosts, groups & identities](domain/hosts-identities.md): host sources, nested groups with defaults and Favorites, identities, certificates, keygen and key push, imports.
 
 ### Security & integrations
-- [Secrets & security](security/secrets.md): credential store, Secret Service lookup, askpass file and channel, remember opt-in, host-key policy, OSC 52, permissions, input safety.
+- [Secrets & security](security/secrets.md): credential store, Secret Service lookup, askpass file and channel, jump-hop credentials, remember opt-in, host-key policy, OSC 52, permissions, input safety.
 - [Integrations](integrations/external-terminals.md): external binaries, keyring, release check and update channels, npm packaging, demo pipeline.
 
 ### Operations & testing
@@ -115,8 +118,9 @@ warnings denied. Branch names follow `feature/`, `fix/`, `docs/`, `chore/`,
 
 - **Host-sync design** (`docs/host-sync-design.md`): P2P sync of hosts and
   credentials; design only, nothing in `src/`.
-- **Detached tunnel PID files** (`src/tunnel/spawn.rs`): acknowledged races (no
-  lock between concurrent `tunnel start`, recycled PIDs) noted in the code and
-  in [tunnels](workflows/tunnels.md).
+- **Detached tunnel PID files** (`src/tunnel/spawn.rs`): an acknowledged race
+  (no lock between concurrent `tunnel start`) noted in the code and in
+  [tunnels](workflows/tunnels.md). Recycled pids are handled: the pid file
+  records the process start time.
 - **Changelog follow-ups**: items still marked Pending in
   [changelog coverage](changelog-coverage.md).

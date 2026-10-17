@@ -57,12 +57,13 @@ Service integration. Details: [secrets](../security/secrets.md).
   or `~/.local/bin`, else none (release tarball or package). The tab-bar version
   shows the channel.
 - `KeyAction::Update` (default `Shift+U`) installs a known update, or checks on
-  demand: npm runs `npm install -g sshub-tui@<version>`, cargo runs
-  `cargo install sshub --version <version>`, a tarball install downloads the
-  release asset for linux-x64 or macOS arm64/x64 into a temp dir next to the
-  binary and swaps it in atomically. `source` builds and `npx` runs get a hint
-  instead. Quitting during an install asks first, even with quit confirmation
-  off.
+  demand: npm runs `npm install -g sshub-tui@<version>` (into the prefix of the
+  npm that owns this copy), cargo runs `cargo install sshub --version <version>`,
+  a tarball install downloads the release asset for linux-x64 or macOS arm64/x64
+  into a temp dir next to the binary (300 s limit), refuses it unless
+  `--version` prints exactly the announced version, and swaps it in atomically.
+  `source` builds and `npx` runs get a hint instead. Quitting during an install
+  asks first, even with quit confirmation off.
 
 ## npm packaging (`npm/`)
 
@@ -83,8 +84,8 @@ fixture home (`demo/home/`, mock commands in `demo/bin/`) is seeded by
 `demo/seed-demo.sh` and the `seed-demo` Cargo example (`demo/seed_demo.rs`);
 `demo/sftp-server.sh` backs transfer scenarios. Output lives in `demo/gifs/`
 and `demo/screenshots/`. Contributor tooling: `Cargo.toml` `exclude` keeps the
-GIFs, screenshots, fixture home, mock bin and `play.sh` out of the crate package
-(it still lists a `demo/tapes` path that no longer exists).
+GIFs, screenshots, fixture home, mock bin, `play.sh`, `record.py` and the demo
+shell scripts out of the crate package.
 
 ## Other touchpoints
 
@@ -92,3 +93,6 @@ GIFs, screenshots, fixture home, mock bin and `play.sh` out of the crate package
   [hosts & identities](../domain/hosts-identities.md) and the
   [known-hosts manager](../workflows/known-hosts.md).
 - **GitHub Actions, crates.io, npm**: see [CI & automation](../operations/ci-cd.md).
+- **Graphviz**: `sshub map --dot` (`src/map/dot.rs`) only prints DOT text on
+  stdout; SSHub never runs `dot` itself (only a unit test pipes it through
+  `dot` when installed). See the [map tab](../workflows/tui.md#network-map-tab-6).
