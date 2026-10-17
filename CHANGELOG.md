@@ -4,6 +4,8 @@ All notable changes to SSHub are documented in this file.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-17
+
 ### Added
 
 - **Network map (tab 6) and a hop editor** (#79) - the jump hosts as a tree, with
