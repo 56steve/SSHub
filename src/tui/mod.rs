@@ -1745,6 +1745,12 @@ fn render_tab_slide(
     now: std::time::Instant,
 ) {
     let p = tween::ease_out(tween::progress(sw.at, TAB_ANIM, now));
+    // Hosts <-> SFTP picker: the hosts pane widens in place, the rest slides off.
+    let hosts_sftp = matches!((sw.from, sw.to), (0, 1) | (1, 0));
+    if hosts_sftp && app.sftp.is_none() && !app.panel_zoomed && app.zoom_anim.is_none() {
+        render_hosts_sftp_morph(frame, areas, app, if sw.to == 1 { p } else { 1.0 - p });
+        return;
+    }
     let bw = areas.body.width;
     let right = sw.to > sw.from;
     // The moving layer sits on top starting at `body.x + off`; the backdrop shows
@@ -1775,6 +1781,37 @@ fn render_tab_slide(
     }
 }
 
+/// Hosts <-> SFTP picker transition at `t` (0 = hosts tab, 1 = SFTP picker).
+///
+/// The hosts pane keeps its left edge and stretches into the picker's rect (or
+/// shrinks back), while the details/dashboard columns are pushed off the right
+/// edge of the body, clipped to it, and come back the same way.
+fn render_hosts_sftp_morph(
+    frame: &mut Frame,
+    areas: &dashboard_layout::DashboardAreas,
+    app: &App,
+    t: f32,
+) {
+    let body = areas.body;
+    // The dashboard columns at rest, lifted into cells so they can travel.
+    render_hosts_body(frame, areas, app);
+    let cols = Rect::new(
+        areas.col_mid.x,
+        body.y,
+        body.right().saturating_sub(areas.col_mid.x),
+        body.height,
+    );
+    let layer = blit::snapshot(frame.buffer_mut(), cols);
+    frame.render_widget(Clear, Rect::new(body.x, body.y, body.width, body.height));
+    let dx = (t * cols.width as f32).round() as i32;
+    blit::blit(frame.buffer_mut(), cols, body, &layer, dx, 0);
+
+    let rect =
+        dashboard_layout::lerp_rect(areas.col_left, dashboard_layout::sftp_picker_rect(body), t);
+    frame.render_widget(Clear, rect);
+    widgets::hosts_panel::render_hosts_panel(frame, rect, app);
+}
+
 fn render_hosts_body(frame: &mut Frame, areas: &dashboard_layout::DashboardAreas, app: &App) {
     // Issue #18: a zoomed panel takes over the whole dashboard body.
     // Broadcast (#3) is a floating panel drawn from render_inner instead, so a
@@ -1790,20 +1827,31 @@ fn render_hosts_body(frame: &mut Frame, areas: &dashboard_layout::DashboardAreas
         render_zoomed_panel(frame, areas.body, app);
         return;
     }
+    // The stacks take their natural height, the SSH log everything below them,
+    // so every column ends on the last body row.
+    let (stack_h, log_area) = dashboard_layout::hosts_stack_split(areas);
     widgets::hosts_panel::render_hosts_panel(frame, areas.col_left, app);
-    widgets::middle_stack::render_middle_stack(frame, areas.col_mid, app);
-    widgets::right_stack::render_right_stack(frame, areas.col_right, app);
-
-    // SSH log panel spanning middle + right columns below their stacks
-    let log_top = areas.col_mid.y + 19;
-    let log_bottom = areas.footer.y.saturating_sub(2);
-    if log_bottom > log_top + 3 {
-        let log_area = Rect::new(
+    widgets::middle_stack::render_middle_stack(
+        frame,
+        Rect::new(
             areas.col_mid.x,
-            log_top,
-            areas.col_mid.width + 1 + areas.col_right.width,
-            log_bottom - log_top,
-        );
+            areas.col_mid.y,
+            areas.col_mid.width,
+            stack_h,
+        ),
+        app,
+    );
+    widgets::right_stack::render_right_stack(
+        frame,
+        Rect::new(
+            areas.col_right.x,
+            areas.col_right.y,
+            areas.col_right.width,
+            stack_h,
+        ),
+        app,
+    );
+    if let Some(log_area) = log_area {
         widgets::middle_stack::render_ssh_log_panel(frame, log_area, app);
     }
 
@@ -1828,8 +1876,9 @@ pub fn panel_zoom_source(
     panel: crate::app::PanelId,
 ) -> Rect {
     use crate::app::PanelId;
-    use widgets::middle_stack::{AGENT_H, HOST_H, LATENCY_H};
-    use widgets::right_stack::{AUTH_H, PING_H, RECENT_H};
+    use widgets::middle_stack::{AGENT_H, HOST_H};
+    use widgets::right_stack::{AUTH_H, RECENT_H};
+    let (stack_h, log) = dashboard_layout::hosts_stack_split(areas);
     let mid = areas.col_mid;
     let right = areas.col_right;
     // Each stacked panel's real slot (same heights the stacks lay out), so the
@@ -1838,17 +1887,22 @@ pub fn panel_zoom_source(
         PanelId::Hosts => areas.col_left,
         PanelId::Detail => Rect::new(mid.x, mid.y, mid.width, HOST_H),
         PanelId::Agent => Rect::new(mid.x, mid.y + HOST_H, mid.width, AGENT_H),
-        PanelId::Latency => Rect::new(mid.x, mid.y + HOST_H + AGENT_H, mid.width, LATENCY_H),
+        PanelId::Latency => Rect::new(
+            mid.x,
+            mid.y + HOST_H + AGENT_H,
+            mid.width,
+            stack_h.saturating_sub(HOST_H + AGENT_H),
+        ),
         PanelId::Recent => Rect::new(right.x, right.y, right.width, RECENT_H),
         PanelId::Auth => Rect::new(right.x, right.y + RECENT_H, right.width, AUTH_H),
-        PanelId::Ping => Rect::new(right.x, right.y + RECENT_H + AUTH_H, right.width, PING_H),
-        // SSH log spans mid+right along the bottom (see render_hosts_body).
-        PanelId::SshLog => Rect::new(
-            mid.x,
-            mid.y + 19,
-            mid.width + 1 + right.width,
-            areas.body.height.saturating_sub(19),
+        PanelId::Ping => Rect::new(
+            right.x,
+            right.y + RECENT_H + AUTH_H,
+            right.width,
+            stack_h.saturating_sub(RECENT_H + AUTH_H),
         ),
+        // SSH log spans mid+right along the bottom (see render_hosts_body).
+        PanelId::SshLog => log.unwrap_or_else(|| Rect::new(mid.x, mid.y + stack_h, mid.width, 0)),
         // Broadcast morphs from its own docked rect, handled elsewhere.
         PanelId::Broadcast => screens::broadcast::docked_rect(areas.body),
     }
@@ -2755,6 +2809,90 @@ mod tests {
             assert!(!buffer_contains(&buffer, "alpha"), "tab {tab} hid row");
             let footer = render_to_buffer(&app, 120, 40);
             assert!(buffer_contains(&footer, "keep filter"), "tab {tab} footer");
+        }
+    }
+
+    /// True when the cell is part of a drawn box edge (anything but blank).
+    fn drawn(buffer: &Buffer, x: u16, y: u16) -> bool {
+        buffer
+            .cell((x, y))
+            .is_some_and(|c| !c.symbol().trim().is_empty())
+    }
+
+    #[test]
+    fn hosts_dashboard_columns_fill_the_body_without_gaps() {
+        for (w, h) in [(132u16, 38u16), (120, 28), (160, 60), (132, 27)] {
+            let app = test_app_with_hosts();
+            let buffer = render_to_buffer(&app, w, h);
+            let areas = dashboard_layout::dashboard_layout_zoomed(Rect::new(0, 0, w, h), 0);
+            let (stack_h, log) = dashboard_layout::hosts_stack_split(&areas);
+            for y in areas.body.top()..areas.body.bottom() {
+                let in_stack = y < areas.body.y + stack_h;
+                assert!(
+                    drawn(&buffer, areas.col_left.x, y),
+                    "{w}x{h} hosts edge, row {y}"
+                );
+                assert!(
+                    drawn(&buffer, areas.col_mid.x, y),
+                    "{w}x{h} middle edge, row {y}"
+                );
+                if in_stack {
+                    assert!(
+                        drawn(&buffer, areas.col_right.x, y),
+                        "{w}x{h} right edge, row {y}"
+                    );
+                }
+            }
+            if let Some(log) = log {
+                let last = areas.body.bottom() - 1;
+                assert_eq!(
+                    log.bottom() - 1,
+                    last,
+                    "{w}x{h}: log ends on the last body row"
+                );
+                assert_eq!(
+                    buffer[(log.x, last)].symbol(),
+                    "└",
+                    "{w}x{h}: log bottom corner"
+                );
+                assert_eq!(
+                    buffer[(areas.col_left.x, last)].symbol(),
+                    "└",
+                    "{w}x{h}: hosts bottom corner on the same row"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hosts_to_sftp_morph_keeps_the_hosts_pane_on_the_left_edge() {
+        let (w, h) = (132u16, 38u16);
+        let areas = dashboard_layout::dashboard_layout_zoomed(Rect::new(0, 0, w, h), 0);
+        let picker = dashboard_layout::sftp_picker_rect(areas.body);
+        let at = |from: usize, to: usize, frac: f32| {
+            let mut app = test_app_with_hosts();
+            app.config.appearance.disable_animation = false;
+            app.active_tab = to;
+            app.tab_switch = Some(crate::app::TabSwitch {
+                from,
+                to,
+                at: std::time::Instant::now() - TAB_ANIM.mul_f32(frac),
+            });
+            render_to_buffer(&app, w, h)
+        };
+        // Midway either way: the pane's top-left corner never leaves col_left.x,
+        // and its right edge sits strictly between the two resting widths.
+        for (from, to) in [(0, 1), (1, 0)] {
+            let buffer = at(from, to, 0.5);
+            assert_eq!(buffer[(areas.col_left.x, areas.body.y)].symbol(), "┌");
+            let right_edge = (areas.col_left.x..picker.right())
+                .rev()
+                .find(|&x| buffer[(x, areas.body.y)].symbol() == "┐")
+                .expect("hosts pane top-right corner");
+            assert!(
+                right_edge + 1 > areas.col_left.right() && right_edge + 1 < picker.right(),
+                "{from}->{to}: pane mid-stretch, right edge {right_edge}"
+            );
         }
     }
 

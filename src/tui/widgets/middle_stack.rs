@@ -46,7 +46,7 @@ pub fn render_middle_stack(frame: &mut Frame, area: Rect, app: &App) {
 
     // ── Panel 3: Latency sparkline ──────────────────────
     let remaining = area.y + area.height - y;
-    let latency_area = Rect::new(area.x, y, w, LATENCY_H.min(remaining));
+    let latency_area = Rect::new(area.x, y, w, remaining);
     render_latency_panel(buf, latency_area, app);
 }
 

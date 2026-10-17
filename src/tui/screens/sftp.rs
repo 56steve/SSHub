@@ -187,8 +187,9 @@ fn render_connecting(buf: &mut Buffer, area: Rect, host: Option<&str>, theme: &R
 // ── Picker sub-state ─────────────────────────────────────────
 
 fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
-    let list_h = area.height.saturating_sub(1);
-    let list_area = Rect::new(area.x, area.y, area.width, list_h);
+    // Same left edge as the hosts column on the hosts tab, stretched across the
+    // body, so switching between the two only widens or narrows the list.
+    let list_area = crate::tui::dashboard_layout::sftp_picker_rect(area);
     // Reuse the dashboard hosts panel so the picker shows the full grouped tree
     // with collapse arrows (▸/▾) and scrolling, identical to the hosts tab.
     crate::tui::widgets::hosts_panel::render_hosts_panel(frame, list_area, app);
@@ -206,7 +207,7 @@ fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
     });
     frame
         .buffer_mut()
-        .set_string(area.x + 2, hint_y, &hint, style);
+        .set_string(list_area.x + 2, hint_y, &hint, style);
 }
 
 // ── Browser sub-state ────────────────────────────────────────

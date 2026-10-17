@@ -46,7 +46,7 @@ pub fn render_right_stack(frame: &mut Frame, area: Rect, app: &App) {
 
     // ── Panel 3: Ping all hosts ─────────────────────────
     let remaining = area.y + area.height - y;
-    let ping_area = Rect::new(area.x, y, w, PING_H.min(remaining));
+    let ping_area = Rect::new(area.x, y, w, remaining);
     render_ping_panel(buf, ping_area, app);
 }
 

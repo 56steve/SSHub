@@ -387,7 +387,7 @@ impl App {
     /// and picks the entry there, and a double click opens it like Enter.
     fn sftp_click(&mut self, x: u16, y: u16, body: Rect, is_double: bool) -> Result<()> {
         if self.sftp.is_none() {
-            let list = Rect::new(body.x, body.y, body.width, body.height.saturating_sub(1));
+            let list = crate::tui::dashboard_layout::sftp_picker_rect(body);
             if list.contains(Position::new(x, y)) && self.click_hosts_panel(list, y) && is_double {
                 self.sftp_picker_activate()?;
             }

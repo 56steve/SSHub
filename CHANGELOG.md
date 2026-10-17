@@ -11,6 +11,17 @@ All notable changes to SSHub are documented in this file.
   type; identities on name, user and key or certificate path. `Enter` keeps
   the filter, `Esc` clears it.
 
+### Fixed
+
+- **Hosts dashboard has no empty strip under the SSH log** - the log panel
+  stopped one row short of the hosts list, and in terminals a few rows too
+  short for it the middle and right columns ended early, leaving a blank band.
+  Every column now runs to the last row of the body.
+- **Hosts to SFTP no longer re-lays out the hosts list** - the SFTP host
+  picker now shares the hosts tab's left edge. Switching tabs stretches the
+  list in place while the dashboard columns slide off to the right, and the
+  reverse brings them back.
+
 ## [0.18.2] - 2026-10-13
 
 ### Fixed
