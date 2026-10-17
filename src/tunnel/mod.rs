@@ -124,15 +124,19 @@ impl TunnelManager {
             self.stop_process(tunnel.id)?;
         }
 
-        let args = build_tunnel_argv(tunnel, host, resolved, secret.is_some() || !hops.is_empty())?;
+        let mut args =
+            build_tunnel_argv(tunnel, host, resolved, secret.is_some() || !hops.is_empty())?;
+        let staged = stage_tunnel_askpass(&mut args, secret, hops)?;
 
         let mut cmd = Command::new(&args[0]);
         cmd.args(&args[1..])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
-
-        let askpass = stage_tunnel_askpass(&mut cmd, secret, hops)?;
+        let askpass = staged.map(|(guard, env)| {
+            cmd.envs(env);
+            guard
+        });
 
         let mut child = cmd.spawn()?;
 

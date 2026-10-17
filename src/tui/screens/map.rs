@@ -322,7 +322,9 @@ pub fn render_map(frame: &mut Frame, area: Rect, app: &App) {
             frame.buffer_mut(),
             area.x + 1,
             area.y + 1,
-            "the map could not be built",
+            app.map_error
+                .as_deref()
+                .unwrap_or("the map could not be built"),
             st.err,
             area.x + area.width,
         );

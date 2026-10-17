@@ -1248,10 +1248,7 @@ fn map_footer(app: &App) -> Vec<(String, &'static str)> {
             return vec![
                 (key(A::MapTunnelLens), "status lens"),
                 (key(A::MapToggleTunnel), "start/stop"),
-                (
-                    format!("{} ", key(A::TabTunnels)).trim().to_string(),
-                    "tunnels tab",
-                ),
+                (key(A::TabTunnels), "tunnels tab"),
                 ("\u{21b5}".into(), "connect"),
                 help,
             ]
@@ -1280,11 +1277,7 @@ fn map_footer(app: &App) -> Vec<(String, &'static str)> {
             help,
         ];
     }
-    if let Some(MapSel::Cycle(i)) = sel {
-        let first = v.map.hosts[v.map.cycles[i].path[0]].name.clone();
-        // The name is part of the label, so it cannot be a `&'static str`:
-        // the cycle footer is built from its own pieces below.
-        let _ = first;
+    if let Some(MapSel::Cycle(_)) = sel {
         return vec![
             ("\u{21b5}".into(), "edit chain"),
             (key(A::Edit), "edit loop"),
@@ -1296,11 +1289,11 @@ fn map_footer(app: &App) -> Vec<(String, &'static str)> {
     if v.clustered() && matches!(sel, Some(MapSel::Cluster(_) | MapSel::More(_))) {
         return vec![
             (key(A::MapFold), "open/close cluster"),
-            ("\u{2192}".into(), "into cluster"),
+            ("\u{2192}".into(), "first host"),
             (key(A::MapFoldAll), "fold all"),
             (key(A::Search), "reveal"),
             (key(A::MapBlast), "blast"),
-            ("\u{21b5}".into(), "connect"),
+            ("\u{21b5}".into(), "open/close"),
             help,
         ];
     }
@@ -1459,7 +1452,7 @@ fn footer_keybinds(
         2 => vec![
             ("\u{2191}\u{2193}".into(), "select"),
             ("\u{21b5}".into(), "start/stop"),
-            ("/".into(), "search"),
+            ("/".into(), "filter"),
             ("a".into(), "new tunnel"),
             ("e".into(), "edit"),
             ("d".into(), "delete"),
@@ -1486,7 +1479,7 @@ fn footer_keybinds(
         3 => vec![
             ("\u{2191}\u{2193}\u{2190}\u{2192}".into(), "move"),
             ("[ ]".into(), "columns"),
-            ("/".into(), "search"),
+            ("/".into(), "filter"),
             ("a".into(), "add"),
             ("g".into(), "generate"),
             ("e".into(), "edit"),
@@ -1508,8 +1501,22 @@ fn footer_keybinds(
     };
     if matches!(app.active_tab, 2 | 3) && app.list_filter_editing {
         binds = vec![
-            ("\u{21b5}".into(), "keep filter"),
-            ("Esc".into(), "clear filter"),
+            (
+                screens::map::key_label(
+                    app.config
+                        .keybinds
+                        .primary(crate::config::KeyAction::Connect),
+                ),
+                "keep filter",
+            ),
+            (
+                screens::map::key_label(
+                    app.config
+                        .keybinds
+                        .primary(crate::config::KeyAction::Cancel),
+                ),
+                "clear filter",
+            ),
         ];
     }
     // The host form's hop editor has its own footers (D10, D11, D13).
@@ -2063,8 +2070,19 @@ fn render_hosts_sftp_morph(
     t: f32,
 ) {
     let body = areas.body;
-    // The dashboard columns at rest, lifted into cells so they can travel.
+    // The dashboard columns at rest, lifted into cells so they can travel. The
+    // rest-layout hosts panel it draws advances the shared scroll state with
+    // the wrong body height; roll that back so the morphing panel below is
+    // the one advance this frame.
+    let scroll = (
+        app.host_scroll_pos.get(),
+        app.host_scroll_at.get(),
+        app.host_scroll_moving.get(),
+    );
     render_hosts_body(frame, areas, app);
+    app.host_scroll_pos.set(scroll.0);
+    app.host_scroll_at.set(scroll.1);
+    app.host_scroll_moving.set(scroll.2);
     let cols = Rect::new(
         areas.col_mid.x,
         body.y,
@@ -3121,7 +3139,7 @@ mod tests {
             app.snap_tunnel_selection();
             app.snap_identity_selection();
             let buffer = render_to_buffer(&app, 120, 40);
-            assert!(buffer_contains(&buffer, "search: bravo"), "tab {tab} bar");
+            assert!(buffer_contains(&buffer, "filter: bravo"), "tab {tab} bar");
             // The row itself, not the filter bar's own "bravo".
             let kept = if tab == 2 { "bravo-web" } else { "bravo-key" };
             assert!(buffer_contains(&buffer, kept), "tab {tab} kept row");
@@ -4030,6 +4048,26 @@ mod tests {
             &buffer_signature(&buffer),
             include_str!("../../tests/fixtures/theme/default-dashboard.buffer"),
         );
+    }
+
+    /// The 132x38 golden says nothing about smaller terminals or the SFTP
+    /// picker tab: draw both at 100x30, 80x24 and a tiny 60x18 (must not panic
+    /// on an unlucky slot) and check the landmarks that must survive.
+    #[test]
+    fn dashboard_and_sftp_picker_draw_at_smaller_sizes() {
+        for (w, h) in [(100, 30), (80, 24), (60, 18)] {
+            let mut app = test_app_with_hosts();
+            let hosts = render_to_buffer(&app, w, h);
+            app.active_tab = 1;
+            let picker = render_to_buffer(&app, w, h);
+            if w < 80 {
+                continue;
+            }
+            assert!(buffer_contains(&hosts, "web-prod"), "hosts tab {w}x{h}");
+            assert!(buffer_contains(&picker, "web-prod"), "picker list {w}x{h}");
+            assert!(buffer_contains(&picker, "Esc back"), "picker hint {w}x{h}");
+            assert!(!buffer_contains(&hosts, "Esc back"), "hosts tab {w}x{h}");
+        }
     }
 
     // ── Theme-driven app background ─────────────────────────

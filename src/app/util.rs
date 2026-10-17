@@ -1000,6 +1000,8 @@ pub struct HopSpec {
     managed: crate::store::ManagedHost,
     identity: Option<crate::store::Identity>,
     user: Option<String>,
+    /// The host as the jump list names it (see [`crate::session::hop_auth::HopCred::via`]).
+    via: String,
 }
 
 impl HopSpec {
@@ -1053,6 +1055,7 @@ impl HopSpec {
             self.name().to_string(),
             self.user.clone(),
             self.managed.address.clone(),
+            self.via.clone(),
             Some(self.managed.id),
             self.identity.as_ref().map(|i| i.id),
             self.key_path(),
@@ -1078,6 +1081,7 @@ impl HopSpec {
                 Some(crate::session::hop_auth::HopSecret {
                     user: self.user.clone(),
                     host: self.managed.address.clone(),
+                    via: self.via.clone(),
                     key_path: self.key_path(),
                     class,
                     value: secret.value().to_string(),
@@ -1104,6 +1108,11 @@ pub fn hop_specs(
         .iter()
         .filter_map(|token| {
             let raw = crate::map::parse_raw_hop(token);
+            // What ssh's own process for this hop is given as its host: the
+            // host part of a raw `[user@]host[:port]`, else the saved name.
+            let via = raw
+                .as_ref()
+                .map_or_else(|| token.clone(), |r| r.host.clone());
             // By name, or by the host part of the token, or (written as an
             // address) by the one saved host that has that address.
             let managed = by_name(token)
@@ -1130,6 +1139,7 @@ pub fn hop_specs(
                 managed: managed.clone(),
                 identity: fields.identity,
                 user,
+                via,
             })
         })
         .collect()

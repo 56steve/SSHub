@@ -60,6 +60,16 @@ impl App {
         // every character it types, so a global bind on a plain or Shift key
         // (`Shift+S` snippets, `Shift+L` logs, or any user rebind) must not
         // steal it. Chords such as Ctrl+T or Alt+P still reach the globals.
+        // Terminals that send ^H for Backspace arrive as Ctrl+H (crossterm maps
+        // 0x08 so): inside a filter that is a Backspace, not Settings.
+        if self.mode == AppMode::Normal
+            && self.dashboard_text_input_active()
+            && key.code == KeyCode::Char('h')
+            && key.modifiers == KeyModifiers::CONTROL
+        {
+            return self
+                .handle_key_dashboard_tab(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
         if self.mode == AppMode::Normal && self.dashboard_text_input_active() && is_typed_char(&key)
         {
             return self.handle_key_dashboard_tab(key);
@@ -555,14 +565,37 @@ impl App {
     /// #18). `ssh-add -d` can only drop a key by file path, and the agent
     /// listing exposes only the key's comment (usually, but not always, that
     /// path), so this can fail with a clear notice.
+    ///
+    /// The row is taken from the listing the panel shows (`agent_info`), and
+    /// the agent is asked again only to confirm that key is still loaded under
+    /// the same fingerprint: a key added or removed since the panel drew would
+    /// shift a re-listed index onto a different key.
     fn remove_zoomed_agent_key(&mut self) {
-        let agent = crate::ssh::agent::detect_agent();
         let idx = self.panel_scroll.get() as usize;
-        let Some(k) = agent.keys.get(idx) else {
+        let Some(k) = self
+            .agent_info
+            .as_ref()
+            .and_then(|a| a.keys.get(idx))
+            .cloned()
+        else {
             return;
         };
         if k.comment.is_empty() {
             self.host_notice = Some("can't remove: agent key has no file path".into());
+            return;
+        }
+        let still_loaded = crate::ssh::agent::detect_agent()
+            .keys
+            .iter()
+            .any(|f| f.fingerprint == k.fingerprint && f.comment == k.comment);
+        if !still_loaded {
+            self.agent_info_updated =
+                std::time::Instant::now() - std::time::Duration::from_secs(60);
+            self.refresh_agent_info();
+            self.host_notice = Some(format!(
+                "{} changed in the agent since the list was drawn; nothing removed",
+                k.comment
+            ));
             return;
         }
         self.host_notice = Some(match crate::ssh::agent::remove_key(&k.comment) {
@@ -572,6 +605,8 @@ impl App {
                 k.comment
             ),
         });
+        self.agent_info_updated = std::time::Instant::now() - std::time::Duration::from_secs(60);
+        self.refresh_agent_info();
     }
 
     /// Connect to the host selected in a zoomed ping/recent panel (issue #18).

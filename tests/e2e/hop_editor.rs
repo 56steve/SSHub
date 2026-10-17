@@ -161,14 +161,8 @@ fn route_reuse_replaces_every_hop() {
 fn hop_that_would_loop_is_refused() {
     let mut app = app(None);
     edit(&mut app, "bastion-eu");
-    // db-1 depends on bastion-eu: as a hop of bastion-eu it would loop.
-    press(&mut app, 'a');
-    typed(&mut app, "db-1");
-    app.handle_key(key(KeyCode::Enter)).unwrap();
-    assert_eq!(jump(&app), "");
-    assert!(screen(&app).contains("would loop"));
-    // The host itself too.
-    app.handle_key(key(KeyCode::Esc)).unwrap();
+    // A launcher hop is expanded to `user@addr`, so db-1 (which jumps through
+    // bastion-eu) is no loop as a hop of bastion-eu; the host itself is.
     press(&mut app, 'a');
     typed(&mut app, "bastion-eu");
     app.handle_key(key(KeyCode::Enter)).unwrap();

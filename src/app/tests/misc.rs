@@ -60,40 +60,37 @@ pub(crate) fn keyevent_to_spec_roundtrips() {
 
 #[test]
 pub(crate) fn pasted_key_material_is_written_to_a_file_on_save() {
-    let _home = crate::test_env::lock_home();
     let dir = tempfile::tempdir().unwrap();
-    std::env::set_var("HOME", dir.path());
+    crate::config::with_test_home(dir.path(), || {
+        let mut app = test_app(vec![("web", host("web"))]);
+        app.active_tab = 3;
+        app.enter_identity_form(None).unwrap();
 
-    let mut app = test_app(vec![("web", host("web"))]);
-    app.active_tab = 3;
-    app.enter_identity_form(None).unwrap();
+        // Name the identity, then paste key material into the key field.
+        for c in "pasted-id".chars() {
+            app.handle_key(key_char(c)).unwrap();
+        }
+        while app.identity_form.as_ref().unwrap().field != IdentityFormField::PrivateKey {
+            app.handle_key(key(KeyCode::Down)).unwrap();
+        }
+        let blob = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc123\n-----END OPENSSH PRIVATE KEY-----";
+        app.handle_paste(blob).unwrap();
+        assert!(app.identity_form.as_ref().unwrap().pasted_key.is_some());
 
-    // Name the identity, then paste key material into the key field.
-    for c in "pasted-id".chars() {
-        app.handle_key(key_char(c)).unwrap();
-    }
-    while app.identity_form.as_ref().unwrap().field != IdentityFormField::PrivateKey {
-        app.handle_key(key(KeyCode::Down)).unwrap();
-    }
-    let blob = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc123\n-----END OPENSSH PRIVATE KEY-----";
-    app.handle_paste(blob).unwrap();
-    assert!(app.identity_form.as_ref().unwrap().pasted_key.is_some());
+        app.handle_key(key(KeyCode::F(2))).unwrap(); // save
+        assert_eq!(app.mode, AppMode::Normal);
 
-    app.handle_key(key(KeyCode::F(2))).unwrap(); // save
-    assert_eq!(app.mode, AppMode::Normal);
-
-    let created = app
-        .store
-        .get_identity_by_name("pasted-id")
-        .unwrap()
-        .expect("identity created");
-    let path = created.private_key.expect("key path set");
-    assert!(path.to_string_lossy().contains("sshub_pasted-id"));
-    let contents = std::fs::read_to_string(&path).unwrap();
-    assert!(contents.contains("BEGIN OPENSSH PRIVATE KEY"));
-    assert!(contents.ends_with('\n'));
-
-    std::env::remove_var("HOME");
+        let created = app
+            .store
+            .get_identity_by_name("pasted-id")
+            .unwrap()
+            .expect("identity created");
+        let path = created.private_key.expect("key path set");
+        assert!(path.to_string_lossy().contains("sshub_pasted-id"));
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("BEGIN OPENSSH PRIVATE KEY"));
+        assert!(contents.ends_with('\n'));
+    });
 }
 
 #[test]
@@ -583,6 +580,26 @@ fn host_scroll_snaps_under_reduced_motion() {
     let target = app.host_scroll_offset(body_h);
     assert_eq!(app.host_scroll_advance(body_h), target);
     assert!(!app.host_scroll_moving.get());
+}
+
+/// A zoom morph's rects are absolute cells fixed at key-press, so a resize
+/// must drop it instead of drawing the slide at stale coordinates.
+#[test]
+fn terminal_resize_drops_the_zoom_animation() {
+    let mut app = test_app(vec![("web", host("web"))]);
+    app.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);
+    app.detect_tab_switch();
+    let r = ratatui::layout::Rect::new(0, 0, 4, 2);
+    app.zoom_anim = Some(crate::tui::tween::SlideAnim::new(
+        r,
+        r,
+        std::time::Duration::from_millis(300),
+    ));
+    app.detect_tab_switch();
+    assert!(app.zoom_anim.is_some(), "same size must keep the morph");
+    app.terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
+    app.detect_tab_switch();
+    assert!(app.zoom_anim.is_none(), "a resize must drop the morph");
 }
 
 /// Folding a group (#35) keeps `nav_rows` authoritative -- the collapse

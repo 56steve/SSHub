@@ -380,15 +380,18 @@ pub fn import_putty(path: &Path, store: &LauncherStore) -> Result<HostImportRepo
             continue;
         }
         let username = (!host.username.is_empty()).then(|| host.username.clone());
-        let created = store.create_host(&NewHost {
-            name: host.name.clone(),
-            address: host.hostname.clone(),
-            port: Some(host.port),
-            username,
-            notes: Some("Imported from PuTTY".into()),
-            source: HostSource::Launcher,
-            ..Default::default()
-        });
+        let created =
+            super::check_destination(&host.hostname, username.as_deref()).and_then(|()| {
+                store.create_host(&NewHost {
+                    name: host.name.clone(),
+                    address: host.hostname.clone(),
+                    port: Some(host.port),
+                    username,
+                    notes: Some("Imported from PuTTY".into()),
+                    source: HostSource::Launcher,
+                    ..Default::default()
+                })
+            });
         // Same as the mRemoteNG importer: one refused row does not cost the file.
         match created {
             Ok(_) => report.imported += 1,

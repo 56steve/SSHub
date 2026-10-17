@@ -24,7 +24,7 @@ pub fn filter_bar(
         }
     }
     let text = if editing {
-        format!(" search: {query}\u{2581}   Esc clear · Enter keep")
+        format!(" filter: {query}\u{2581}   Esc clear · Enter keep")
     } else {
         format!(" filter: {query}   / edit · Esc clear")
     };

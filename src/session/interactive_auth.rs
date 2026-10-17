@@ -130,7 +130,7 @@ impl InteractiveAuth {
         let hop = if from_destination {
             None
         } else {
-            hop_auth::find(&self.hops, &request.prompt).cloned()
+            hop_auth::find_for(&self.hops, &request.prompt, request.ssh_pid).cloned()
         };
         // Who is asking, for the retry budget: the destination, a saved hop, or
         // some other ssh of the chain (by process).
@@ -206,7 +206,8 @@ impl InteractiveAuth {
         if self.asked_by_destination(request) {
             return SaveTarget::for_prompt(class, self.host_id, self.identity_id);
         }
-        hop_auth::find(&self.hops, &request.prompt).and_then(|hop| hop_target(hop, class))
+        hop_auth::find_for(&self.hops, &request.prompt, request.ssh_pid)
+            .and_then(|hop| hop_target(hop, class))
     }
 
     /// The saved hop host the open request is from, when it is one.
@@ -215,7 +216,7 @@ impl InteractiveAuth {
         if self.asked_by_destination(request) {
             return None;
         }
-        hop_auth::find(&self.hops, &request.prompt)
+        hop_auth::find_for(&self.hops, &request.prompt, request.ssh_pid)
     }
 
     /// The open request is from a jump hop (saved or not), not the destination.
@@ -500,6 +501,7 @@ mod hop_tests {
             name.into(),
             Some("ops".into()),
             host.into(),
+            host.into(),
             Some(match name {
                 "lb-1" => 11,
                 "lb-2" => 12,
@@ -532,6 +534,9 @@ mod hop_tests {
             auth.host_id = Some(7);
             auth.destination_pid = Some(DESTINATION);
             auth.hops = hops;
+            // The asking pids are made up: say which hop each one is running for.
+            crate::session::hop_auth::pretend_target(HOP_1, "10.0.4.11");
+            crate::session::hop_auth::pretend_target(HOP_2, "10.0.4.12");
             let env = auth.channel_env(Path::new("unused"));
             let get = |name: &str| env.iter().find(|(k, _)| k == name).unwrap().1.clone();
             Self {
@@ -684,11 +689,10 @@ mod hop_tests {
             hop("lb-2", "10.0.4.12", Some("lb-2-pw"), &asked),
         ]);
         let mut stored = None;
-        // lb-1: the stored one first, then the user twice, then it gives up.
-        let tries = [(rig.ask("ops@10.0.4.11's password: ", HOP_1), "old")];
-        rig.poll_until(&mut stored, |_, _| tries[0].0.is_finished());
-        let [(first, answer)] = tries;
-        assert_eq!(first.join().unwrap().unwrap(), answer);
+        // lb-1: the stored (wrong) one first, then the user twice: its 3 tries.
+        let first = rig.ask("ops@10.0.4.11's password: ", HOP_1);
+        rig.poll_until(&mut stored, |_, _| first.is_finished());
+        assert_eq!(first.join().unwrap().unwrap(), "old");
         for n in 2..=3 {
             let asking = rig.ask("ops@10.0.4.11's password: ", HOP_1);
             rig.poll_until(&mut stored, |r, _| r.auth.request.is_some());
@@ -696,9 +700,27 @@ mod hop_tests {
             rig.auth.answer(format!("typed-{n}"), false).unwrap();
             assert_eq!(asking.join().unwrap().unwrap(), format!("typed-{n}"));
         }
-        let fourth = rig.ask("ops@10.0.4.11's password: ", HOP_1);
+        // lb-2 starts its own count at 1 (not 4): the stored one, then the user
+        // twice, then it gives up on the fourth.
+        let first = rig.ask("ops@10.0.4.12's password: ", HOP_2);
+        rig.poll_until(&mut stored, |_, _| first.is_finished());
+        assert_eq!(first.join().unwrap().unwrap(), "lb-2-pw");
+        for n in 2..=3 {
+            let asking = rig.ask("ops@10.0.4.12's password: ", HOP_2);
+            rig.poll_until(&mut stored, |r, _| r.auth.request.is_some());
+            assert_eq!(rig.auth.attempts, n, "lb-2 shares lb-1's budget");
+            assert_eq!(
+                rig.auth.request_hop().map(|h| h.name.as_str()),
+                Some("lb-2")
+            );
+            rig.auth.answer(format!("typed-{n}"), false).unwrap();
+            assert_eq!(asking.join().unwrap().unwrap(), format!("typed-{n}"));
+        }
+        let fourth = rig.ask("ops@10.0.4.12's password: ", HOP_2);
         rig.poll_until(&mut stored, |r, _| r.auth.cancelled());
         assert!(fourth.join().unwrap().is_err());
+        // Each hop's saved password was fetched once, never re-offered.
+        assert_eq!(*asked.lock().unwrap(), ["lb-1:Password", "lb-2:Password"]);
     }
 
     #[test]
@@ -815,6 +837,7 @@ print(reply["answer"])
             auth.hops = vec![HopCred::new(
                 "hop-b".into(),
                 Some(user.clone()),
+                "127.0.0.1".into(),
                 "127.0.0.1".into(),
                 Some(22),
                 None,

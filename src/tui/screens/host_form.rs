@@ -44,6 +44,7 @@ pub fn render_host_form(
     let focus = theme.style(StyleRole::FocusIndicator);
 
     let mut lines = Vec::with_capacity(HostFormField::ALL.len() + 2);
+    let mut keep = None;
     if form.metadata_only {
         lines.push((
             Line::from(Span::styled(
@@ -269,7 +270,7 @@ pub fn render_host_form(
         ));
         if field == HostFormField::ProxyJump {
             if let Some(h) = hops {
-                super::hop_lines::push_hop_lines(&mut lines, h, theme, width);
+                keep = super::hop_lines::push_hop_lines(&mut lines, h, theme, width);
             }
         }
     }
@@ -304,6 +305,7 @@ pub fn render_host_form(
             .title(Span::styled(title, theme.style(StyleRole::PopupTitle))),
         Some(Wrap { trim: true }),
     )
+    .keep_visible(keep)
 }
 
 fn display_text(value: &str) -> String {
@@ -526,5 +528,46 @@ mod tests {
                 "rendered form should not contain {absent:?}"
             );
         }
+    }
+
+    /// On a 24-row terminal the form is taller than its popup once the hop
+    /// picker is open; the picker (its prompt and key hints) must be scrolled
+    /// into view, not clipped while still taking input.
+    #[test]
+    fn an_open_hop_picker_and_raw_box_are_drawn_at_80x24() {
+        use crate::app::tests::{host, test_app};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let draw = |app: &crate::app::App| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|frame| crate::tui::render(frame, app))
+                .unwrap();
+            let buf = terminal.backend().buffer().clone();
+            (0..24)
+                .map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let mut app = test_app(vec![("aa", host("aa")), ("hub", host("hub"))]);
+        app.enter_host_form(None, false).unwrap();
+        app.host_form.as_mut().unwrap().field = HostFormField::ProxyJump;
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.hop_editor.picker.is_some());
+        let text = draw(&app);
+        assert!(text.contains("Esc close"), "picker footer clipped:\n{text}");
+        assert!(text.contains("hub"), "picker rows clipped:\n{text}");
+
+        app.hop_editor.picker = None;
+        app.hop_editor.raw = Some(crate::app::hop_editor::RawInput {
+            text: "ops@h".into(),
+            target: crate::app::hop_editor::PickTarget::Add(0),
+        });
+        let text = draw(&app);
+        assert!(text.contains("raw hop"), "raw box clipped:\n{text}");
+        assert!(
+            text.contains("Esc cancel"),
+            "raw box footer clipped:\n{text}"
+        );
     }
 }

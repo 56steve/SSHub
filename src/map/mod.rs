@@ -19,7 +19,7 @@
 
 mod build;
 pub mod dot;
-mod filter;
+pub mod filter;
 pub mod hops;
 
 pub use build::collect_hosts;

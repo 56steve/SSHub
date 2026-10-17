@@ -219,6 +219,14 @@ pub struct Session {
     /// side FIFO. Rendered as the connect spinner's debug tail / expanded log,
     /// and scanned for the real "authenticated to" connected marker.
     debug_log: String,
+    /// The part of `debug_log` only ssh itself can write: its `-E` log (a
+    /// server banner lands on stderr, never here). Every security decision —
+    /// `connected`, host-key fingerprint, changed-key repair target — reads
+    /// this, not `debug_log`. Children without a separate log channel (mosh,
+    /// test doubles) feed it from stderr, the best they have.
+    ssh_log: String,
+    /// Whether the child has its own ssh log channel, see `ssh_log`.
+    log_channel: bool,
     /// First host-key fingerprint seen in `debug_log` (first-wins). Cached so a
     /// hostile banner that floods the 64 KB ring buffer cannot replace the
     /// genuine KEX line with a forged `debug1: Server host key:` after eviction.
@@ -342,6 +350,7 @@ impl Session {
         }
         let parser = ParserState::new(pty_rows, pty_cols);
 
+        let log_channel = runtime.has_log_channel();
         let display_argv = config.argv.clone();
 
         // Transparent auth log: say exactly how the stored secret is delivered.
@@ -376,6 +385,8 @@ impl Session {
             auth,
             connected: false,
             debug_log: String::new(),
+            ssh_log: String::new(),
+            log_channel,
             host_key_fingerprint: None,
             debug_expanded: false,
             saw_pty_bytes: false,
@@ -653,21 +664,15 @@ impl Session {
                     // ssh's `-v` handshake — kept off the PTY grid, accumulated
                     // for the connect spinner's debug view. Cap the buffer so a
                     // long-lived session can't grow it without bound.
-                    self.debug_log.push_str(&String::from_utf8_lossy(&bytes));
-                    if self.host_key_fingerprint.is_none() {
-                        if let Some(fp) =
-                            crate::known_hosts::host_key_fingerprint_from_log(&self.debug_log)
-                        {
-                            self.host_key_fingerprint = Some(fp);
-                        }
+                    push_capped(&mut self.debug_log, &bytes);
+                    if !self.log_channel {
+                        self.push_ssh_log(&bytes);
                     }
-                    if self.debug_log.len() > DEBUG_LOG_CAP {
-                        let mut cut = self.debug_log.len() - DEBUG_LOG_CAP;
-                        while cut > 0 && !self.debug_log.is_char_boundary(cut) {
-                            cut -= 1;
-                        }
-                        self.debug_log.drain(..cut);
-                    }
+                    had_stderr = true;
+                }
+                PtyEvent::SshLog(bytes) => {
+                    push_capped(&mut self.debug_log, &bytes);
+                    self.push_ssh_log(&bytes);
                     had_stderr = true;
                 }
                 PtyEvent::Exited(reason) => {
@@ -919,7 +924,7 @@ impl Session {
         if self.connected {
             return;
         }
-        let text = self.debug_log.to_ascii_lowercase();
+        let text = self.ssh_log.to_ascii_lowercase();
         if CONNECTED_NEEDLES.iter().any(|n| text.contains(n)) {
             self.connected = true;
             // Authentication consumed whatever was typed pre-auth (a typed
@@ -927,6 +932,16 @@ impl Session {
             // the stale uncertainty so the first post-auth command records.
             // Transition-only — later output must not wipe a live input line.
             self.history.input.reset();
+        }
+    }
+
+    /// Record bytes only ssh could have written (see `ssh_log`); the host-key
+    /// fingerprint is cached first-wins so a flood cannot evict the real one.
+    fn push_ssh_log(&mut self, bytes: &[u8]) {
+        push_capped(&mut self.ssh_log, bytes);
+        if self.host_key_fingerprint.is_none() {
+            self.host_key_fingerprint =
+                crate::known_hosts::host_key_fingerprint_from_log(&self.ssh_log);
         }
     }
 
@@ -963,7 +978,7 @@ impl Session {
     /// This is the case worth offering to accept — a changed key can be a
     /// legitimate server rebuild or a MITM, so the user must opt in.
     pub fn host_key_changed(&self) -> bool {
-        let log = self.debug_log.to_ascii_lowercase();
+        let log = self.ssh_log.to_ascii_lowercase();
         log.contains("host identification has changed")
             || (log.contains("host key for") && log.contains("has changed"))
     }
@@ -971,7 +986,7 @@ impl Session {
     /// Use OpenSSH's actual offending file and lookup name, not ~/.ssh defaults
     /// or the display address (HostKeyAlias and custom ports can differ).
     pub fn changed_key_target(&self) -> Option<(String, std::path::PathBuf)> {
-        let mut specs = self.debug_log.lines().filter_map(|line| {
+        let mut specs = self.ssh_log.lines().filter_map(|line| {
             line.strip_prefix("Host key for ")?
                 .split_once(" has changed")
                 .map(|(host, _)| host)
@@ -990,7 +1005,7 @@ impl Session {
         {
             return None;
         }
-        let mut files = self.debug_log.lines().filter_map(|line| {
+        let mut files = self.ssh_log.lines().filter_map(|line| {
             let line = line.strip_prefix("Offending ")?;
             let (_, location) = line.split_once(" key in ")?;
             let (file, row) = location.rsplit_once(':')?;
@@ -1225,15 +1240,36 @@ pub fn edge_autoscroll_dir(raw_row: i32, rows: u16) -> Option<i32> {
 /// otherwise return it unchanged. Pulled out of [`Session::write_paste`] so the
 /// framing is unit-testable without a live PTY.
 fn encode_paste(text: &[u8], bracketed: bool) -> Vec<u8> {
+    let text = sanitize_paste(text);
     if bracketed {
         let mut buf = Vec::with_capacity(text.len() + 12);
         buf.extend_from_slice(b"\x1b[200~");
-        buf.extend_from_slice(text);
+        buf.extend_from_slice(&text);
         buf.extend_from_slice(b"\x1b[201~");
         buf
     } else {
-        text.to_vec()
+        text
     }
+}
+
+/// Drop what could end the paste early or act as a command: ESC (so clipboard
+/// text cannot carry `ESC[201~` and run the rest as typed input), the other C0
+/// controls and DEL, and the C1 controls (UTF-8 `C2 80..9F`). Tab, LF and CR
+/// stay. Terminals do the same to a bracketed paste.
+fn sanitize_paste(text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut bytes = text.iter().copied().peekable();
+    while let Some(b) = bytes.next() {
+        match b {
+            b'\t' | b'\n' | b'\r' => out.push(b),
+            0x00..=0x1f | 0x7f => {}
+            0xc2 if matches!(bytes.peek(), Some(0x80..=0x9f)) => {
+                bytes.next();
+            }
+            _ => out.push(b),
+        }
+    }
+    out
 }
 
 /// How long an armed session keeps the connect animation up while waiting to
@@ -1267,9 +1303,15 @@ fn ssh_honors_askpass_require() -> bool {
         };
         let banner = String::from_utf8_lossy(&out.stderr).into_owned()
             + &String::from_utf8_lossy(&out.stdout);
-        openssh_version(&banner).is_none_or(|version| version >= (8, 4))
+        banner_honors_askpass_require(&banner)
     });
     *HONORED
+}
+
+/// `SSH_ASKPASS_REQUIRE` arrived in OpenSSH 8.4 (release notes: "ssh(1),
+/// ssh-add(1): add SSH_ASKPASS_REQUIRE"; `man ssh` of 8.3 does not list it).
+fn banner_honors_askpass_require(banner: &str) -> bool {
+    openssh_version(banner).is_none_or(|version| version >= (8, 4))
 }
 
 /// Things ssh / sshd actually say when asking for a password. Keep the
@@ -1310,11 +1352,23 @@ const CONNECTED_NEEDLES: &[&str] = &[
 
 /// How an embedded ssh is asked for the debug output scanned for
 /// [`CONNECTED_NEEDLES`]. Not `-v`: ssh hands `-v` on to every ProxyJump hop,
-/// whose own `Authenticated to …` reaches the same stderr and would mark the
-/// session connected (closing the askpass channel) before the destination asks
-/// for its password. A jump host whose ssh_config sets `LogLevel VERBOSE` or
-/// higher still prints that line.
+/// whose own `Authenticated to …` reaches stderr. The embedded ssh logs to
+/// its own `-E` FIFO (see `pty::StderrFifo`) and only that stream is scanned,
+/// so neither a hop's stderr nor a server banner can fake the marker.
 pub(crate) const SSH_DEBUG_ARGS: [&str; 2] = ["-o", "LogLevel=DEBUG1"];
+
+/// Append `bytes` to a debug buffer, dropping old output past
+/// [`DEBUG_LOG_CAP`] from the front.
+fn push_capped(buf: &mut String, bytes: &[u8]) {
+    buf.push_str(&String::from_utf8_lossy(bytes));
+    if buf.len() > DEBUG_LOG_CAP {
+        let mut cut = buf.len() - DEBUG_LOG_CAP;
+        while cut > 0 && !buf.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        buf.drain(..cut);
+    }
+}
 
 /// Cap on the retained ssh `-v` debug buffer (bytes). Old output past this is
 /// dropped from the front so a long session can't grow it without bound.
@@ -1624,6 +1678,21 @@ mod paste_tests {
         // Remote did not: send raw so markers don't leak in as literal text.
         assert_eq!(encode_paste(text, false), text.to_vec());
     }
+
+    #[test]
+    fn paste_cannot_smuggle_escape_or_control_bytes() {
+        // A clipboard carrying the end marker would otherwise end the bracket
+        // early and run the tail as typed keys.
+        let evil = "a\x1b[201~rm -rf ~\x07\x7f\u{9b}2J\tb\r\nc é".as_bytes();
+        let expect = b"a[201~rm -rf ~2J\tb\r\nc \xc3\xa9".to_vec();
+        assert_eq!(sanitize_paste(evil), expect);
+        let wrapped = encode_paste(evil, true);
+        assert_eq!(
+            wrapped.iter().filter(|&&b| b == 0x1b).count(),
+            2,
+            "only our two markers"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1646,7 +1715,7 @@ mod prompt_tests {
             host_name: "offline".into(),
         };
         let mut session = Session::spawn(config, (24, 80), None).unwrap();
-        session.debug_log = "Offending ED25519 key in /tmp/custom known_hosts:7\nHost key for [alias]:2222 has changed and you have requested strict checking.\n".into();
+        session.ssh_log = "Offending ED25519 key in /tmp/custom known_hosts:7\nHost key for [alias]:2222 has changed and you have requested strict checking.\n".into();
         assert_eq!(
             session.changed_key_target(),
             Some(("[alias]:2222".into(), "/tmp/custom known_hosts".into()))
@@ -1659,9 +1728,19 @@ mod prompt_tests {
             // A banner naming another host must not aim the repair at that host.
             "Offending ED25519 key in /home/u/.ssh/known_hosts:1\nHost key for github.com has changed and you have requested strict checking.\n",
         ] {
-            session.debug_log = log.into();
+            session.ssh_log = log.into();
             assert!(session.changed_key_target().is_none(), "ambiguous or invalid target must not be repaired");
         }
+    }
+
+    #[test]
+    fn askpass_require_needs_openssh_8_4() {
+        assert!(!banner_honors_askpass_require("OpenSSH_8.3p1 Ubuntu"));
+        assert!(!banner_honors_askpass_require("OpenSSH_7.9p1, OpenSSL"));
+        assert!(banner_honors_askpass_require("OpenSSH_8.4p1, OpenSSL"));
+        assert!(banner_honors_askpass_require("OpenSSH_10.5p1, OpenSSL"));
+        // Not OpenSSH, or unreadable: do not take the helper away.
+        assert!(banner_honors_askpass_require("dropbear"));
     }
 
     #[test]
@@ -1945,6 +2024,57 @@ mod prompt_tests {
             assert!(
                 std::time::Instant::now() < deadline,
                 "mux marker never latched connected, debug: {:?}",
+                s.debug_log()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_server_banner_cannot_latch_connected() {
+        // The pre-auth banner reaches ssh's stderr verbatim; the real `-E` log
+        // is a different stream. A banner reading "Authenticated to …" (and
+        // forging a host-key-changed block) must change nothing; the genuine
+        // log line must.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("ssh");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\n[ \"$1\" = -E ] || exit 3\n\
+             printf 'Authenticated to evil ([1.2.3.4]:22)\\nHost key for victim has changed\\n' >&2\n\
+             sleep 1\n\
+             printf 'Authenticated to real ([1.2.3.4]:22) using \"password\".\\n' > \"$2\"\n\
+             exec sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = SessionConfig {
+            hops: Vec::new(),
+            argv: vec![fake.to_string_lossy().into_owned(), "real".into()],
+            display_name: "banner".into(),
+            meta: SessionMeta::default(),
+            pending_secret: None,
+            key_push_identity: None,
+            host_name: "banner".into(),
+        };
+        let mut s = Session::spawn(config, (10, 40), None).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !s.debug_log().contains("Authenticated to evil") {
+            s.drain();
+            assert!(std::time::Instant::now() < deadline, "banner never arrived");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!s.is_connected(), "banner text must not latch connected");
+        assert!(
+            !s.host_key_changed(),
+            "banner text must not forge a host-key change"
+        );
+        while !s.is_connected() {
+            s.drain();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the real log line never latched connected: {:?}",
                 s.debug_log()
             );
             std::thread::sleep(Duration::from_millis(10));

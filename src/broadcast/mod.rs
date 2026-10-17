@@ -1121,6 +1121,7 @@ mod tests {
         let hop = |user: &str, value: &str| HopSecret {
             user: Some(user.into()),
             host: "10.0.4.11".into(),
+            via: "10.0.4.11".into(),
             key_path: None,
             class: crate::session::auth_prompt::PromptClass::Password,
             value: value.into(),

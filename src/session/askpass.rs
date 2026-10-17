@@ -71,7 +71,7 @@ impl AskpassSecret {
     /// Stage the destination's `secret` (if it has one) and the jump hops' own
     /// secrets. The first line is the destination's; a `C<TAB>p|k` line says
     /// whether it is a password or a key passphrase; every other line is one
-    /// hop secret (`H<TAB>class<TAB>user<TAB>host<TAB>key<TAB>value`). The
+    /// hop secret (`H<TAB>class<TAB>user<TAB>host<TAB>key<TAB>via<TAB>value`). The
     /// helper answers a hop's prompt with the line that names that hop, and the
     /// destination's prompt with the first line, only for a prompt of its
     /// class: never the other way round.
@@ -121,15 +121,30 @@ impl AskpassSecret {
             // The format cannot hold a tab or a line break. Such a hop is left
             // out (its prompt then goes unanswered), never mis-parsed into a
             // shifted field with another value.
-            if [user, hop.host.as_str(), key, hop.value.as_str()]
-                .iter()
-                .any(|field| field.contains(['\t', '\n', '\r']))
+            if [
+                user,
+                hop.host.as_str(),
+                hop.via.as_str(),
+                key,
+                hop.value.as_str(),
+            ]
+            .iter()
+            .any(|field| field.contains(['\t', '\n', '\r']))
             {
                 continue;
             }
-            writeln!(f, "H\t{class}\t{user}\t{}\t{key}\t{}", hop.host, hop.value)?;
+            writeln!(
+                f,
+                "H\t{class}\t{user}\t{}\t{key}\t{}\t{}",
+                hop.host, hop.via, hop.value
+            )?;
         }
         Ok(guard)
+    }
+
+    /// Where the secrets are staged.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Environment for the ssh child so it consults this helper.
@@ -278,9 +293,9 @@ struct Staged<'a> {
     hops: Vec<super::hop_auth::HopSecret>,
 }
 
-/// One `H<TAB>class<TAB>user<TAB>host<TAB>key<TAB>value` line.
+/// One `H<TAB>class<TAB>user<TAB>host<TAB>key<TAB>via<TAB>value` line.
 fn parse_hop(line: &str) -> Option<super::hop_auth::HopSecret> {
-    let mut f = line.splitn(6, '\t');
+    let mut f = line.splitn(7, '\t');
     (f.next()? == "H").then_some(())?;
     let class = match f.next()? {
         "k" => PromptClass::Passphrase,
@@ -292,6 +307,7 @@ fn parse_hop(line: &str) -> Option<super::hop_auth::HopSecret> {
         user: opt(f.next()?),
         host: f.next()?.to_string(),
         key_path: opt(f.next()?),
+        via: f.next()?.to_string(),
         value: f.next()?.to_string(),
     })
 }
@@ -408,7 +424,11 @@ pub fn maybe_run_askpass() -> bool {
         // never the destination's.
         let found = prompt
             .as_deref()
-            .and_then(|prompt| super::hop_auth::find_secret(&staged.hops, prompt))
+            .and_then(|prompt| {
+                // The helper's parent is the ssh that is asking.
+                let pid = Some(std::os::unix::process::parent_id());
+                super::hop_auth::find_secret(&staged.hops, prompt, pid)
+            })
             .and_then(|hop| {
                 let n = staged.hops.iter().position(|h| std::ptr::eq(h, hop))?;
                 Some((hop.value.as_str(), n))
@@ -533,6 +553,7 @@ mod tests {
         let hop = |user: &str, host: &str, value: &str| HopSecret {
             user: Some(user.into()),
             host: host.into(),
+            via: host.into(),
             key_path: None,
             class: PromptClass::Password,
             value: value.into(),
@@ -562,16 +583,19 @@ mod tests {
                 .unwrap();
             String::from_utf8_lossy(&out.stdout).into_owned()
         };
-        let as_hop = |prompt: &str| {
+        // The hop's own ssh, whose last argument is the host it connects to.
+        let as_hop_via = |prompt: &str, via: &str| {
             run(
                 &format!(
-                    "'{}' -c \"{}\"; :",
+                    "'{}' -c \"{}\" _ {via}; :",
                     ssh.display(),
                     helper.replace('$', "\\$")
                 ),
                 prompt,
             )
         };
+        let as_hop =
+            |prompt: &str| as_hop_via(prompt, prompt.split(['@', '\'']).nth(1).unwrap_or("none"));
         // The destination: the first line, whatever the prompt says.
         let dest = run(&helper, "ops@10.0.4.91's password: ");
         assert!(
@@ -588,6 +612,13 @@ mod tests {
         assert!(
             two.contains("lb-2-pw") && !two.contains("lb-1-pw") && !two.contains("target-pw"),
             "{two}"
+        );
+        // A prompt naming lb-2 from the ssh that connects to lb-1 (a hostile
+        // hop's text) gets nothing: not lb-2's secret, not lb-1's, not the target's.
+        let lie = as_hop_via("ops@10.0.4.12's password: ", "10.0.4.11");
+        assert!(
+            !lie.contains("-pw") && lie.contains("helper-exit=1"),
+            "{lie}"
         );
         // A hop that is not staged gets nothing, and above all not the target's.
         for prompt in [
@@ -612,6 +643,7 @@ mod tests {
             &[super::super::hop_auth::HopSecret {
                 user: None,
                 host: "h".into(),
+                via: "h".into(),
                 key_path: None,
                 class: PromptClass::Password,
                 value: "hop-pw".into(),
@@ -713,7 +745,7 @@ mod tests {
         let file = dir.path().join("sshub-askpass-test");
         std::fs::write(
             &file,
-            "dest-pw\nC\tp\nH\tp\tops\ta\t\tone-pw\nH\tp\tops\tb\t\ttwo-pw\n",
+            "dest-pw\nC\tp\nH\tp\tops\ta\t\ta\tone-pw\nH\tp\tops\tb\t\tb\ttwo-pw\n",
         )
         .unwrap();
         consume(&file, &Answered::Hop(0));
@@ -737,6 +769,7 @@ mod tests {
         let hop = |key: &str| super::super::hop_auth::HopSecret {
             user: Some("ops".into()),
             host: "h".into(),
+            via: "h".into(),
             key_path: Some(key.into()),
             class: PromptClass::Passphrase,
             value: "phrase".into(),

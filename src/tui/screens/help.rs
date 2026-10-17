@@ -179,7 +179,7 @@ pub const HELP_ITEMS: &[HelpItem] = &[
     HelpItem::Section("tunnels (tab 3)"),
     HelpItem::Entry {
         key: "/",
-        desc: "Fuzzy-filter tunnels by label, host, ports or type (Enter keeps, Esc clears)",
+        desc: "Fuzzy-filter tunnels by label, host, ports or type; words may match different fields (Enter keeps, Esc clears)",
     },
     HelpItem::Entry {
         key: "a",
@@ -217,7 +217,7 @@ pub const HELP_ITEMS: &[HelpItem] = &[
     HelpItem::Section("identities (tab 4)"),
     HelpItem::Entry {
         key: "/",
-        desc: "Fuzzy-filter identities by name, user or key path (Enter keeps, Esc clears)",
+        desc: "Fuzzy-filter identities by name, user or key path; words may match different fields (Enter keeps, Esc clears)",
     },
     HelpItem::Entry {
         key: "←→ / l",
@@ -361,7 +361,11 @@ pub const HELP_ITEMS: &[HelpItem] = &[
     },
     HelpItem::Entry {
         key: "Esc",
-        desc: "Cancel a test, then clear the lens, then the filter",
+        desc: "Cancel a test, then unzoom, then clear the lens, then the filter",
+    },
+    HelpItem::Entry {
+        key: "G / H",
+        desc: "Manage groups; open known hosts (both work any time on the map)",
     },
     HelpItem::Blank,
     HelpItem::Section("hop editor (host form, ProxyJump field)"),

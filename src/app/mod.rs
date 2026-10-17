@@ -40,7 +40,7 @@ mod util;
 mod workspaces;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use theme_picker::{ThemePickerState, ThemeRecordSummary, ThemeRow, ThemeRowStatus};
 pub use types::*;
@@ -331,6 +331,9 @@ pub struct App {
     /// Tab shown on the previous poll tick, so a change can be detected centrally
     /// (many code paths set `active_tab`) and turned into a slide animation (#35).
     pub anim_prev_tab: usize,
+    /// Terminal size at the last poll tick; a change drops `zoom_anim`, whose
+    /// rects were fixed in absolute cells at key-press.
+    pub anim_prev_area: ratatui::layout::Rect,
     /// In-flight tab-switch slide, or `None` at rest / under reduced motion.
     pub tab_switch: Option<TabSwitch>,
     /// When the current `mode` was entered, so popups can animate their open
@@ -500,6 +503,9 @@ pub struct App {
     /// The network map tab's model and cursor; `None` until the tab is first
     /// opened and after any host change while another tab is on screen.
     pub map_view: Option<network_map::MapView>,
+    /// Why the last map rebuild failed; shown until a rebuild succeeds (the
+    /// map's own keys clear `host_notice`).
+    pub map_error: Option<String>,
     /// The structured ProxyJump editor of the host form.
     pub hop_editor: hop_editor::HopEditor,
     /// The running or last test connect (map or hop editor).
@@ -618,6 +624,10 @@ impl App {
     /// Notice a tab change (from any of the many code paths that set
     /// `active_tab`) and arm the body slide (#35). Called once per poll tick.
     pub(crate) fn detect_tab_switch(&mut self) {
+        if self.terminal_area != self.anim_prev_area {
+            self.zoom_anim = None;
+            self.anim_prev_area = self.terminal_area;
+        }
         if self.active_tab != self.anim_prev_tab {
             if self.motion_enabled() {
                 let now = std::time::Instant::now();
@@ -1065,6 +1075,7 @@ impl App {
             tunnel_reconnect_selected: 0,
             active_tab: 0,
             anim_prev_tab: 0,
+            anim_prev_area: ratatui::layout::Rect::default(),
             tab_switch: None,
             // Start "settled" in the past so the initial mode never counts as
             // just-entered: popups animate only after a real mode change stamps
@@ -1142,6 +1153,7 @@ impl App {
             audit_range: AuditRange::default(),
             audit_selected: 0,
             map_view: None,
+            map_error: None,
             hop_editor: hop_editor::HopEditor::default(),
             test_run: None,
             known_hosts_return: None,

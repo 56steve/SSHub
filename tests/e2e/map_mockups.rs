@@ -582,7 +582,7 @@ fn mockup_key_rows_are_on_the_screen() {
     // D08: 212 jump hosts, 1,840 hosts, clustered.
     let mut f = big_fleet();
     to_map(&mut f.app);
-    check("D08ManyJumpHosts", "D08ManyJumpHosts", &render(&f.app), &["you hop 1 · clusters hop 2 hosts behind · one glyph each Σ", "␣ open/close cluster → into cluster Shift+Z fold all / reveal B blast ↵ connect ? help"]);
+    check("D08ManyJumpHosts", "D08ManyJumpHosts", &render(&f.app), &["you hop 1 · clusters hop 2 hosts behind · one glyph each Σ", "␣ open/close cluster → first host Shift+Z fold all / reveal B blast ↵ open/close ? help"]);
 
     // D04 while the filter line is still open (the mockup's moment).
     let mut f = fleet(188, true);

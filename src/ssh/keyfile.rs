@@ -351,35 +351,33 @@ mod tests {
 
     #[test]
     fn writes_key_with_owner_only_perms_and_dedups() {
-        let _home = crate::test_env::lock_home();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", dir.path());
+        crate::config::with_test_home(dir.path(), || {
+            let blob =
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----";
+            let p1 = write_key_material("work laptop", blob).unwrap();
+            assert!(p1.ends_with("sshub_work_laptop"));
+            let written = std::fs::read_to_string(&p1).unwrap();
+            assert!(written.ends_with("-----END OPENSSH PRIVATE KEY-----\n"));
 
-        let blob = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----";
-        let p1 = write_key_material("work laptop", blob).unwrap();
-        assert!(p1.ends_with("sshub_work_laptop"));
-        let written = std::fs::read_to_string(&p1).unwrap();
-        assert!(written.ends_with("-----END OPENSSH PRIVATE KEY-----\n"));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&p1).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o600);
+            }
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&p1).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600);
-        }
-
-        // Same content → same file; different content → suffixed file.
-        let p2 = write_key_material("work laptop", blob).unwrap();
-        assert_eq!(p1, p2);
-        let p3 = write_key_material(
-            "work laptop",
-            "-----BEGIN OPENSSH PRIVATE KEY-----\nother\n-----END OPENSSH PRIVATE KEY-----",
-        )
-        .unwrap();
-        assert_ne!(p1, p3);
-        assert!(p3.to_string_lossy().contains("sshub_work_laptop-2"));
-
-        std::env::remove_var("HOME");
+            // Same content → same file; different content → suffixed file.
+            let p2 = write_key_material("work laptop", blob).unwrap();
+            assert_eq!(p1, p2);
+            let p3 = write_key_material(
+                "work laptop",
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nother\n-----END OPENSSH PRIVATE KEY-----",
+            )
+            .unwrap();
+            assert_ne!(p1, p3);
+            assert!(p3.to_string_lossy().contains("sshub_work_laptop-2"));
+        });
     }
 
     #[test]

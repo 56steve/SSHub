@@ -33,6 +33,8 @@ const WRITE_QUEUE_LEN: usize = 64;
 
 /// Env var carrying the stderr FIFO path into the `sh` wrapper.
 const STDERR_FIFO_ENV: &str = "SSHUB_STDERR_FIFO";
+/// Env var carrying the ssh log FIFO path (`ssh -E`) into the `sh` wrapper.
+const LOG_FIFO_ENV: &str = "SSHUB_LOG_FIFO";
 
 /// Event from the PTY reader thread to the main thread.
 #[derive(Debug)]
@@ -42,22 +44,52 @@ pub enum PtyEvent {
     /// Bytes read from ssh's stderr, routed through a side FIFO so the verbose
     /// `-v` handshake never pollutes the terminal grid.
     Stderr(Vec<u8>),
+    /// Bytes of ssh's own log (`ssh -E`): debug lines, `Authenticated to …`,
+    /// host-key errors. Unlike [`Self::Stderr`] a server cannot write here —
+    /// its pre-auth banner goes to stderr — so only this stream is evidence.
+    SshLog(Vec<u8>),
     /// Child exited; carries a human-readable status string.
     Exited(String),
 }
 
-/// A named FIFO used to siphon the child's stderr away from the PTY. Created
-/// inside a private `0700` random-named temp dir (a predictable name in a
-/// shared `/tmp` can be pre-created by another user), opened non-blocking on
+/// Named FIFOs used to siphon the child's stderr away from the PTY, plus (for
+/// ssh) a second one for its `-E` log so banner text cannot pose as ssh output.
+/// Created inside a private `0700` random-named temp dir (a predictable name in
+/// a shared `/tmp` can be pre-created by another user), opened non-blocking on
 /// the read side, and removed with its dir on drop.
 struct StderrFifo {
     _dir: tempfile::TempDir,
     path: PathBuf,
     read: File,
+    log: Option<(PathBuf, File)>,
+}
+
+/// `mkfifo` + open read+write, non-blocking. O_RDWR keeps a writer permanently
+/// attached (ourselves), so an empty FIFO yields EAGAIN rather than a
+/// premature EOF before the child has opened its write end — otherwise the
+/// reader thread would see Ok(0) on its very first read and quit. The thread
+/// instead stops on the drop flag. (Linux/BSD extension; Unix-only TUI.)
+fn make_fifo(path: &std::path::Path) -> Result<File> {
+    let c_path = CString::new(path.as_os_str().as_bytes()).context("fifo path nul")?;
+    // SAFETY: c_path is a valid NUL-terminated C string.
+    let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+    if rc != 0 {
+        return Err(anyhow!(
+            "mkfifo({}) failed: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("open fifo {}", path.display()))
 }
 
 impl StderrFifo {
-    fn create() -> Result<Self> {
+    fn create(with_log: bool) -> Result<Self> {
         let dir = tempfile::Builder::new()
             .prefix("sshub-stderr-")
             .tempdir()
@@ -68,38 +100,28 @@ impl StderrFifo {
                 .context("restrict the stderr fifo dir")?;
         }
         let path = dir.path().join("stderr.fifo");
-
-        let c_path = CString::new(path.as_os_str().as_bytes()).context("fifo path nul")?;
-        // SAFETY: c_path is a valid NUL-terminated C string.
-        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
-        if rc != 0 {
-            return Err(anyhow!(
-                "mkfifo({}) failed: {}",
-                path.display(),
-                std::io::Error::last_os_error()
-            ));
-        }
-
-        // Open read+write, non-blocking. O_RDWR keeps a writer permanently
-        // attached (ourselves), so an empty FIFO yields EAGAIN rather than a
-        // premature EOF before the child has opened its write end — otherwise
-        // the reader thread would see Ok(0) on its very first read and quit.
-        // The thread instead stops on the drop flag. O_NONBLOCK makes open()
-        // and reads return immediately. (Linux/BSD extension; this is a
-        // Unix-only TUI.)
-        let read = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(&path)
-            .with_context(|| format!("open fifo {}", path.display()))?;
-
+        let read = make_fifo(&path)?;
+        let log = if with_log {
+            let log_path = dir.path().join("ssh-log.fifo");
+            let file = make_fifo(&log_path)?;
+            Some((log_path, file))
+        } else {
+            None
+        };
         Ok(Self {
             _dir: dir,
             path,
             read,
+            log,
         })
     }
+}
+
+/// Whether `argv[0]` is OpenSSH's client, the only child that understands `-E`.
+fn is_ssh(argv0: &str) -> bool {
+    std::path::Path::new(argv0)
+        .file_name()
+        .is_some_and(|n| n == "ssh")
 }
 
 pub struct PtyRuntime {
@@ -116,7 +138,7 @@ pub struct PtyRuntime {
     /// Set on drop to stop the stderr reader promptly even if the child never
     /// opened the FIFO write end.
     stderr_stop: Arc<AtomicBool>,
-    stderr_reader: Option<JoinHandle<()>>,
+    fifo_readers: Vec<JoinHandle<()>>,
     /// Kept alive so the FIFO is unlinked when the runtime drops.
     _stderr_fifo: Option<StderrFifo>,
 }
@@ -143,17 +165,24 @@ impl PtyRuntime {
         // output never lands on the PTY grid. Without it the session could
         // never see `Authenticated to …`, so it would never accept keystrokes:
         // fail the spawn loudly instead of producing a dead session.
-        let stderr_fifo = siphon_stderr.then(StderrFifo::create).transpose()?;
+        let stderr_fifo = siphon_stderr
+            .then(|| StderrFifo::create(is_ssh(&argv[0])))
+            .transpose()?;
 
         let (program, prog_args): (String, Vec<String>) = if stderr_fifo.is_some() {
             // sh redirects fd 2 to the FIFO (opened by path, after portable-pty's
             // close_random_fds), then execs the real command in-place so the PID
             // stays ssh's for signal delivery.
-            let mut args = vec![
-                "-c".to_string(),
-                format!("exec \"$@\" 2>\"${STDERR_FIFO_ENV}\""),
-                "sshub".to_string(),
-            ];
+            // For ssh, `-E` goes right after the program so the debug log leaves
+            // through its own FIFO instead of sharing stderr with the banner.
+            let script = if stderr_fifo.as_ref().is_some_and(|f| f.log.is_some()) {
+                format!(
+                    "p=$1; shift; exec \"$p\" -E \"${LOG_FIFO_ENV}\" \"$@\" 2>\"${STDERR_FIFO_ENV}\""
+                )
+            } else {
+                format!("exec \"$@\" 2>\"${STDERR_FIFO_ENV}\"")
+            };
+            let mut args = vec!["-c".to_string(), script, "sshub".to_string()];
             args.extend(argv.iter().cloned());
             ("/bin/sh".to_string(), args)
         } else {
@@ -172,6 +201,9 @@ impl PtyRuntime {
         }
         if let Some(fifo) = &stderr_fifo {
             cmd.env(STDERR_FIFO_ENV, fifo.path.as_os_str());
+            if let Some((log_path, _)) = &fifo.log {
+                cmd.env(LOG_FIFO_ENV, log_path.as_os_str());
+            }
         }
         // Override TERM. Our vt100 emulator is xterm-compatible; advertising
         // `xterm-kitty` (often inherited from the user's host kitty session)
@@ -253,35 +285,23 @@ impl PtyRuntime {
         // The stderr siphon is best-effort: if cloning the FIFO handle or
         // spawning the reader fails (resource exhaustion), degrade to no
         // `-v` debug capture rather than panicking the whole connect.
-        let stderr_reader = stderr_fifo.as_ref().and_then(|fifo| {
-            let mut read = fifo.read.try_clone().ok()?;
-            let tx = stderr_tx;
-            let stop = Arc::clone(&stderr_stop);
-            thread::Builder::new()
-                .name("sshub-stderr-reader".into())
-                .spawn(move || {
-                    let mut buf = [0u8; READ_BUF];
-                    loop {
-                        if stop.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        match read.read(&mut buf) {
-                            Ok(0) => break, // writer (ssh) closed → EOF
-                            Ok(n) => {
-                                if tx.send(PtyEvent::Stderr(buf[..n].to_vec())).is_err() {
-                                    break;
-                                }
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                thread::sleep(Duration::from_millis(20));
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                            Err(_) => break,
-                        }
-                    }
-                })
-                .ok()
-        });
+        let mut fifo_readers = Vec::new();
+        if let Some(fifo) = stderr_fifo.as_ref() {
+            fifo_readers.extend(spawn_fifo_reader(
+                &fifo.read,
+                stderr_tx.clone(),
+                &stderr_stop,
+                PtyEvent::Stderr,
+            ));
+            if let Some((_, log)) = &fifo.log {
+                fifo_readers.extend(spawn_fifo_reader(
+                    log,
+                    stderr_tx,
+                    &stderr_stop,
+                    PtyEvent::SshLog,
+                ));
+            }
+        }
 
         Ok(Self {
             master: pair.master,
@@ -291,7 +311,7 @@ impl PtyRuntime {
             reader_thread: Some(reader_thread),
             child: Some(child),
             stderr_stop,
-            stderr_reader,
+            fifo_readers,
             _stderr_fifo: stderr_fifo,
         })
     }
@@ -336,6 +356,12 @@ impl PtyRuntime {
         self.closed.load(Ordering::Relaxed)
     }
 
+    /// Whether ssh's own log arrives as [`PtyEvent::SshLog`], separate from
+    /// stderr (true for the `ssh` client only).
+    pub fn has_log_channel(&self) -> bool {
+        self._stderr_fifo.as_ref().is_some_and(|f| f.log.is_some())
+    }
+
     pub fn child_pid(&self) -> Option<u32> {
         self.child.as_ref()?.process_id()
     }
@@ -355,6 +381,43 @@ impl PtyRuntime {
             terminate_child_process(&mut *child);
         }
     }
+}
+
+/// Reader thread draining one FIFO into `PtyEvent`s. Non-blocking + poll so it
+/// never wedges and honours the stop flag on drop. Best-effort: if cloning the
+/// handle or spawning fails (resource exhaustion) the stream is just lost.
+fn spawn_fifo_reader(
+    fifo: &File,
+    tx: mpsc::Sender<PtyEvent>,
+    stop: &Arc<AtomicBool>,
+    wrap: fn(Vec<u8>) -> PtyEvent,
+) -> Option<JoinHandle<()>> {
+    let mut read = fifo.try_clone().ok()?;
+    let stop = Arc::clone(stop);
+    thread::Builder::new()
+        .name("sshub-stderr-reader".into())
+        .spawn(move || {
+            let mut buf = [0u8; READ_BUF];
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                match read.read(&mut buf) {
+                    Ok(0) => break, // writer (ssh) closed → EOF
+                    Ok(n) => {
+                        if tx.send(wrap(buf[..n].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+        })
+        .ok()
 }
 
 /// Kill the embedded ssh child and its process group, then reap it.
@@ -387,7 +450,7 @@ impl Drop for PtyRuntime {
         // into session teardown. The thread owns nothing but its own fd.
         self.write_tx = None;
         self.stderr_stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.stderr_reader.take() {
+        for handle in self.fifo_readers.drain(..) {
             let _ = handle.join();
         }
         if let Some(handle) = self.reader_thread.take() {
@@ -405,13 +468,55 @@ mod tests {
     fn the_stderr_fifo_lives_in_a_private_random_dir_and_goes_with_it() {
         // A fixed name in a shared /tmp can be pre-created by another user,
         // which used to leave the session without its debug stream.
-        let a = StderrFifo::create().unwrap();
-        let b = StderrFifo::create().unwrap();
+        let a = StderrFifo::create(true).unwrap();
+        let b = StderrFifo::create(false).unwrap();
         let dir = a.path.parent().unwrap().to_path_buf();
         assert_ne!(dir, b.path.parent().unwrap());
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
         drop(a);
         assert!(!dir.exists());
+    }
+}
+
+#[cfg(test)]
+mod ssh_log_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn ssh_log_and_banner_arrive_on_separate_streams() {
+        // A server banner is printed on ssh's stderr; the real "Authenticated
+        // to" goes to the `-E` log. The two must never share an event kind.
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("ssh");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\n[ \"$1\" = -E ] || exit 3\necho 'debug1: real-log' > \"$2\"\necho 'banner-text' >&2\nsleep 0.3\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let argv = vec![fake.to_string_lossy().into_owned(), "host".into()];
+        let rt = PtyRuntime::spawn(&argv, 24, 80, &[], true).unwrap();
+        let (mut err, mut log) = (String::new(), String::new());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline
+            && !(err.contains("banner") && log.contains("real"))
+        {
+            match rt.try_recv() {
+                Some(PtyEvent::Stderr(b)) => err.push_str(&String::from_utf8_lossy(&b)),
+                Some(PtyEvent::SshLog(b)) => log.push_str(&String::from_utf8_lossy(&b)),
+                Some(_) => {}
+                None => thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(
+            err.contains("banner-text") && !err.contains("real-log"),
+            "{err:?}"
+        );
+        assert!(
+            log.contains("real-log") && !log.contains("banner-text"),
+            "{log:?}"
+        );
     }
 }

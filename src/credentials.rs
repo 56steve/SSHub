@@ -229,11 +229,47 @@ impl FilePasswordStore {
                 .create_new(true)
                 .open(&tmp)?;
             file.write_all(content.as_bytes())?;
+            file.sync_all()?;
             crate::secure_fs::restrict_file(&tmp);
         }
 
         fs::rename(&tmp, &self.path)?;
+        // Make the rename itself durable: without it a crash can leave the old
+        // map after the caller was told the secret was saved.
+        #[cfg(unix)]
+        {
+            if let Some(parent) = self.path.parent() {
+                fs::File::open(parent)?.sync_all()?;
+            }
+        }
         Ok(())
+    }
+
+    /// Exclusive advisory lock around a read-modify-write. It sits on a sidecar
+    /// file: `write_map` replaces the data file by rename, so a lock on the
+    /// data file would guard an inode that is already gone. Two sshub
+    /// processes (or an import next to the TUI) otherwise both read the old
+    /// map and the later write drops the earlier one's secret. Released when
+    /// the returned file is dropped.
+    fn lock(&self) -> Result<fs::File> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+            crate::secure_fs::restrict_dir(parent);
+        }
+        let lock_path = self.path.with_extension("json.lock");
+        let mut opts = fs::OpenOptions::new();
+        opts.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let file = opts
+            .open(&lock_path)
+            .map_err(|e| anyhow::anyhow!("Failed to open credentials lock: {e}"))?;
+        file.lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock credentials file: {e}"))?;
+        Ok(file)
     }
 }
 
@@ -244,12 +280,14 @@ impl PasswordStore for FilePasswordStore {
     }
 
     fn set(&self, key: &str, password: &str) -> Result<()> {
+        let _lock = self.lock()?;
         let mut map = self.read_map()?;
         map.insert(key.to_string(), password.to_string());
         self.write_map(&map)
     }
 
     fn delete(&self, key: &str) -> Result<()> {
+        let _lock = self.lock()?;
         let mut map = self.read_map()?;
         if map.remove(key).is_some() {
             self.write_map(&map)?;
@@ -363,6 +401,41 @@ mod tests {
         store.delete(test_key).unwrap();
 
         assert_eq!(store.get(test_key).unwrap(), None);
+    }
+
+    /// Concurrent writers (two sshub processes, or the importer next to the TUI)
+    /// must not lose each other's secret: each does read-modify-write of the
+    /// whole map. Without the lock the later rename drops the earlier key.
+    #[test]
+    fn concurrent_sets_keep_every_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    // One store per thread: separate lock-file descriptors, as
+                    // separate processes would have (flock is per open file).
+                    let store = FilePasswordStore::new(path);
+                    for i in 0..10 {
+                        store.set(&format!("k{t}-{i}"), "pw").unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let store = FilePasswordStore::new(path);
+        for t in 0..8 {
+            for i in 0..10 {
+                assert_eq!(
+                    store.get(&format!("k{t}-{i}")).unwrap().as_deref(),
+                    Some("pw"),
+                    "k{t}-{i} lost"
+                );
+            }
+        }
     }
 
     #[test]

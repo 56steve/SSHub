@@ -118,9 +118,11 @@ impl App {
                     .as_deref()
                     .or_else(|| m.identity.as_ref().and_then(|i| i.username.as_deref()))
             });
-            let via = entry
-                .managed()
-                .and_then(|m| m.proxy_jump.as_deref())
+            // The effective jump (own, group default), not just the own field.
+            let via = resolved
+                .as_ref()
+                .and_then(|r| r.proxy_jump.as_deref())
+                .or_else(|| entry.managed().and_then(|m| m.proxy_jump.as_deref()))
                 .unwrap_or("direct");
             // Spawn an embedded PTY session in-process. No external terminal.
             let display_name = entry.name().to_string();

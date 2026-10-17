@@ -91,6 +91,28 @@ All notable changes to SSHub are documented in this file.
 - **Host filter: several words match across fields** (`prod 8080`).
 - **Short terminals lost the Latency and Ping panels** (80x24); Agent and Auth
   shrink instead.
+- **A server banner could mark a session connected** - a login banner reading
+  "Authenticated to ..." (or a forged "host key has changed" block) was read as
+  ssh's own log. ssh now writes its log to a separate channel and only that is
+  parsed. Paste into a session also drops ESC and other control bytes.
+- **A jump host could collect another hop's stored password** - a hop's secret
+  is given only to the ssh process that connects to that hop. Stored hop
+  passwords no longer stay on disk for the life of a detached tunnel: ssh
+  deletes the file once connected.
+- **Stale tunnel pid files could kill an unrelated process** - the pid file now
+  records the process start time and a recycled pid is neither "running" nor
+  signalled.
+- **A deleted host's saved password could be used by the next new host** (row
+  ids were reused) - `hosts` and `identities` ids are now never reused.
+- **Host address and user are checked** - whitespace and shell characters are
+  refused when adding or editing a host, on import, and before they reach ssh,
+  mosh or an exported config.
+- **Credential file saves from two sshub processes no longer lose a secret**
+  (file lock, fsync).
+- **Ctrl+H (Backspace on some terminals) opened Settings inside a filter line.**
+- **Audit `via` ignored a ProxyJump inherited from the group.**
+- **Test connect** reports a hop that needs a typed password or 2FA as `needs
+  interactive auth` instead of `auth failed`.
 
 ## [0.18.2] - 2026-10-13
 

@@ -99,13 +99,19 @@ pub fn routes_in_use(map: &Map, limit: usize) -> Vec<Route> {
 }
 
 /// Names that must not become a hop of `edited`: the host itself and every
-/// host that already depends on it (it would close a loop), including loops
-/// that are already there.
+/// ssh_config host that already depends on it (ssh follows such a hop's own
+/// `ProxyJump`, so it would close a loop), including loops that are already
+/// there. A launcher host is expanded to `user@addr` and its own jump is never
+/// followed (`Map::build`'s `expand`), so it can never close a loop.
 pub fn forbidden_hops(map: &Map, edited: &str) -> HashSet<String> {
     let mut out = HashSet::new();
     out.insert(edited.to_string());
     if let Some(h) = map.hosts.iter().position(|h| h.name == edited) {
-        for d in map.blast_radius(&HopKey::Saved(h)) {
+        for d in map
+            .blast_radius(&HopKey::Saved(h))
+            .into_iter()
+            .filter(|&d| map.hosts[d].ssh_config)
+        {
             out.insert(map.hosts[d].name.clone());
         }
     }
@@ -174,6 +180,35 @@ mod tests {
         assert!(!f.contains("free"));
         // A brand new host (not in the map yet) only forbids itself.
         assert_eq!(forbidden_hops(&map, "new").len(), 1);
+    }
+
+    #[test]
+    fn launcher_dependents_are_not_loops_but_ssh_config_ones_are() {
+        // Launcher `d` jumps via `e`; `e` may take `d` as a hop: ssh gets
+        // `d`'s user@addr and never follows d's own jump.
+        let map = Map::build(vec![
+            host("e", None, false),
+            host("d", Some("e"), false),
+            host("s", Some("e"), true),
+        ]);
+        let f = forbidden_hops(&map, "e");
+        assert!(f.contains("e") && f.contains("s"));
+        assert!(!f.contains("d"));
+        // Oracle: the map really reports a cycle for the ssh_config one only.
+        let mut hs = vec![
+            host("e", Some("d"), false),
+            host("d", Some("e"), false),
+            host("s", Some("e"), true),
+        ];
+        assert!(matches!(
+            Map::build(hs.clone()).chains[0],
+            crate::map::Chain::Hops(_)
+        ));
+        hs[0].jump = Some("s".into());
+        assert!(matches!(
+            Map::build(hs).chains[0],
+            crate::map::Chain::Cycle(_)
+        ));
     }
 
     #[test]

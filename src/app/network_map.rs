@@ -614,15 +614,13 @@ impl MapView {
     /// `via:` take a value from what the map knows; a bare word completes to a
     /// term prefix. Repeating Tab cycles through the candidates.
     pub fn complete_filter(&mut self) {
-        let (head, last) = match self.query.rsplit_once(' ') {
-            Some((h, l)) => (format!("{h} "), l.to_string()),
-            None => (String::new(), self.query.clone()),
-        };
+        let at = crate::map::filter::last_term_start(&self.query);
+        let (head, last) = (self.query[..at].to_string(), self.query[at..].to_string());
         let prefix = ["group:", "tag:", "via:"]
             .into_iter()
             .find(|p| last.starts_with(p))
             .unwrap_or("");
-        let val = &last[prefix.len()..];
+        let val = last[prefix.len()..].trim_start_matches('"');
         let mut cands: Vec<String> = match prefix {
             "tag:" => self.all_tags(),
             "group:" => self.map.hosts.iter().map(|h| h.group.clone()).collect(),
@@ -648,7 +646,13 @@ impl MapView {
             .iter()
             .position(|c| c.to_lowercase() == lower)
             .map_or(0, |i| (i + 1) % hits.len());
-        self.query = format!("{head}{prefix}{}", hits[next]);
+        self.query = match prefix {
+            "" => format!("{head}{}", hits[next]),
+            p => format!(
+                "{head}{}",
+                crate::map::filter::quote_term(p.trim_end_matches(':'), hits[next])
+            ),
+        };
     }
 
     pub fn filter_active(&self) -> bool {
@@ -662,9 +666,6 @@ impl MapView {
             .hosts
             .iter()
             .flat_map(|h| h.tags.iter().cloned())
-            // The filter splits on spaces and has no quoting: a tag with one
-            // could only be offered as several terms.
-            .filter(|t| !t.contains(char::is_whitespace))
             .collect();
         tags.sort();
         tags.dedup();
@@ -693,10 +694,13 @@ impl App {
             Ok(h) => h,
             Err(e) => {
                 self.map_view = None;
-                self.host_notice = Some(format!("map: {e:#}"));
+                let msg = format!("map: {e:#}");
+                self.host_notice = Some(msg.clone());
+                self.map_error = Some(msg);
                 return;
             }
         };
+        self.map_error = None;
         let mut view = MapView::new(Map::build(hosts));
         view.host_by_id = self
             .hosts
@@ -818,7 +822,11 @@ impl App {
     }
 
     pub(crate) fn handle_key_map(&mut self, key: KeyEvent) -> Result<()> {
-        self.host_notice = None;
+        // A failed rebuild stays on screen until one succeeds.
+        self.host_notice = self.map_error.clone();
+        if self.map_view.is_none() && self.map_error.is_some() {
+            self.rebuild_map();
+        }
 
         if self
             .map_view
@@ -985,14 +993,14 @@ impl App {
             KeyCode::Esc => v.picker = None,
             KeyCode::Enter => {
                 let tag = p.items[p.selected].clone();
-                let term = format!("tag:{tag}");
-                let mut terms: Vec<&str> = v.query.split_whitespace().collect();
-                if let Some(at) = terms.iter().position(|t| *t == term) {
+                let mut terms = crate::map::filter::split_terms(&v.query);
+                let unquoted = format!("tag:{tag}");
+                if let Some(at) = terms.iter().position(|t| *t == unquoted) {
                     terms.remove(at);
                 } else {
-                    terms.push(&term);
+                    terms.push(unquoted);
                 }
-                v.query = terms.join(" ");
+                v.query = crate::map::filter::join_terms(&terms);
                 v.picker = None;
                 v.apply_filter();
             }
@@ -1258,6 +1266,14 @@ impl App {
 
     /// `x`: start or stop the tunnel of the host under the cursor.
     fn map_toggle_tunnel(&mut self) -> Result<()> {
+        // An ancestor hop drawn on another row's path is not this row's own.
+        if self.map_view.as_ref().is_some_and(|v| {
+            matches!(v.selection(), Some(MapSel::Hop(_))) && v.pos + 1 < v.hop_count(v.row)
+        }) {
+            self.host_notice =
+                Some("cursor is on an ancestor hop: move to that hop's own row to use x".into());
+            return Ok(());
+        }
         let host = self.map_view.as_ref().and_then(|v| match v.selection()? {
             MapSel::Host(h) => Some(h),
             MapSel::Hop(n) => match v.map.nodes[n].key {
@@ -1698,6 +1714,57 @@ mod tests {
             !v.rows.is_empty(),
             "the match must not vanish with the fold"
         );
+    }
+
+    #[test]
+    fn x_on_an_ancestor_hop_says_so_and_touches_nothing() {
+        let mut app = jump_fleet();
+        app.map_view = Some(MapView::new(Map::build(vec![
+            mh("edge-gw", None),
+            mh("mid", None),
+            mh("leaf", Some("edge-gw,mid")),
+        ])));
+        let v = app.map_view.as_mut().unwrap();
+        v.row = 0;
+        v.pos = 0;
+        assert!(v.hop_count(0) >= 2, "row 0 must carry an ancestor hop");
+        assert!(matches!(v.selection(), Some(MapSel::Hop(_))));
+        app.map_toggle_tunnel().unwrap();
+        assert!(app.host_notice.as_deref().unwrap().contains("ancestor hop"));
+    }
+
+    #[test]
+    fn rebuild_error_outlives_the_next_map_key() {
+        let mut app = jump_fleet();
+        app.map_error = Some("map: boom".into());
+        app.handle_key_map(key_char('j')).unwrap();
+        assert_eq!(app.host_notice.as_deref(), Some("map: boom"));
+        app.map_error = None;
+        app.handle_key_map(key_char('j')).unwrap();
+        assert_eq!(app.host_notice, None);
+    }
+
+    #[test]
+    fn tab_completion_and_tag_picker_quote_tags_with_spaces() {
+        let mut a = mh("a", None);
+        a.tags = vec!["on call".into()];
+        let mut v = MapView::new(Map::build(vec![a]));
+        v.query = "tag:on".into();
+        v.complete_filter();
+        assert_eq!(v.query, "tag:\"on call\"");
+        v.apply_filter();
+        assert_eq!(v.matched.as_ref().map(|m| m.len()), Some(1));
+    }
+
+    #[test]
+    fn ctrl_h_is_backspace_in_the_filter_line_not_settings() {
+        let mut app = jump_fleet();
+        app.map_view.as_mut().unwrap().editing = true;
+        app.map_view.as_mut().unwrap().query = "ab".into();
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.map_view.as_ref().unwrap().query, "a");
     }
 
     #[test]
