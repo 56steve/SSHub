@@ -4,6 +4,13 @@ All notable changes to SSHub are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Fuzzy filter on the Tunnels and Identities tabs** - `/` opens the same
+  fuzzy matcher the host list uses. Tunnels match on label, host, ports and
+  type; identities on name, user and key or certificate path. `Enter` keeps
+  the filter, `Esc` clears it.
+
 ## [0.18.2] - 2026-10-13
 
 ### Fixed

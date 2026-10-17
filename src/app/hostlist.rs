@@ -105,9 +105,14 @@ impl App {
     ) -> usize {
         let cpr = cards_per_row.max(1);
         let stride = card_row_stride.max(1) as usize;
-        let total_rows = self.identities.len().div_ceil(cpr);
+        let view = self.identity_view();
+        let total_rows = view.len().div_ceil(cpr);
         let visible_rows = ((area_height as usize) / stride).max(1);
-        let selected_row = self.identity_selected / cpr;
+        let selected_pos = view
+            .iter()
+            .position(|&i| i == self.identity_selected)
+            .unwrap_or(0);
+        let selected_row = selected_pos / cpr;
         let max_off = total_rows.saturating_sub(visible_rows);
         selected_row.saturating_sub(visible_rows / 2).min(max_off)
     }

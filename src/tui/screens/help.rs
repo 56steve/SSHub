@@ -178,6 +178,10 @@ pub const HELP_ITEMS: &[HelpItem] = &[
     HelpItem::Blank,
     HelpItem::Section("tunnels (tab 3)"),
     HelpItem::Entry {
+        key: "/",
+        desc: "Fuzzy-filter tunnels by label, host, ports or type (Enter keeps, Esc clears)",
+    },
+    HelpItem::Entry {
         key: "a",
         desc: "Add new tunnel",
     },
@@ -211,6 +215,10 @@ pub const HELP_ITEMS: &[HelpItem] = &[
     },
     HelpItem::Blank,
     HelpItem::Section("identities (tab 4)"),
+    HelpItem::Entry {
+        key: "/",
+        desc: "Fuzzy-filter identities by name, user or key path (Enter keeps, Esc clears)",
+    },
     HelpItem::Entry {
         key: "←→ / l",
         desc: "Move between columns (grid)",

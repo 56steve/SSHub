@@ -1233,6 +1233,7 @@ fn footer_keybinds(
         2 => vec![
             ("\u{2191}\u{2193}".into(), "select"),
             ("\u{21b5}".into(), "start/stop"),
+            ("/".into(), "search"),
             ("a".into(), "new tunnel"),
             ("e".into(), "edit"),
             ("d".into(), "delete"),
@@ -1244,6 +1245,7 @@ fn footer_keybinds(
         3 => vec![
             ("\u{2191}\u{2193}\u{2190}\u{2192}".into(), "move"),
             ("[ ]".into(), "columns"),
+            ("/".into(), "search"),
             ("a".into(), "add"),
             ("g".into(), "generate"),
             ("e".into(), "edit"),
@@ -1263,6 +1265,12 @@ fn footer_keybinds(
         ],
         _ => vec![("q".into(), "quit")],
     };
+    if matches!(app.active_tab, 2 | 3) && app.list_filter_editing {
+        binds = vec![
+            ("\u{21b5}".into(), "keep filter"),
+            ("Esc".into(), "clear filter"),
+        ];
+    }
     // Issue #18: surface the panel-zoom hint once a panel is focused/zoomed.
     if app.active_tab == 0
         && (app.panel_zoomed || app.focused_panel != crate::app::PanelId::default())
@@ -2701,6 +2709,53 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn tunnels_and_identities_filter_bar_renders_and_hides_rows() {
+        let mut app = test_app_with_hosts();
+        app.identities = ["alpha", "bravo"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| crate::store::Identity {
+                id: i as i64 + 1,
+                name: (*n).into(),
+                username: None,
+                private_key: Some(format!("/k/{n}").into()),
+                certificate: None,
+                has_password: false,
+            })
+            .collect();
+        app.tunnels = ["alpha-db", "bravo-web"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| crate::store::Tunnel {
+                id: i as i64 + 1,
+                host_id: None,
+                tunnel_type: crate::store::TunnelType::Local,
+                local_port: 5000 + i as u16,
+                remote_host: "localhost".into(),
+                remote_port: 80,
+                label: Some((*n).into()),
+                auto_connect: false,
+                created_at: 0,
+                updated_at: 0,
+            })
+            .collect();
+        for tab in [2usize, 3] {
+            app.active_tab = tab;
+            app.list_filter_editing = true;
+            app.tunnel_filter = "bravo".into();
+            app.identity_filter = "bravo".into();
+            app.snap_tunnel_selection();
+            app.snap_identity_selection();
+            let buffer = render_to_buffer(&app, 120, 40);
+            assert!(buffer_contains(&buffer, "search: bravo"), "tab {tab} bar");
+            assert!(buffer_contains(&buffer, "bravo"), "tab {tab} kept row");
+            assert!(!buffer_contains(&buffer, "alpha"), "tab {tab} hid row");
+            let footer = render_to_buffer(&app, 120, 40);
+            assert!(buffer_contains(&footer, "keep filter"), "tab {tab} footer");
+        }
     }
 
     // ── Frozen default-theme golden ──────────────────────────

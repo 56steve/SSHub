@@ -213,6 +213,8 @@ pub struct App {
     pub detail_edit: Option<HostDetailEdit>,
     pub identities: Vec<Identity>,
     pub identity_selected: usize,
+    /// Fuzzy filter typed on the Identities tab (`/`); empty = show all.
+    pub identity_filter: String,
     pub identity_form: Option<IdentityFormEdit>,
     pub identity_notice: Option<String>,
     pub keygen_form: Option<KeygenFormEdit>,
@@ -505,6 +507,10 @@ pub struct App {
     cert_probed_path: String,
     pub tunnels: Vec<crate::store::Tunnel>,
     pub tunnel_selected: usize,
+    /// Fuzzy filter typed on the Tunnels tab (`/`); empty = show all.
+    pub tunnel_filter: String,
+    /// True while keystrokes on the Tunnels / Identities tab go to its filter.
+    pub list_filter_editing: bool,
     pub tunnel_form: Option<TunnelFormEdit>,
     pub tunnel_notice: Option<String>,
     pub tunnel_manager: crate::tunnel::TunnelManager,
@@ -976,6 +982,7 @@ impl App {
             detail_edit: None,
             identities: Vec::new(),
             identity_selected: 0,
+            identity_filter: String::new(),
             identity_form: None,
             identity_notice: None,
             keygen_form: None,
@@ -1116,6 +1123,8 @@ impl App {
             cert_probed_path: String::new(),
             tunnels: Vec::new(),
             tunnel_selected: 0,
+            tunnel_filter: String::new(),
+            list_filter_editing: false,
             tunnel_form: None,
             tunnel_notice: None,
             tunnel_manager: crate::tunnel::TunnelManager::new(),

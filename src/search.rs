@@ -112,10 +112,49 @@ fn score_entry(
     best
 }
 
+/// Indices of the `items` whose any field fuzzy-matches `query`, best score
+/// first (ties keep list order). An empty query keeps every item in order.
+///
+/// Same nucleo pattern parse and per-field scoring as the host filter, for
+/// lists that are not hosts (tunnels, identities).
+pub fn fuzzy_indices(query: &str, items: &[Vec<String>]) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..items.len()).collect();
+    }
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut buf = Vec::new();
+    let mut scored = Vec::new();
+    for (idx, fields) in items.iter().enumerate() {
+        let mut best = None;
+        for field in fields {
+            score_field(&pattern, &mut matcher, field, &mut buf, &mut best);
+        }
+        if let Some(score) = best {
+            scored.push((score, idx));
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    scored.into_iter().map(|(_, idx)| idx).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ssh::SshHost;
+
+    #[test]
+    fn fuzzy_indices_filters_and_ranks_fields() {
+        let items = vec![
+            vec!["prod db".to_string(), "5432".to_string()],
+            vec!["staging".to_string()],
+            vec!["proxy".to_string(), "8080".to_string()],
+        ];
+        assert_eq!(fuzzy_indices("", &items), vec![0, 1, 2]);
+        assert_eq!(fuzzy_indices("5432", &items), vec![0]);
+        assert_eq!(fuzzy_indices("stg", &items), vec![1]);
+        assert!(fuzzy_indices("zzz", &items).is_empty());
+    }
 
     fn fixture() -> Vec<HostEntry> {
         vec![
