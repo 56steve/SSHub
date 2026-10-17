@@ -14,6 +14,23 @@
 
 use ratatui::layout::Rect;
 
+use super::widgets::{middle_stack, right_stack};
+
+/// Blank rows between stacked panels, and between the stacks and the SSH log:
+/// the same single cell as the gutter between columns.
+pub const PANEL_GAP: u16 = 1;
+/// Natural height of the middle and right stacks (host + agent + latency, and
+/// recent + auth + ping, a gap between each). The two must agree or the SSH log
+/// below them would start at a different row in each column.
+pub const STACK_H: u16 =
+    middle_stack::HOST_H + middle_stack::AGENT_H + middle_stack::LATENCY_H + 2 * PANEL_GAP;
+const _: () = assert!(
+    STACK_H == right_stack::RECENT_H + right_stack::AUTH_H + right_stack::PING_H + 2 * PANEL_GAP,
+    "the middle and right stacks must be equally tall"
+);
+/// Smallest SSH log panel worth drawing: borders plus two rows.
+const MIN_LOG_H: u16 = 4;
+
 /// All screen regions for the dashboard view.
 #[derive(Debug, Clone, Copy)]
 pub struct DashboardAreas {
@@ -33,6 +50,56 @@ pub struct DashboardAreas {
     pub col_right: Rect,
     /// Footer: last row.
     pub footer: Rect,
+}
+
+/// Side margin of the dashboard body at terminal width `w`.
+pub fn content_margin(w: u16) -> u16 {
+    if w >= 132 {
+        2
+    } else if w >= 80 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Where the SFTP host picker draws inside `body`: the hosts column's left
+/// edge stretched across all three columns, one row short for its hint line.
+/// Hosts -> SFTP is this rect growing out of `col_left` in place.
+pub fn sftp_picker_rect(body: Rect) -> Rect {
+    let margin = content_margin(body.width);
+    Rect::new(
+        body.x + margin,
+        body.y,
+        body.width.saturating_sub(margin * 2),
+        body.height.saturating_sub(1),
+    )
+}
+
+/// Rect `t` of the way from `a` to `b` (`t` in `[0, 1]`), edge by edge.
+pub fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
+    let mix = |from: u16, to: u16| (from as f32 + (to as f32 - from as f32) * t).round() as u16;
+    let (x0, y0) = (mix(a.x, b.x), mix(a.y, b.y));
+    let (x1, y1) = (mix(a.right(), b.right()), mix(a.bottom(), b.bottom()));
+    Rect::new(x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+}
+
+/// Vertical split of the middle and right columns on the hosts dashboard: the
+/// height the two stacks take, and the SSH log panel spanning both columns
+/// below them. The log gets every remaining row, to the bottom of the body;
+/// when there is no room for one, the stacks take the whole body instead.
+pub fn hosts_stack_split(areas: &DashboardAreas) -> (u16, Option<Rect>) {
+    let body_h = areas.col_mid.height;
+    if body_h < STACK_H + PANEL_GAP + MIN_LOG_H {
+        return (body_h, None);
+    }
+    let log = Rect::new(
+        areas.col_mid.x,
+        areas.col_mid.y + STACK_H + PANEL_GAP,
+        areas.col_mid.width + 1 + areas.col_right.width,
+        body_h - STACK_H - PANEL_GAP,
+    );
+    (STACK_H, Some(log))
 }
 
 /// Compute dashboard areas from terminal size (zoom level 0).
@@ -78,13 +145,7 @@ pub fn dashboard_layout_zoomed(area: Rect, zoom: usize) -> DashboardAreas {
 
     // Horizontal: 3 columns with gutters
     // Target: margin(2) + col(42) + gutter(1) + col(42) + gutter(1) + col(42) + margin(2) = 132
-    let margin = if w >= 132 {
-        2
-    } else if w >= 80 {
-        1
-    } else {
-        0
-    };
+    let margin = content_margin(w);
     let inner_w = w.saturating_sub(margin * 2);
     let gutter = 1u16;
     // Width available for the three columns after removing the two gutters.
@@ -137,6 +198,56 @@ mod tests {
         assert_eq!(a.col_mid.width, 42);
         // Right col takes remaining
         assert!(a.col_right.width >= 40);
+    }
+
+    #[test]
+    fn hosts_columns_tile_the_body_to_the_bottom() {
+        for (w, h) in [(132u16, 38u16), (100, 34), (80, 24), (200, 60), (132, 28)] {
+            let a = dashboard_layout(Rect::new(0, 0, w, h));
+            let (stack_h, log) = hosts_stack_split(&a);
+            let bottom = a.body.bottom();
+            match log {
+                Some(log) => {
+                    assert_eq!(stack_h, STACK_H, "{w}x{h}");
+                    assert_eq!(
+                        log.y,
+                        a.col_mid.y + stack_h + PANEL_GAP,
+                        "{w}x{h}: log one gap row under the stacks"
+                    );
+                    assert_eq!(log.bottom(), bottom, "{w}x{h}: log reaches the body bottom");
+                    assert_eq!(log.x, a.col_mid.x);
+                    assert_eq!(
+                        log.right(),
+                        a.col_right.right(),
+                        "{w}x{h}: spans both columns"
+                    );
+                }
+                None => assert_eq!(stack_h, a.body.height, "{w}x{h}: stacks fill the body"),
+            }
+            assert_eq!(
+                a.col_left.bottom(),
+                bottom,
+                "{w}x{h}: hosts pane reaches it too"
+            );
+        }
+    }
+
+    #[test]
+    fn sftp_picker_grows_out_of_the_hosts_column_in_place() {
+        let a = dashboard_layout(Rect::new(0, 0, 132, 38));
+        let picker = sftp_picker_rect(a.body);
+        assert_eq!(picker.x, a.col_left.x, "same left edge, no jump");
+        assert_eq!(picker.y, a.col_left.y);
+        assert_eq!(
+            picker.right(),
+            a.col_right.right(),
+            "spans the three columns"
+        );
+        assert_eq!(lerp_rect(a.col_left, picker, 0.0), a.col_left);
+        assert_eq!(lerp_rect(a.col_left, picker, 1.0), picker);
+        let mid = lerp_rect(a.col_left, picker, 0.5);
+        assert_eq!(mid.x, a.col_left.x);
+        assert!(mid.width > a.col_left.width && mid.width < picker.width);
     }
 
     #[test]

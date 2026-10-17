@@ -28,7 +28,7 @@ pub fn render_middle_stack(frame: &mut Frame, area: Rect, app: &App) {
     // ── Panel 1: Selected-host card (OS logo + connection) ─
     let host_area = Rect::new(area.x, y, w, HOST_H.min(area.height));
     render_host_panel(buf, host_area, app);
-    y += host_area.height;
+    y += host_area.height + crate::tui::dashboard_layout::PANEL_GAP;
 
     if y >= area.y + area.height {
         return;
@@ -38,7 +38,7 @@ pub fn render_middle_stack(frame: &mut Frame, area: Rect, app: &App) {
     let remaining = area.y + area.height - y;
     let agent_area = Rect::new(area.x, y, w, AGENT_H.min(remaining));
     render_agent_panel(buf, agent_area, app);
-    y += agent_area.height;
+    y += agent_area.height + crate::tui::dashboard_layout::PANEL_GAP;
 
     if y >= area.y + area.height {
         return;
@@ -46,7 +46,7 @@ pub fn render_middle_stack(frame: &mut Frame, area: Rect, app: &App) {
 
     // ── Panel 3: Latency sparkline ──────────────────────
     let remaining = area.y + area.height - y;
-    let latency_area = Rect::new(area.x, y, w, LATENCY_H.min(remaining));
+    let latency_area = Rect::new(area.x, y, w, remaining);
     render_latency_panel(buf, latency_area, app);
 }
 

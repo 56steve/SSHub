@@ -262,6 +262,7 @@ impl App {
         } else {
             self.clamp_identity_selected();
         }
+        self.snap_identity_selection();
         Ok(())
     }
 
@@ -594,36 +595,111 @@ impl App {
         self.identity_notice = Some(format!("Identity columns: {next}"));
     }
 
-    /// Grid move: `dr` rows down/up, `dc` columns right/left. Left/right never
-    /// wrap across rows so navigation stays predictable.
+    /// `identities` indices the Identities tab shows: all of them, or those
+    /// whose name, user or key/certificate path fuzzy-match the filter.
+    pub fn identity_view(&self) -> Vec<usize> {
+        if self.identity_filter.is_empty() {
+            return (0..self.identities.len()).collect();
+        }
+        let items: Vec<Vec<String>> = self
+            .identities
+            .iter()
+            .map(|i| {
+                let path = |p: &Option<std::path::PathBuf>| {
+                    p.as_ref()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                };
+                vec![
+                    i.name.clone(),
+                    i.username.clone().unwrap_or_default(),
+                    path(&i.private_key),
+                    path(&i.certificate),
+                ]
+            })
+            .collect();
+        crate::search::fuzzy_indices(&self.identity_filter, &items)
+    }
+
+    /// Keep `identity_selected` on a visible card after the filter changed.
+    pub(crate) fn snap_identity_selection(&mut self) {
+        let view = self.identity_view();
+        if !view.contains(&self.identity_selected) {
+            self.identity_selected = view.first().copied().unwrap_or(0);
+        }
+    }
+
+    /// Keystrokes while the filter bar has focus. Enter keeps the filter, Esc
+    /// drops it.
+    pub(crate) fn handle_key_identity_filter(&mut self, key: KeyEvent) {
+        match key.code {
+            _ if self.is_action(KeyAction::Cancel, &key) => {
+                self.identity_filter.clear();
+                self.list_filter_editing = false;
+            }
+            _ if self.is_action(KeyAction::Connect, &key) => self.list_filter_editing = false,
+            KeyCode::Char(c)
+                if (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+                    && !c.is_control() =>
+            {
+                self.identity_filter.push(c);
+            }
+            KeyCode::Backspace => {
+                self.identity_filter.pop();
+            }
+            KeyCode::Up => self.move_identity_grid(-1, 0),
+            KeyCode::Down => self.move_identity_grid(1, 0),
+            KeyCode::Left => self.move_identity_grid(0, -1),
+            KeyCode::Right => self.move_identity_grid(0, 1),
+            _ => {}
+        }
+        self.snap_identity_selection();
+    }
+
+    /// Grid move over the visible cards: `dr` rows down/up, `dc` columns
+    /// right/left. Left/right never wrap across rows so navigation stays
+    /// predictable.
     pub(crate) fn move_identity_grid(&mut self, dr: i32, dc: i32) {
-        if self.identities.is_empty() {
+        let view = self.identity_view();
+        if view.is_empty() {
             self.identity_selected = 0;
             return;
         }
         let cpr = self.identity_cards_per_row();
-        let len = self.identities.len() as i32;
-        let cur = self.identity_selected as i32;
+        let len = view.len() as i32;
+        let cur = view
+            .iter()
+            .position(|&i| i == self.identity_selected)
+            .unwrap_or(0) as i32;
+        let mut next = cur;
         if dc != 0 {
-            let col = cur % cpr;
-            let target_col = col + dc;
-            if target_col < 0 || target_col >= cpr {
-                return; // stay put at the row edge
-            }
-            let next = cur + dc;
-            if next >= 0 && next < len {
-                self.identity_selected = next as usize;
+            let target_col = cur % cpr + dc;
+            if target_col >= 0 && target_col < cpr {
+                next = cur + dc;
             }
         } else if dr != 0 {
-            let mut next = cur + dr * cpr;
+            next = cur + dr * cpr;
             // Moving down past the end: drop onto the (shorter) last row's card.
             if dr > 0 && next >= len && cur < len - 1 {
                 next = len - 1;
             }
-            if next >= 0 && next < len {
-                self.identity_selected = next as usize;
-            }
         }
+        if next >= 0 && next < len {
+            self.identity_selected = view[next as usize];
+        }
+    }
+
+    /// Mouse wheel: one visible card forward or back, rows wrapping freely.
+    pub(crate) fn step_identity_selection(&mut self, delta: i32) {
+        let view = self.identity_view();
+        if view.is_empty() {
+            return;
+        }
+        let pos = view
+            .iter()
+            .position(|&i| i == self.identity_selected)
+            .unwrap_or(0) as i32;
+        self.identity_selected = view[(pos + delta).clamp(0, view.len() as i32 - 1) as usize];
     }
 
     pub(crate) fn clamp_identity_selected(&mut self) {
@@ -632,6 +708,7 @@ impl App {
         } else if self.identity_selected >= self.identities.len() {
             self.identity_selected = self.identities.len() - 1;
         }
+        self.snap_identity_selection();
     }
 
     pub fn selected_identity(&self) -> Option<&Identity> {

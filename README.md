@@ -447,6 +447,7 @@ arrives as arrow keys, exactly as in a real terminal.
 
 | Key       | Action                           |
 |-----------|----------------------------------|
+| `/`       | Fuzzy filter (label, host, ports, type; `Enter` keeps, `Esc` clears) |
 | `a`       | Add tunnel                       |
 | `e`       | Edit tunnel                      |
 | `d`       | Delete tunnel                    |
@@ -460,6 +461,7 @@ arrives as arrow keys, exactly as in a real terminal.
 |------------|--------------------------|
 | arrows / `l` | Move through the grid  |
 | `[` / `]`  | Fewer / more columns (saved) |
+| `/`        | Fuzzy filter (name, user, key path; `Enter` keeps, `Esc` clears) |
 | `a`        | Add identity             |
 | `e`        | Edit identity            |
 | `d`        | Delete identity          |

@@ -25,6 +25,11 @@ All notable changes to SSHub are documented in this file.
   now also records whether a host has a `ProxyCommand`, so the first start after
   the upgrade rewrites each ssh_config row once (tags, notes and favorites stay).
 
+- **Fuzzy filter on the Tunnels and Identities tabs** - `/` opens the same
+  fuzzy matcher the host list uses. Tunnels match on label, host, ports and
+  type; identities on name, user and key or certificate path. `Enter` keeps
+  the filter, `Esc` clears it.
+
 ### Fixed
 
 - **Jump hosts with a saved password asked for it again** - connecting through
@@ -46,6 +51,15 @@ All notable changes to SSHub are documented in this file.
   failed to resolve. The connect, tunnel and broadcast commands now hand ssh
   `user@address:port` for such a hop. The hop's own identity is not sent: ssh
   uses its defaults for every hop.
+- **Hosts dashboard has no empty strip under the SSH log** - the log panel
+  stopped one row short of the hosts list, and in terminals a few rows too
+  short for it the middle and right columns ended early, leaving a blank band.
+  Every column now runs to the last row of the body, and the stacked panes
+  and the log are separated by one blank row, the same as the column gutter.
+- **Hosts to SFTP no longer re-lays out the hosts list** - the SFTP host
+  picker now shares the hosts tab's left edge. Switching tabs stretches the
+  list in place while the dashboard columns slide off to the right, and the
+  reverse brings them back.
 
 ## [0.18.2] - 2026-10-13
 

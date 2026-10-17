@@ -269,6 +269,7 @@ impl App {
     fn dashboard_text_input_active(&self) -> bool {
         (self.active_tab == 1
             && (self.sftp_picker_searching || self.sftp.as_ref().is_some_and(|s| s.searching)))
+            || (matches!(self.active_tab, 2 | 3) && self.list_filter_editing)
             || (self.active_tab == 5 && self.map_view.as_ref().is_some_and(|v| v.editing))
     }
 
@@ -596,6 +597,16 @@ impl App {
 
     /// Switch dashboard tabs when a tab keybinding matches.
     pub(crate) fn try_tab_switch(&mut self, key: &KeyEvent) -> Result<bool> {
+        let tab = self.active_tab;
+        let switched = self.try_tab_switch_binds(key)?;
+        if self.active_tab != tab {
+            // A filter bar belongs to the tab it was opened on.
+            self.list_filter_editing = false;
+        }
+        Ok(switched)
+    }
+
+    fn try_tab_switch_binds(&mut self, key: &KeyEvent) -> Result<bool> {
         if self.is_action(KeyAction::TabHosts, key) {
             self.active_tab = 0;
             return Ok(true);
@@ -745,12 +756,21 @@ impl App {
     pub(crate) fn handle_key_keychain(&mut self, key: KeyEvent) -> Result<()> {
         self.identity_notice = None;
 
+        if self.list_filter_editing {
+            self.handle_key_identity_filter(key);
+            return Ok(());
+        }
+
         if self.try_tab_switch(&key)? {
             return Ok(());
         }
 
         match key.code {
             _ if self.is_action(KeyAction::Quit, &key) => self.request_quit(),
+            _ if self.is_action(KeyAction::Search, &key) => self.list_filter_editing = true,
+            _ if self.is_action(KeyAction::Cancel, &key) && !self.identity_filter.is_empty() => {
+                self.identity_filter.clear();
+            }
             _ if self.is_action(KeyAction::Cancel, &key) => {
                 self.active_tab = 0;
             }

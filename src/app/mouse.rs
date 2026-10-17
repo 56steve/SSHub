@@ -140,12 +140,8 @@ impl App {
                             }
                         }
                         1 => self.sftp_wheel(x, y, areas.body, -3),
-                        2 => {
-                            self.tunnel_selected = self.tunnel_selected.saturating_sub(1);
-                        }
-                        3 => {
-                            self.identity_selected = self.identity_selected.saturating_sub(1);
-                        }
+                        2 => self.move_tunnel_selection(-1),
+                        3 => self.step_identity_selection(-1),
                         4 => {
                             self.audit_selected = self.audit_selected.saturating_sub(1);
                         }
@@ -170,14 +166,8 @@ impl App {
                         }
                     }
                     1 => self.sftp_wheel(x, y, areas.body, 3),
-                    2 => {
-                        let max = self.tunnels.len().saturating_sub(1);
-                        self.tunnel_selected = (self.tunnel_selected + 1).min(max);
-                    }
-                    3 => {
-                        let max = self.identities.len().saturating_sub(1);
-                        self.identity_selected = (self.identity_selected + 1).min(max);
-                    }
+                    2 => self.move_tunnel_selection(1),
+                    3 => self.step_identity_selection(1),
                     4 => {
                         let max = self.auth_events_cache.len().saturating_sub(1);
                         self.audit_selected = (self.audit_selected + 1).min(max);
@@ -214,6 +204,7 @@ impl App {
         // Tab bar clicks
         if y == areas.tab_bar.y {
             if let Some(tab) = tab_from_x(x) {
+                self.list_filter_editing = false;
                 match tab {
                     0 => self.active_tab = 0,
                     1 => self.switch_to_sftp_tab(),
@@ -255,6 +246,7 @@ impl App {
                 let picked = tunnel_pick
                     .filter(|_| is_double)
                     .and_then(|id| self.tunnels.iter().position(|t| t.id == id));
+                let view = self.tunnel_view();
                 if let Some(idx) = picked {
                     self.tunnel_selected = idx;
                     return self.toggle_tunnel();
@@ -265,13 +257,16 @@ impl App {
                     let visible_row = (y - data_y) as usize;
                     let max_rows =
                         (areas.body.y + areas.body.height).saturating_sub(data_y) as usize;
-                    let scroll = if self.tunnel_selected >= max_rows {
-                        self.tunnel_selected - max_rows + 1
+                    let sel_pos = view
+                        .iter()
+                        .position(|&i| i == self.tunnel_selected)
+                        .unwrap_or(0);
+                    let scroll = if sel_pos >= max_rows {
+                        sel_pos - max_rows + 1
                     } else {
                         0
                     };
-                    let idx = scroll + visible_row;
-                    if idx < self.tunnels.len() {
+                    if let Some(&idx) = view.get(scroll + visible_row) {
                         self.tunnel_selected = idx;
                         self.tunnel_click_pick = Some(self.tunnels[idx].id);
                     }
@@ -279,7 +274,8 @@ impl App {
             }
             3 => {
                 // Keys cards
-                if !self.identities.is_empty() {
+                let view = self.identity_view();
+                if !view.is_empty() {
                     let inner_w = crate::tui::screens::keys::inner_width(areas.body.width);
                     let cards_per_row = crate::tui::screens::keys::resolve_columns(
                         inner_w,
@@ -305,8 +301,8 @@ impl App {
                     };
                     let row_offset =
                         self.keys_scroll_row_offset(areas.body.height, cards_per_row, card_h + 1);
-                    let idx = (row_idx as usize + row_offset) * cards_per_row + col_idx as usize;
-                    if idx < self.identities.len() {
+                    let pos = (row_idx as usize + row_offset) * cards_per_row + col_idx as usize;
+                    if let Some(&idx) = view.get(pos) {
                         self.identity_selected = idx;
                     }
                 }
@@ -395,7 +391,7 @@ impl App {
     /// and picks the entry there, and a double click opens it like Enter.
     fn sftp_click(&mut self, x: u16, y: u16, body: Rect, is_double: bool) -> Result<()> {
         if self.sftp.is_none() {
-            let list = Rect::new(body.x, body.y, body.width, body.height.saturating_sub(1));
+            let list = crate::tui::dashboard_layout::sftp_picker_rect(body);
             if list.contains(Position::new(x, y)) && self.click_hosts_panel(list, y) && is_double {
                 self.sftp_picker_activate()?;
             }

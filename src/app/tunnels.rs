@@ -7,8 +7,87 @@ impl App {
         Ok(())
     }
 
+    /// `tunnels` indices the Tunnels tab shows: all of them, or those whose
+    /// label, host, ports or type fuzzy-match the filter, best first.
+    pub fn tunnel_view(&self) -> Vec<usize> {
+        if self.tunnel_filter.is_empty() {
+            return (0..self.tunnels.len()).collect();
+        }
+        let items: Vec<Vec<String>> = self
+            .tunnels
+            .iter()
+            .map(|t| {
+                let host = t
+                    .host_id
+                    .and_then(|hid| self.store.get_host(hid).ok().flatten())
+                    .map(|h| h.name);
+                vec![
+                    t.label.clone().unwrap_or_default(),
+                    host.unwrap_or_default(),
+                    t.remote_host.clone(),
+                    t.local_port.to_string(),
+                    t.remote_port.to_string(),
+                    t.tunnel_type.as_str().to_string(),
+                ]
+            })
+            .collect();
+        crate::search::fuzzy_indices(&self.tunnel_filter, &items)
+    }
+
+    /// Keep `tunnel_selected` on a visible row after the filter or list changed.
+    pub(crate) fn snap_tunnel_selection(&mut self) {
+        let view = self.tunnel_view();
+        if !view.contains(&self.tunnel_selected) {
+            self.tunnel_selected = view.first().copied().unwrap_or(0);
+        }
+    }
+
+    /// Step the selection through the visible rows.
+    pub(crate) fn move_tunnel_selection(&mut self, delta: i32) {
+        let view = self.tunnel_view();
+        if view.is_empty() {
+            return;
+        }
+        let pos = view
+            .iter()
+            .position(|&i| i == self.tunnel_selected)
+            .unwrap_or(0) as i32;
+        let next = (pos + delta).clamp(0, view.len() as i32 - 1);
+        self.tunnel_selected = view[next as usize];
+    }
+
+    /// Keystrokes while the filter bar has focus. Enter keeps the filter, Esc
+    /// drops it.
+    fn handle_key_tunnel_filter(&mut self, key: KeyEvent) {
+        match key.code {
+            _ if self.is_action(KeyAction::Cancel, &key) => {
+                self.tunnel_filter.clear();
+                self.list_filter_editing = false;
+            }
+            _ if self.is_action(KeyAction::Connect, &key) => self.list_filter_editing = false,
+            KeyCode::Char(c)
+                if (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+                    && !c.is_control() =>
+            {
+                self.tunnel_filter.push(c);
+            }
+            KeyCode::Backspace => {
+                self.tunnel_filter.pop();
+            }
+            KeyCode::Up => self.move_tunnel_selection(-1),
+            KeyCode::Down => self.move_tunnel_selection(1),
+            _ => {}
+        }
+        self.snap_tunnel_selection();
+    }
+
     pub(crate) fn handle_key_tunnels(&mut self, key: KeyEvent) -> Result<()> {
         self.tunnel_notice = None;
+
+        if self.list_filter_editing {
+            self.handle_key_tunnel_filter(key);
+            return Ok(());
+        }
 
         if self.try_tab_switch(&key)? {
             return Ok(());
@@ -16,14 +95,12 @@ impl App {
 
         match key.code {
             _ if self.is_action(KeyAction::Quit, &key) => self.request_quit(),
-            _ if self.is_action(KeyAction::MoveDown, &key) => {
-                if !self.tunnels.is_empty() {
-                    self.tunnel_selected = (self.tunnel_selected + 1).min(self.tunnels.len() - 1);
-                }
+            _ if self.is_action(KeyAction::Search, &key) => self.list_filter_editing = true,
+            _ if self.is_action(KeyAction::Cancel, &key) && !self.tunnel_filter.is_empty() => {
+                self.tunnel_filter.clear();
             }
-            _ if self.is_action(KeyAction::MoveUp, &key) => {
-                self.tunnel_selected = self.tunnel_selected.saturating_sub(1);
-            }
+            _ if self.is_action(KeyAction::MoveDown, &key) => self.move_tunnel_selection(1),
+            _ if self.is_action(KeyAction::MoveUp, &key) => self.move_tunnel_selection(-1),
             _ if self.is_action(KeyAction::AddHost, &key) => {
                 self.tunnel_form = Some(TunnelFormEdit {
                     editing_id: None,
@@ -236,6 +313,7 @@ impl App {
         if self.tunnel_selected >= self.tunnels.len() && !self.tunnels.is_empty() {
             self.tunnel_selected = self.tunnels.len() - 1;
         }
+        self.snap_tunnel_selection();
         Ok(())
     }
 
