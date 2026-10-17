@@ -119,13 +119,15 @@ pub fn dashboard_layout_zoomed(area: Rect, zoom: usize) -> DashboardAreas {
     let h = area.height;
 
     // Vertical bands
-    let header_h = 3u16;
+    // Three rows of wordmark and stats, one row of name, stats and clock when
+    // the terminal is too narrow to spare two body rows for the logo.
+    let header_h = if w < 120 { 1u16 } else { 3u16 };
     let rule1 = 1u16;
     let tab_h = 1u16;
     let rule2 = 1u16;
     let footer_h = 1u16;
     let rule3 = 1u16;
-    let chrome = header_h + rule1 + tab_h + rule2 + rule3 + footer_h; // 8 rows
+    let chrome = header_h + rule1 + tab_h + rule2 + rule3 + footer_h; // 8 rows, 6 when narrow
     let body_h = h.saturating_sub(chrome);
 
     let header = Rect::new(area.x, area.y, w, header_h.min(h));

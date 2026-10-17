@@ -77,6 +77,7 @@ The theme picker, with its detail preview next to the list, and the known hosts 
 - **Tunnels** — define and manage SSH tunnels (local/remote/dynamic SOCKS). Start, stop, and monitor from the TUI. Per-tunnel **keep alive** auto-starts on launch and reconnects dropped forwards with exponential backoff (configurable in `config.toml`).
 - **Identities**: key or user+password identities with ssh-agent integration: add (`p`) or remove (`r`) a key from the agent and see its loaded status, generate an ed25519 or rsa-4096 key pair (`g`), push a public key to a host (`Shift+P`), and manage `~/.ssh/known_hosts` (`H`: type to filter, `Ctrl+D` deletes a host's keys, `Ctrl+R` reloads)
 - **Group connection defaults**: a group can set a default identity, username, port, ProxyJump, transport and agent forwarding; a host inherits every field it leaves empty. Edit them with `Ctrl+G` (or `e` on a group header) in the TUI, or `sshub group edit --set-default-*` headless
+- **Network map** (tab `6`): the jump hosts as a tree, left to right, with every host as a status glyph behind its last hop and a Σ column counting what depends on each hop. Only real jumps are drawn (a host's own ProxyJump, a group default, an ssh_config `ProxyJump`); groups and tags never add an edge. `B` shows a hop's blast radius (and broadcasts to it), `o` the tunnels riding on it, `t` tests the path hop by hop with `ssh -J`, `u` makes a hop the jump of another host, `/` filters (`group:` `tag:` `via:` `!name`). A jump loop is flagged and not connectable; a ProxyCommand shows as an opaque `proxy cmd` hop. `sshub map --dot` prints the same graph for Graphviz. In the host form the ProxyJump field is a hop list with a fuzzy picker (reuse a route, add a host, add a raw hop), a cycle guard, and a per-hop test connect; the stored value is still the plain comma separated ProxyJump string
 - **Broadcast** (`b` on the hosts tab): run one command on every managed host in a group or with a tag. Pick the target, type the command, then review the host list in a preview (`e` then `Space` includes or excludes a host, `c` goes back to the command) and press `y` to run. Results land in a docked panel and each host gets an audit row; `x` cancels a running broadcast or clears its error toasts
 - **Passwords from KeePassXC** (Linux) - a host's `Secret lookup` field (`sshub host add --secret-lookup`, `host edit --set-secret-lookup`) names one Secret Service entry by an exact attribute match, such as `URL=ssh://root@10.0.0.5:22`, `Title=db-01` or KeePassXC's `Uuid=…`, and its password is used instead of one stored in SSHub. In KeePassXC, enable Secret Service integration and expose the entry's group. The lookup must match exactly one entry, and a jump host never receives it
 - **Ad-hoc connect** - in the fuzzy palette (`/`), typing an unknown `[user@]host[:port]` (IPv6 in brackets supported) that matches no saved host offers a "connect without saving" row; Enter opens an embedded ssh session to it. Input is validated and injection-safe (no leading-dash hosts; destination passed after `--`)
@@ -283,6 +284,9 @@ sshub theme check ~/.config/sshub/themes/mine.toml
 sshub audit list --status fail --days 7
 sshub audit stats --days 7
 
+# The jump-host map as a Graphviz graph
+sshub map --dot | dot -Tsvg -o map.svg
+
 # Inventory sync with ~/.ssh/config
 sshub import                                  # import hosts from ssh config (--from ssh)
 sshub import --from termius ./termius-export  # import a Termius export dir (L00t.csv)
@@ -334,7 +338,7 @@ Defaults below. Rebind any action with **Ctrl+K** (saved to `config.toml`). Pres
 
 | Key              | Action                          |
 |------------------|---------------------------------|
-| `1`..`5`, `h` / `i` | Switch tab (hosts/sftp/tunnels/identities/audit); `h` is hosts, `i` identities |
+| `1`..`6`, `h` / `i` | Switch tab (hosts/sftp/tunnels/identities/audit/map); `h` is hosts, `i` identities |
 | `Esc`            | Back / close overlay            |
 | `Ctrl+H`         | Settings (theme, transparency, logging, ping, updates, profiles, command history); fixed, not rebindable |
 | `Ctrl+K`         | Keybind editor                  |
@@ -473,6 +477,27 @@ arrives as arrow keys, exactly as in a real terminal.
 |-----|--------------------------------------|
 | `f` | Cycle filter (all / ok / fail)       |
 | `r` | Cycle range (all / 24h / week / month) |
+
+### Map (tab 6)
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓`, `←` / `→` | Previous / next row; walk along the row (hop by hop, then its host glyphs) |
+| `Enter` | Connect to the hop or host through the normal connect path (a raw hop: ad-hoc; a cluster: open / fold) |
+| `e` | Edit the host under the cursor |
+| `/`, `#` | Filter (`group:` `tag:` `via:` `!name`, or fuzzy name); tag picker. `Enter` keeps the filter and opens the clusters holding a match, `Esc` clears |
+| `B` | Blast radius of the hop; `n` / `N` step through the dependents, `b` broadcasts to them |
+| `o`, `x` | Tunnel lens; start / stop the tunnel of the host under the cursor |
+| `u` | Use the hop as the jump of another host (`Tab`: replace or append) |
+| `t` | Test the path with `ssh -J`, hop by hop, stopping at the first failure (`Esc` cancels). After a failure: `H` known hosts, `P` push a key to the failed hop, `l` its ssh log |
+| `y`, `a`, `z` | Copy the `ssh -J` command; save a raw hop as a host; zoom the map (`Esc` unzooms) |
+| click | Select a hop or glyph; double-click connects; the wheel moves the cursor |
+| `Space`, `Shift+Z` | Fold a cluster / reveal 20 more hops / expand direct-only; fold every cluster |
+| `Esc` | Cancel a test, then clear the lens, then the filter |
+
+Under 80x24 the map becomes an outline (one hop per row); under 40x12 it asks for a bigger terminal.
+
+In the host form, the ProxyJump field is the hop editor: `a` add a saved host, `r` a raw hop, `Enter` replace, `d` remove, `Ctrl+↑` / `Ctrl+↓` move, `n` direct (stores `none`, overriding a group jump), `X` clear (inherit), `t` test the chain. ssh_config hosts stay read-only.
 
 ## Theming
 

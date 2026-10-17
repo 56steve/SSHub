@@ -219,7 +219,7 @@ fn keychain_keygen_successful_generation() {
         .output()
         .is_err()
     {
-        eprintln!("ssh-keygen not found — skipping keychain_keygen_successful_generation");
+        super::support::tool_missing("ssh-keygen");
         return;
     }
 

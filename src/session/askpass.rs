@@ -62,6 +62,18 @@ impl AskpassSecret {
     /// Write `secret` to a fresh `0600` file under `$XDG_RUNTIME_DIR` (or the
     /// system temp dir).
     pub fn new(secret: &str) -> std::io::Result<Self> {
+        Self::staged(Some(secret), &[])
+    }
+
+    /// Stage the destination's `secret` (if it has one) and the jump hops' own
+    /// secrets. The first line is the destination's; every later line is one hop
+    /// secret (`H<TAB>class<TAB>user<TAB>host<TAB>key<TAB>value`). The helper
+    /// answers a hop's prompt with the line that names that hop, and the
+    /// destination's prompt with the first line: never the other way round.
+    pub fn staged(
+        secret: Option<&str>,
+        hops: &[super::hop_auth::HopSecret],
+    ) -> std::io::Result<Self> {
         let dir = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
@@ -77,7 +89,23 @@ impl AskpassSecret {
         }
         let mut f = opts.open(&path)?;
         // ssh strips the trailing newline from the askpass output.
-        writeln!(f, "{secret}")?;
+        writeln!(f, "{}", secret.unwrap_or(""))?;
+        for hop in hops {
+            let class = match hop.class {
+                super::auth_prompt::PromptClass::Passphrase => "k",
+                _ => "p",
+            };
+            // Neither field can hold a tab or a newline (a login is an allowlist
+            // of characters; a secret never has a newline).
+            writeln!(
+                f,
+                "H\t{class}\t{}\t{}\t{}\t{}",
+                hop.user.as_deref().unwrap_or(""),
+                hop.host,
+                hop.key_path.as_deref().unwrap_or(""),
+                hop.value
+            )?;
+        }
         Ok(Self { path })
     }
 
@@ -198,6 +226,48 @@ fn parent_and_name(_pid: u32) -> Option<(u32, String)> {
     None
 }
 
+/// The prompt ssh passed as the helper's first argument.
+fn prompt_arg() -> Option<String> {
+    // A test binary's own first argument is a libtest flag.
+    #[cfg(test)]
+    if let Ok(prompt) = std::env::var("SSHUB_TEST_PROMPT") {
+        return Some(prompt);
+    }
+    std::env::args().nth(1)
+}
+
+fn print_answer(value: &str) {
+    let mut out = std::io::stdout();
+    let _ = writeln!(out, "{value}");
+    let _ = out.flush();
+}
+
+/// The destination's secret (first line) and the hop secrets after it.
+fn parse_staged(text: &str) -> (&str, Vec<super::hop_auth::HopSecret>) {
+    use super::auth_prompt::PromptClass;
+    let mut lines = text.lines();
+    let destination = lines.next().unwrap_or("");
+    let hops = lines
+        .filter_map(|line| {
+            let mut f = line.splitn(6, '\t');
+            (f.next()? == "H").then_some(())?;
+            let class = match f.next()? {
+                "k" => PromptClass::Passphrase,
+                _ => PromptClass::Password,
+            };
+            let opt = |s: &str| (!s.is_empty()).then(|| s.to_string());
+            Some(super::hop_auth::HopSecret {
+                class,
+                user: opt(f.next()?),
+                host: f.next()?.to_string(),
+                key_path: opt(f.next()?),
+                value: f.next()?.to_string(),
+            })
+        })
+        .collect();
+    (destination, hops)
+}
+
 /// If this process was launched by ssh as its `SSH_ASKPASS` helper, print the
 /// staged secret and return `true` (the caller should exit immediately). Set
 /// only on the ssh child's environment, so the main TUI process never sees it.
@@ -237,17 +307,29 @@ pub fn maybe_run_askpass() -> bool {
     let owner = std::env::var(OWNER_ENV)
         .ok()
         .and_then(|pid| pid.parse().ok());
+    let staged = std::fs::read_to_string(&file).unwrap_or_default();
+    let (destination, hops) = parse_staged(&staged);
     if asked_by_jump_hop(owner) {
+        // A hop: its own secret if the prompt names a hop we hold one for,
+        // never the destination's.
+        let answer = prompt_arg().and_then(|prompt| {
+            super::hop_auth::find_secret(&hops, &prompt).map(|h| h.value.clone())
+        });
+        match answer {
+            Some(value) => print_answer(&value),
+            None => std::process::exit(1),
+        }
+        return true;
+    }
+    if destination.is_empty() {
+        // Only hop secrets were staged: the destination's prompt is the user's.
         std::process::exit(1);
     }
-    if let Ok(secret) = std::fs::read_to_string(&file) {
-        // Content already ends with a newline; emit it verbatim.
-        let mut out = std::io::stdout();
-        let _ = out.write_all(secret.as_bytes());
-        let _ = out.flush();
-        if std::env::var_os(READ_ONCE_ENV).is_some() {
-            let _ = std::fs::remove_file(&file);
-        }
+    print_answer(destination);
+    // A detached tunnel's file goes after its first read, unless hop prompts
+    // may still come: the guard owner removes it then.
+    if hops.is_empty() && std::env::var_os(READ_ONCE_ENV).is_some() {
+        let _ = std::fs::remove_file(&file);
     }
     true
 }
@@ -331,6 +413,110 @@ mod tests {
         ));
         assert!(!hop.contains("s3cr3t"), "{hop}");
         assert!(hop.contains("helper-exit=1"), "{hop}");
+    }
+
+    #[test]
+    fn a_hop_gets_its_own_staged_secret_and_the_destination_its_own() {
+        use super::super::auth_prompt::PromptClass;
+        use super::super::hop_auth::HopSecret;
+        // Same process-tree stand-ins as above: `ssh` is a copy of bash.
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join("ssh");
+        std::fs::copy("/bin/bash", &ssh).unwrap();
+        let hop = |user: &str, host: &str, value: &str| HopSecret {
+            user: Some(user.into()),
+            host: host.into(),
+            key_path: None,
+            class: PromptClass::Password,
+            value: value.into(),
+        };
+        let path = dir.path().join("secret");
+        let guard = AskpassSecret::staged(
+            Some("target-pw"),
+            &[
+                hop("ops", "10.0.4.11", "lb-1-pw"),
+                hop("ops", "10.0.4.12", "lb-2-pw"),
+            ],
+        )
+        .unwrap();
+        std::fs::copy(guard.path.clone(), &path).unwrap();
+        let guard = AskpassSecret { path };
+        let helper = format!(
+            "'{}' --exact session::askpass::tests::file_helper_entry --nocapture; echo helper-exit=$?",
+            std::env::current_exe().unwrap().display()
+        );
+        let run = |script: &str, prompt: &str| {
+            let out = std::process::Command::new(&ssh)
+                .args(["-c", script])
+                .env("SSHUB_TEST_FILE_HELPER", "1")
+                .env("SSHUB_TEST_PROMPT", prompt)
+                .envs(guard.env(Path::new("unused")))
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let as_hop = |prompt: &str| {
+            run(
+                &format!(
+                    "'{}' -c \"{}\"; :",
+                    ssh.display(),
+                    helper.replace('$', "\\$")
+                ),
+                prompt,
+            )
+        };
+        // The destination: the first line, whatever the prompt says.
+        let dest = run(&helper, "ops@10.0.4.91's password: ");
+        assert!(
+            dest.contains("target-pw") && dest.contains("helper-exit=0"),
+            "{dest}"
+        );
+        // Each hop: its own line, found by the prompt.
+        let one = as_hop("ops@10.0.4.11's password: ");
+        assert!(
+            one.contains("lb-1-pw") && !one.contains("lb-2-pw") && !one.contains("target-pw"),
+            "{one}"
+        );
+        let two = as_hop("ops@10.0.4.12's password: ");
+        assert!(
+            two.contains("lb-2-pw") && !two.contains("lb-1-pw") && !two.contains("target-pw"),
+            "{two}"
+        );
+        // A hop that is not staged gets nothing, and above all not the target's.
+        for prompt in [
+            "ops@10.9.9.9's password: ",
+            "root@10.0.4.11's password: ",
+            "Password: ",
+        ] {
+            let other = as_hop(prompt);
+            assert!(
+                !other.contains("-pw") && other.contains("helper-exit=1"),
+                "{prompt}: {other}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_hop_secrets_staged_leaves_the_destination_to_the_user() {
+        use super::super::auth_prompt::PromptClass;
+        let dir = tempfile::tempdir().unwrap();
+        let guard = AskpassSecret::staged(
+            None,
+            &[super::super::hop_auth::HopSecret {
+                user: None,
+                host: "h".into(),
+                key_path: None,
+                class: PromptClass::Password,
+                value: "hop-pw".into(),
+            }],
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&guard.path).unwrap();
+        let (destination, hops) = parse_staged(&text);
+        assert_eq!(destination, "");
+        assert_eq!(hops.len(), 1);
+        assert_eq!(hops[0].value, "hop-pw");
+        drop(dir);
     }
 
     #[test]

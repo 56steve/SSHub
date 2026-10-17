@@ -17,6 +17,7 @@ fn fixture(capture: Option<&std::path::Path>) -> App {
         argv.push("stty raw -echo; printf READY; cat".into());
     }
     let config = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv,
         display_name: "fixture".into(),
         meta: Default::default(),
@@ -132,6 +133,7 @@ fn remote_password_session_ghosts_second_prefix_after_first_command() {
         "printf 'user@monitor::~$ '; exec sleep 30",
     );
     let config = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec!["sh".into(), "-c".into(), child_sh.into()],
         display_name: "kuma".into(),
         meta: Default::default(),
@@ -230,6 +232,7 @@ fn remote_interactive_bash_ghosts_second_prefix_after_first_command() {
         home = home.path().display(),
     );
     let config = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec!["sh".into(), "-c".into(), child_sh],
         display_name: "kuma".into(),
         meta: Default::default(),
@@ -753,6 +756,7 @@ fn manual_password_before_latch_still_records_first_post_auth_command() {
         "printf 'user@monitor:~$ '; exec sleep 30",
     );
     let config = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec!["sh".into(), "-c".into(), child_sh.into()],
         display_name: "kuma".into(),
         meta: Default::default(),

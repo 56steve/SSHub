@@ -53,6 +53,7 @@ impl App {
         });
 
         let config = crate::session::SessionConfig {
+            hops: Vec::new(),
             argv,
             display_name,
             meta,

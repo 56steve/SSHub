@@ -1,0 +1,45 @@
+  █▀▀ █▀▀ █ █ █ █ █▀▄                                                                                                                                           
+  ▀▀█ ▀▀█ █▀█ █ █ █▀▄   hosts: 214  ·  196 online  ·  9 slow  ·  9 unreachable                                                                Thu 14:02:11 UTC  
+  ▀▀▀ ▀▀▀ ▀ ▀ ▀▀▀ ▀▀                                                                                                                                            
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  1  hosts    2  sftp    3  tunnels    4  identities    5  audit   [6] map                                                            scope: ~/.config/sshub    
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ┌─ map ─ 1,840 hosts · 212 jump hosts · chains up to 6 hops · clustered ─────────────────────────────────────────────────────────────────────────────────────┐ 
+ │ you       hop 1 · clusters                   hop 2                       hosts behind · one glyph each                                                   Σ │ 
+ │                                                                                                                                                            │ 
+ │ ◉ you──┬─▸▾ eu-bastions  64 hops ●●●●●●●●●●○× +52 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈ expanded below · sorted by Σ, largest radius first                            612 │ 
+ │        │   ├─▸● bastion-eu-01   12ms ─────┬┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈ prod ●●●●●●●●●● +76                                                            96 │ 
+ │        │   │                              └─▸● jump-eu-07  31ms ┈┈┈┈┈┈┈┈ prod/db ●●●●●●●×●● +36                                                         46 │ 
+ │        │   ├─▸● bastion-eu-02   14ms ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈ prod ●●●●●●●●●● +51   web ●●●●●●●●●●                                           71 │ 
+ │        │   ├─▸● bastion-eu-03  390ms ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈ staging-eu ●●●●●●●×●● +48                                                      58 │ 
+ │        │   ├─▸× bastion-eu-04   down ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈ k8s-eu ○○○○○○○○○○ +34   unreachable: hop is down                               44 │ 
+ │        │   └─▸… 60 more hops  Σ ≤ 40 each · ␣ show 20 more                                                                                                 │ 
+ │        │                                                                                                                                                   │ 
+ │        ├─▸▸ us-bastions  48 hops ●●●×●●●●●●●● +36 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈ 501 hosts · 7 groups ●●×●●×●×●●●● +489                                        501 │ 
+ │        ├─▸▸ k8s-jumpboxes  71 hops ●●●●○●●○●●●● +59 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈ 380 hosts · 4 groups ●●●○●●●●●●●○ +368                                        380 │ 
+ │        ├─▸▸ customer-gws  27 hops ●●●●●●●××●●● +15 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈ 214 hosts · 27 groups ●●×●×××●×●●× +202                                       214 │ 
+ │        │                                                                                                                                                   │ 
+ │        ├─▸● edge-gw     6ms ─▸ ‹ +4 hops › ─▸● vault-core  88ms ┈┈┈┈┈┈┈┈ secrets ●●●   depth 6: ‹ › opens the middle hops in the ribbon                  3 │ 
+ │        ├─▸▸ *.corp.example  2 hops ●●                                    ssh_config, no group → clustered by domain suffix                              41 │ 
+ │        ╘══↻ 3 cycles  loop-a⇄loop-b · ci-1⇄ci-2 · x→y→z→x                not connectable · ↵ lists them                                                  7 │ 
+ │                                                                                                                                                            │ 
+ │ ⋯         direct-only · no jump, nothing behind                          21 hosts ●●●●●●●●●●●● +9                                                       21 │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ 
+ ┌─ how D survives 212 jump hosts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ 
+ │ 1 Cluster the roots. More than 24 hop-1 rows → group them by the hop's own group (groups cluster, never add edges). Ungrouped                              │ 
+ │   ssh_config hops cluster by domain suffix, then by /24. A cluster row shows its hops as a glyph strip (hops are hosts too) and the union Σ.               │ 
+ │ 2 Biggest radius first. Inside a cluster, hops sort by Σ; the long tail folds (… 60 more hops · Σ ≤ 40), ␣ shows 20 more.                                  │ 
+ │ 3 Fold depth, not just width. Two hop columns are drawn; the middle of a deeper chain becomes ‹ +4 hops ›. The ribbon always shows the full chain.         │ 
+ │ 4 Outages read as rows. A down hop turns everything behind it to ○ and its Σ red: the reach of the outage is the row itself.                               │ 
+ │ 5 Search reveals. / + Enter opens only the clusters on the match's path and folds the rest; Shift+Z folds everything back to cluster rows.                 │ 
+ │   Cost stays flat: one DFS over the hop trie (a few thousand nodes at most), and only visible rows are drawn.                                              │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ␣ open/close cluster   → into cluster   Shift+Z fold all   / reveal   B blast   ↵ connect   ? help                                                             

@@ -8,6 +8,7 @@ pub mod help;
 pub mod host;
 pub mod identity;
 pub mod inventory;
+pub mod map;
 pub mod output;
 pub mod parse;
 pub mod sftp;
@@ -39,6 +40,7 @@ pub fn is_subcommand(cmd: &str) -> bool {
             | "completions"
             | "sftp"
             | "audit"
+            | "map"
     )
 }
 
@@ -74,6 +76,7 @@ pub fn run_subcommand(ctx: &mut CliContext, cmd: &str, rest: &[String]) -> Resul
         "completions" => completions::run(ctx, rest),
         "sftp" => sftp::run(ctx, rest),
         "audit" => audit::run(ctx, rest),
+        "map" => map::run(ctx, rest),
         other => anyhow::bail!("unknown subcommand: {other}"),
     }
 }

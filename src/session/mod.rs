@@ -8,6 +8,7 @@ pub mod askpass;
 pub mod askpass_channel;
 pub mod auth_prompt;
 pub mod history;
+pub mod hop_auth;
 pub mod interactive_auth;
 pub mod keys;
 pub mod parser;
@@ -77,6 +78,10 @@ pub struct SessionConfig {
     pub key_push_identity: Option<String>,
     /// Actual unique host name (entry.name()).
     pub host_name: String,
+    /// The jump hosts' own secrets, for a session without the interactive
+    /// channel (key push): staged beside `pending_secret`, so a hop's prompt is
+    /// answered with that hop's password and never with the destination's.
+    pub hops: Vec<hop_auth::HopSecret>,
 }
 
 /// Auto-respond once to either a password or passphrase prompt.
@@ -299,10 +304,11 @@ impl Session {
         if let Some(auth) = auth.as_ref() {
             env = auth.channel_env(&askpass::helper_exe()?);
             use_askpass = true;
-        } else if let Some(secret) = config.pending_secret.as_ref() {
+        } else if config.pending_secret.is_some() || !config.hops.is_empty() {
             match askpass::helper_exe() {
                 Ok(exe) => {
-                    if let Ok(guard) = askpass::AskpassSecret::new(secret.value()) {
+                    let secret = config.pending_secret.as_ref().map(PendingSecret::value);
+                    if let Ok(guard) = askpass::AskpassSecret::staged(secret, &config.hops) {
                         env = guard.env(&exe);
                         askpass = Some(guard);
                         use_askpass = true;
@@ -1567,6 +1573,7 @@ mod prompt_tests {
     #[test]
     fn auth_changed_key_parser_requires_unambiguous_exact_target() {
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 30".into()],
             display_name: "offline".into(),
             meta: SessionMeta::default(),
@@ -1604,6 +1611,7 @@ mod prompt_tests {
         // dash on Ubuntu) — the script is POSIX either way, but the spawn
         // must not depend on the runner's PATH.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["/bin/sh".into(), "-c".into(), "stty raw -echo; printf '\\033[5n'; dd bs=1 count=4 2>/dev/null | od -An -tx1; sleep 30".into()],
             display_name: "offline".into(), meta: SessionMeta::default(),
             pending_secret: None, key_push_identity: None, host_name: "offline".into(),
@@ -1648,6 +1656,7 @@ mod prompt_tests {
     #[test]
     fn mosh_running_alone_does_not_latch_connected() {
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 120".into()],
             display_name: "mosh-host".into(),
             meta: SessionMeta::default(),
@@ -1673,6 +1682,7 @@ mod prompt_tests {
         // exit — but the closed channel must not read as cancellation and kill
         // the child on the next drain.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 120".into()],
             display_name: "t".into(),
             meta: SessionMeta::default(),
@@ -1722,6 +1732,7 @@ mod prompt_tests {
         // stdout must land on the PTY grid; stderr must be routed through the
         // side FIFO into debug_log — never onto the grid.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),
@@ -1772,6 +1783,7 @@ mod prompt_tests {
         // Running alone is not post-auth evidence for mosh: history capture
         // must stay gated until trustworthy connected evidence arrives.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 120".into()],
             display_name: "mosh-host".into(),
             meta: SessionMeta::default(),
@@ -1831,6 +1843,7 @@ mod prompt_tests {
             return;
         }
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),
@@ -1878,6 +1891,7 @@ mod prompt_tests {
             return;
         }
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into()],
             display_name: "local".into(),
             meta: SessionMeta::default(),
@@ -1931,6 +1945,7 @@ mod prompt_tests {
             return;
         }
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),
@@ -1975,6 +1990,7 @@ mod prompt_tests {
         // clipboard is the frame's job (it knows which tab is on screen), so
         // `drain` must leave the queue alone.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),
@@ -2017,6 +2033,7 @@ mod prompt_tests {
         // A remote flushing `ESU BSU` in many tiny reads must not cost one
         // full-grid rasterization per read on the UI thread.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["true".into()],
             display_name: "t".into(),
             meta: SessionMeta::default(),
@@ -2052,6 +2069,7 @@ mod prompt_tests {
               stty sane; printf 'CPR<%s>\r\n' $r"
         );
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), script],
             display_name: "t".into(),
             meta: SessionMeta::default(),
@@ -2124,6 +2142,7 @@ mod prompt_tests {
     /// Build a throwaway session for tests that only need a live `Session`.
     fn scratch_session() -> Session {
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["true".into()],
             display_name: "t".into(),
             meta: SessionMeta::default(),
@@ -2133,135 +2152,7 @@ mod prompt_tests {
         };
         Session::spawn(config, (24, 80), None).unwrap()
     }
-    /// A key-auth `sshd` on a free 127.0.0.1 port, configured in a tempdir;
-    /// `None` (test skipped) without sshd, ssh or ssh-keygen. Killed on drop.
-    struct TempdirSshd {
-        dir: tempfile::TempDir,
-        port: u16,
-        user_key: std::path::PathBuf,
-        host_key: std::path::PathBuf,
-        log: std::path::PathBuf,
-        child: std::process::Child,
-    }
-
-    impl Drop for TempdirSshd {
-        fn drop(&mut self) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-    }
-
-    fn tempdir_sshd() -> Option<TempdirSshd> {
-        use std::process::Command;
-        let sshd_bin = ["sshd", "/usr/sbin/sshd", "/usr/bin/sshd"]
-            .into_iter()
-            .filter_map(|bin| {
-                Command::new("sh")
-                    .arg("-c")
-                    .arg(format!("command -v {bin}"))
-                    .output()
-                    .ok()
-                    .filter(|o| o.status.success())
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-            })
-            .find(|path| path.starts_with('/'));
-        let Some(sshd_bin) = sshd_bin else {
-            eprintln!("skipping: no sshd binary");
-            return None;
-        };
-        for bin in ["ssh", "ssh-keygen"] {
-            if Command::new("sh")
-                .arg("-c")
-                .arg(format!("command -v {bin} >/dev/null"))
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            eprintln!("skipping: no {bin} binary");
-            return None;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let host_key = dir.path().join("host_key");
-        let user_key = dir.path().join("id");
-        for (key, kind) in [(&host_key, "host"), (&user_key, "user")] {
-            let out = Command::new("ssh-keygen")
-                .args(["-t", "ed25519", "-N", "", "-f", key.to_str().unwrap(), "-q"])
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "{kind} keygen failed: {out:?}");
-        }
-        let auth_keys = dir.path().join("auth_keys");
-        std::fs::copy(user_key.with_extension("pub"), &auth_keys).unwrap();
-        let cfg = dir.path().join("sshd_config");
-        let log = dir.path().join("sshd.log");
-        // The probe port is free when picked but not reserved: another process
-        // can take it before sshd binds. sshd then exits, so try a fresh port.
-        let mut attempts = 0;
-        let (port, child) = loop {
-            attempts += 1;
-            let port = {
-                let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-                probe.local_addr().unwrap().port()
-            };
-            std::fs::write(
-                &cfg,
-                format!(
-                    "Port {port}\nListenAddress 127.0.0.1\nHostKey {}\nPidFile {}\n\
-                     AuthorizedKeysFile {}\nStrictModes no\nPasswordAuthentication no\n\
-                     PubkeyAuthentication yes\nUsePAM no\n",
-                    host_key.display(),
-                    dir.path().join("sshd.pid").display(),
-                    auth_keys.display(),
-                ),
-            )
-            .unwrap();
-            let mut sshd = Command::new(sshd_bin.as_str())
-                .args([
-                    "-D",
-                    "-f",
-                    cfg.to_str().unwrap(),
-                    "-E",
-                    log.to_str().unwrap(),
-                ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .unwrap();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            let listening = loop {
-                if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
-                    break true;
-                }
-                if sshd.try_wait().unwrap().is_some() {
-                    break false;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "tempdir sshd never listened: {}",
-                    std::fs::read_to_string(&log).unwrap_or_default(),
-                );
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            };
-            if listening {
-                break (port, sshd);
-            }
-            assert!(
-                attempts < 5,
-                "tempdir sshd exited on {attempts} ports: {}",
-                std::fs::read_to_string(&log).unwrap_or_default(),
-            );
-        };
-        Some(TempdirSshd {
-            dir,
-            port,
-            user_key,
-            host_key,
-            log,
-            child,
-        })
-    }
+    use crate::test_support::tempdir_sshd;
 
     #[test]
     fn real_ssh_master_latches_connected_through_drain() {
@@ -2276,6 +2167,7 @@ mod prompt_tests {
         let user = std::env::var("USER").unwrap_or_else(|_| "root".into());
         let known = sshd.dir.path().join("known_hosts");
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "ssh".into(),
                 "-v".into(),
@@ -2366,6 +2258,7 @@ mod prompt_tests {
             false,
         );
         let config = SessionConfig {
+            hops: Vec::new(),
             argv,
             display_name: "jump".into(),
             meta: SessionMeta::default(),
@@ -2583,6 +2476,7 @@ mod prompt_tests {
         // with nothing on stdout. The reason must end up in debug_log (so the
         // render layer can show it) and the session must never latch connected.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),

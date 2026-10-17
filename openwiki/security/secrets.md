@@ -115,10 +115,23 @@ Used by every embedded interactive `ssh` session (`session::interactive_auth`).
 - `PromptClass::classify` (`src/session/auth_prompt.rs`) sorts prompts into
   `Password`, `Passphrase`, `HostKey`, `Generic`. Stored secrets are answered
   only for the matching class and only to the **destination** ssh
-  (`destination_pid`); a jump host's prompt opens the normal modal.
+  (`destination_pid`). A jump host's prompt is answered with that **hop host's
+  own** stored secret (`src/session/hop_auth.rs`): the prompt
+  (`user@host's password:`, or `Enter passphrase for key '<path>':`) is matched
+  to the one saved hop it names, the secret is fetched when the hop asks, and
+  it is offered once. A prompt that names no saved hop, or two, opens the modal,
+  titled `Session: <host>, hop <name>`, and its Remember box saves to that hop
+  host. Neither the destination's secret nor another hop's ever answers a hop.
 - The auth modal (`AppMode::AuthPrompt`, `src/app/auth.rs`) is masked, one at a
-  time, and capped at three attempts per class (host-key questions have their
+  time, and capped at three attempts per class for each ssh in the chain (the
+  destination and every hop have their own count; host-key questions have their
   own cap of three).
+
+Ssh children outside the TUI (tunnels, `exec`, `connect`, broadcast, test
+connect, key push) read a staged file instead (`AskpassSecret::staged`): line 1
+is the destination's secret, each later line one hop's (`H`, class, user, host,
+key, value). The helper answers a hop prompt with the line that names that hop
+and the destination's prompt with line 1.
 
 ### Remember is opt-in
 

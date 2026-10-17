@@ -78,7 +78,7 @@ impl App {
             }
             ClickHit::Row(index) => self.select_row(index),
             // The dashboard behind an overlay: a click there is not for it.
-            ClickHit::SftpPane { .. } => {}
+            ClickHit::SftpPane { .. } | ClickHit::MapCell { .. } => {}
         }
     }
 

@@ -145,6 +145,7 @@ impl App {
                         4 => {
                             self.audit_selected = self.audit_selected.saturating_sub(1);
                         }
+                        5 => self.map_wheel(-3),
                         _ => {}
                     }
                 }
@@ -171,6 +172,7 @@ impl App {
                         let max = self.auth_events_cache.len().saturating_sub(1);
                         self.audit_selected = (self.audit_selected + 1).min(max);
                     }
+                    5 => self.map_wheel(3),
                     _ => {}
                 }
             }
@@ -212,6 +214,7 @@ impl App {
                         self.active_tab = 4;
                         self.refresh_audit_events();
                     }
+                    5 => self.switch_to_map_tab(),
                     _ => {}
                 }
             }
@@ -235,6 +238,7 @@ impl App {
                 }
             }
             1 => self.sftp_click(x, y, areas.body, is_double)?,
+            5 => self.map_click(x, y, is_double)?,
             2 => {
                 // A double click acts on the tunnel its first click picked:
                 // picking one can show or hide its detail line, which moves

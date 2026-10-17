@@ -9,8 +9,9 @@ pub mod import;
 pub mod keybinds;
 pub mod known_hosts;
 pub mod log_browser;
+pub mod map;
 pub mod metadata;
-pub(crate) mod osc52;
+pub mod osc52;
 pub mod osinfo;
 pub mod ping;
 pub mod profile;
@@ -542,6 +543,8 @@ fn poll_keys_and_watcher(app: &mut App) -> Result<()> {
     if config_changed {
         app.reload_hosts()?;
     }
+
+    app.poll_test_run();
 
     // Drain ping results from background worker
     if let Some(rx) = app.ping_rx.as_ref() {

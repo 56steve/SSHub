@@ -403,7 +403,7 @@ pub fn resolved_to_ssh_host(
         .as_ref()
         .and_then(|i| i.certificate.as_ref())
         .map(|p| p.to_string_lossy().into_owned());
-    host.proxy_jump = resolved.proxy_jump.clone();
+    host.proxy_jump = resolved.jump_argv.clone();
     host.forward_agent = Some(resolved.forward_agent);
     host.remote_command = m.remote_command.clone();
     host
@@ -428,7 +428,14 @@ pub(crate) fn sftp_ssh_host(
         // stored values rather than refusing the session.
         HostEntry::Managed(m) => match store.resolve_connection(m) {
             Ok(resolved) => resolved_to_ssh_host(m, &resolved),
-            Err(_) => entry.ssh_host(),
+            Err(_) => {
+                // Not resolvable (a ProxyJump that is not valid hops): keep a
+                // jump on the host so the "no SFTP over ProxyJump" refusal
+                // fires, rather than a direct session past the bastion.
+                let mut h = entry.ssh_host();
+                h.proxy_jump = Some(m.proxy_jump.clone().unwrap_or_else(|| "(invalid)".into()));
+                h
+            }
         },
         HostEntry::Legacy { .. } => entry.ssh_host(),
     };
@@ -807,8 +814,8 @@ pub(crate) fn optional_field(raw: &str) -> Option<String> {
 pub(crate) fn tab_from_x(x: u16) -> Option<usize> {
     // Tab bar layout (from tab_bar.rs): 1-char left margin, then per tab:
     // 4 chars for number+brackets + label_len + 3 chars gap
-    // Labels: "hosts"(5), "sftp"(4), "tunnels"(7), "identities"(10), "audit"(5)
-    let labels = [5u16, 4, 7, 10, 5];
+    // Labels: "hosts"(5), "sftp"(4), "tunnels"(7), "identities"(10), "audit"(5), "map"(3)
+    let labels = [5u16, 4, 7, 10, 5, 3];
     let mut cx = 1u16; // 1-char margin
     for (i, label_len) in labels.iter().enumerate() {
         let tab_w = 4 + label_len + 3;
@@ -1001,4 +1008,162 @@ mod sftp_ssh_host_tests {
         assert_eq!(host.user, None);
         assert_eq!(host.identity_file, None);
     }
+}
+
+/// A jump hop that is a saved host: what ssh will print when it asks that host
+/// for a password, and how to find the host's own stored secret.
+pub struct HopSpec {
+    managed: crate::store::ManagedHost,
+    identity: Option<crate::store::Identity>,
+    user: Option<String>,
+}
+
+impl HopSpec {
+    fn name(&self) -> &str {
+        &self.managed.name
+    }
+
+    /// The stored secret of `class` for this hop, fetched now. A password is the
+    /// hop host's own (its Secret Service lookup, or `host:<id>`); a passphrase
+    /// belongs to the identity whose key the hop would use.
+    pub fn fetch(
+        &self,
+        class: crate::session::auth_prompt::PromptClass,
+        passwords: &dyn crate::credentials::PasswordStore,
+    ) -> Option<crate::session::PendingSecret> {
+        use crate::session::auth_prompt::PromptClass;
+        use crate::session::PendingSecret;
+        match class {
+            PromptClass::Password => {
+                match resolve_pending_secret_for_managed(&self.managed, passwords).0 {
+                    Some(PendingSecret::Password(pw)) => Some(PendingSecret::Password(pw)),
+                    _ => None,
+                }
+            }
+            PromptClass::Passphrase => {
+                let identity = self.identity.as_ref().filter(|i| i.private_key.is_some())?;
+                let key = crate::credentials::identity_key(identity.id);
+                passwords
+                    .get(&key)
+                    .ok()
+                    .flatten()
+                    .map(PendingSecret::Passphrase)
+            }
+            PromptClass::HostKey | PromptClass::Generic => None,
+        }
+    }
+
+    fn key_path(&self) -> Option<String> {
+        self.identity
+            .as_ref()
+            .and_then(|i| i.private_key.as_ref())
+            .map(|p| p.to_string_lossy().into_owned())
+    }
+
+    /// The same, as the lazy credential an interactive session keeps.
+    pub fn lazy(
+        self,
+        passwords: std::sync::Arc<dyn crate::credentials::PasswordStore>,
+    ) -> crate::session::hop_auth::HopCred {
+        let cred = crate::session::hop_auth::HopCred::new(
+            self.name().to_string(),
+            self.user.clone(),
+            self.managed.address.clone(),
+            Some(self.managed.id),
+            self.identity.as_ref().map(|i| i.id),
+            self.key_path(),
+            {
+                let spec = std::sync::Arc::new(self);
+                std::sync::Arc::new(move |class| spec.fetch(class, passwords.as_ref()))
+            },
+        );
+        cred
+    }
+
+    /// Every secret this hop holds, fetched now, for ssh children that read a
+    /// staged file.
+    pub fn secrets(
+        &self,
+        passwords: &dyn crate::credentials::PasswordStore,
+    ) -> Vec<crate::session::hop_auth::HopSecret> {
+        use crate::session::auth_prompt::PromptClass;
+        [PromptClass::Password, PromptClass::Passphrase]
+            .into_iter()
+            .filter_map(|class| {
+                let secret = self.fetch(class, passwords)?;
+                Some(crate::session::hop_auth::HopSecret {
+                    user: self.user.clone(),
+                    host: self.managed.address.clone(),
+                    key_path: self.key_path(),
+                    class,
+                    value: secret.value().to_string(),
+                })
+            })
+            .collect()
+    }
+}
+
+/// The hops of `jump` (a stored ProxyJump: names, `user@name`, `user@host`)
+/// that are saved hosts. Anything else, such as a raw `user@address` hop, has
+/// no saved credential and is left out.
+pub fn hop_specs(
+    store: &crate::store::LauncherStore,
+    hosts: &[HostEntry],
+    jump: &str,
+) -> Vec<HopSpec> {
+    let by_name = |n: &str| {
+        hosts
+            .iter()
+            .find_map(|h| h.managed().filter(|m| m.name == n))
+    };
+    crate::map::hops::split(jump)
+        .iter()
+        .filter_map(|token| {
+            let raw = crate::map::parse_raw_hop(token);
+            // By name, or by the host part of the token, or (written as an
+            // address) by the one saved host that has that address.
+            let managed = by_name(token)
+                .or_else(|| {
+                    raw.as_ref()
+                        .filter(|r| !r.ipv6)
+                        .and_then(|r| by_name(&r.host))
+                })
+                .or_else(|| {
+                    let addr = raw.as_ref()?.host.as_str();
+                    let mut same = hosts
+                        .iter()
+                        .filter_map(|h| h.managed())
+                        .filter(|m| m.address.eq_ignore_ascii_case(addr));
+                    let one = same.next()?;
+                    same.next().is_none().then_some(one)
+                })?;
+            let fields = store.resolve_fields(managed).ok()?;
+            let user = raw
+                .and_then(|r| r.user)
+                .or(fields.username)
+                .or_else(|| fields.identity.as_ref().and_then(|i| i.username.clone()));
+            Some(HopSpec {
+                managed: managed.clone(),
+                identity: fields.identity,
+                user,
+            })
+        })
+        .collect()
+}
+
+/// The jump hosts' own stored secrets for `jump`, fetched now, for ssh children
+/// that read them from a staged file (tunnels, exec, broadcast, key push).
+pub fn hop_secrets(
+    store: &crate::store::LauncherStore,
+    hosts: &[HostEntry],
+    passwords: &dyn crate::credentials::PasswordStore,
+    jump: Option<&str>,
+) -> Vec<crate::session::hop_auth::HopSecret> {
+    jump.map(|j| {
+        hop_specs(store, hosts, j)
+            .iter()
+            .flat_map(|spec| spec.secrets(passwords))
+            .collect()
+    })
+    .unwrap_or_default()
 }

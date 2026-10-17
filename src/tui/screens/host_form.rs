@@ -2,6 +2,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Wrap};
 
+use crate::app::hop_editor::HopSection;
 use crate::app::{HostFormEdit, HostFormField, OS_ICON_OPTIONS};
 use crate::store::{HostGroup, Identity};
 use crate::text_input;
@@ -17,6 +18,8 @@ pub fn render_host_form(
     groups: &[HostGroup],
     identities: &[Identity],
     inherited: &crate::store::ResolvedConnection,
+    hops: Option<&HopSection>,
+    width: u16,
     save_hint: &str,
     secret_hints: &str,
     copy_hint: &str,
@@ -264,6 +267,11 @@ pub fn render_host_form(
             ]),
             Some(index),
         ));
+        if field == HostFormField::ProxyJump {
+            if let Some(h) = hops {
+                super::hop_lines::push_hop_lines(&mut lines, h, theme, width);
+            }
+        }
     }
 
     lines.push((Line::from(""), None));
@@ -385,6 +393,8 @@ mod tests {
             username: Some("deploy".into()),
             port: 2222,
             proxy_jump: Some("bastion".into()),
+            jump_argv: Some("bastion".into()),
+            jump_error: None,
             transport: crate::session_transport::SessionTransport::Mosh,
             forward_agent: true,
         }
@@ -436,6 +446,8 @@ mod tests {
                         &[],
                         &[team_identity()],
                         inherited,
+                        None,
+                        100,
                         "Ctrl+S",
                         "",
                         "",
