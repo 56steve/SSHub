@@ -27,6 +27,14 @@ All notable changes to SSHub are documented in this file.
 
 ### Fixed
 
+- **Jump hosts with a saved password asked for it again** - connecting through
+  `lb-1 -> lb-2` to a host showed the SSH authentication modal for each hop,
+  although both hops' passwords were stored. A hop that asks for a password is
+  now answered with that hop host's own stored password (or key passphrase),
+  fetched when it asks; when it has none the modal names the hop and Remember
+  saves to that hop host. The destination's password still never goes to a hop,
+  and one hop's never to another. Tunnels, `sshub exec`, `sshub connect`,
+  broadcast, test connect and key push do the same.
 - **A ProxyJump hop with a shell-active user could run commands** - OpenSSH runs
   the `-J` hop helper through a shell without quoting the user, so a stored or
   imported ProxyJump such as `a$IFS-oProxyCommand=touch$IFS/tmp/x@host` ran

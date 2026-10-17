@@ -461,6 +461,17 @@ pub(crate) fn current_user() -> String {
 }
 
 pub(crate) fn tempdir_sshd() -> Option<TempdirSshd> {
+    tempdir_sshd_with(false)
+}
+
+/// Like [`tempdir_sshd`], but it asks for a password instead of a key. An
+/// unprivileged sshd cannot check one, so every answer is refused: enough to
+/// see which prompt ssh raises and what it is answered with.
+pub(crate) fn tempdir_sshd_asking_for_a_password() -> Option<TempdirSshd> {
+    tempdir_sshd_with(true)
+}
+
+fn tempdir_sshd_with(password: bool) -> Option<TempdirSshd> {
     use std::process::Command;
     let sshd_bin = ["sshd", "/usr/sbin/sshd", "/usr/bin/sshd"]
         .into_iter()
@@ -518,11 +529,14 @@ pub(crate) fn tempdir_sshd() -> Option<TempdirSshd> {
             &cfg,
             format!(
                 "Port {port}\nListenAddress 127.0.0.1\nHostKey {}\nPidFile {}\n\
-                 AuthorizedKeysFile {}\nStrictModes no\nPasswordAuthentication no\n\
-                 PubkeyAuthentication yes\nUsePAM no\n",
+                 AuthorizedKeysFile {}\nStrictModes no\n\
+                 PasswordAuthentication {}\nKbdInteractiveAuthentication no\n\
+                 PubkeyAuthentication {}\nUsePAM no\n",
                 host_key.display(),
                 dir.path().join("sshd.pid").display(),
                 auth_keys.display(),
+                if password { "yes" } else { "no" },
+                if password { "no" } else { "yes" },
             ),
         )
         .unwrap();

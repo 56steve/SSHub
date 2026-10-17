@@ -70,6 +70,7 @@ fn alt_s_filters_open_sessions_and_renders_the_selected_tab() {
         app.sessions.push(
             Session::spawn(
                 SessionConfig {
+                    hops: Vec::new(),
                     argv: vec!["sleep".into(), "30".into()],
                     display_name: name.into(),
                     meta: SessionMeta::default(),

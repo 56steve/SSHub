@@ -329,6 +329,12 @@ impl App {
                     pw_store,
                 )
                 .0;
+                let hops = hop_secrets(
+                    &self.store,
+                    &self.hosts,
+                    pw_store,
+                    effective.as_ref().and_then(|r| r.proxy_jump.as_deref()),
+                );
                 Some(BroadcastCandidate {
                     host_id,
                     host_name: entry.name().to_string(),
@@ -337,6 +343,7 @@ impl App {
                         _ => ssh_argv_for_entry(entry),
                     },
                     secret,
+                    hops,
                     selected: true,
                 })
             })
@@ -481,6 +488,7 @@ impl App {
                 host_name: c.host_name.clone(),
                 argv: c.argv.clone(),
                 secret: c.secret.clone(),
+                hops: c.hops.clone(),
             })
             .collect();
 

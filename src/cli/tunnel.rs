@@ -199,7 +199,13 @@ fn cmd_start(ctx: &CliContext, args: &[String]) -> Result<()> {
         .store
         .resolve_connection(&host)
         .unwrap_or_else(|_| crate::store::ResolvedConnection::from_stored(&host));
-    let pid = spawn_detached_tunnel(&tunnel, &host, &resolved, secret.as_ref(), &data_dir)?;
+    let hops = crate::app::hop_secrets(
+        &ctx.store,
+        &ctx.hosts,
+        ctx.password_store(),
+        resolved.proxy_jump.as_deref(),
+    );
+    let pid = spawn_detached_tunnel(&tunnel, &host, &resolved, secret.as_ref(), &hops, &data_dir)?;
     let _ = ctx.store.log_auth_event(
         host_name,
         None,
@@ -232,7 +238,13 @@ fn run_foreground(
     let resolved = store
         .resolve_connection(host)
         .unwrap_or_else(|_| crate::store::ResolvedConnection::from_stored(host));
-    mgr.start(tunnel, host, &resolved, secret.as_ref())
+    let hops = crate::app::hop_secrets(
+        &ctx.store,
+        &ctx.hosts,
+        password_store,
+        resolved.proxy_jump.as_deref(),
+    );
+    mgr.start(tunnel, host, &resolved, secret.as_ref(), &hops)
         .context("tunnel start failed")?;
     let _ = store.log_auth_event(
         &host_name,
@@ -269,7 +281,17 @@ fn run_foreground(
                     (h, resolved)
                 })
             },
-            |h| resolve_pending_secret_for_managed(h, password_store).0,
+            |h, resolved| {
+                (
+                    resolve_pending_secret_for_managed(h, password_store).0,
+                    crate::app::hop_secrets(
+                        &store,
+                        &ctx.hosts,
+                        password_store,
+                        resolved.proxy_jump.as_deref(),
+                    ),
+                )
+            },
         );
         log_tunnel_reconnect_events(&store, &reconnect, &tunnels);
 

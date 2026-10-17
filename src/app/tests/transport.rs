@@ -316,3 +316,100 @@ pub(crate) fn fallback_paths_refuse_a_host_with_an_invalid_jump_instead_of_going
     let host = crate::app::sftp_ssh_host(app.resolver.as_ref(), app.store(), &entry);
     assert!(host.proxy_jump.is_some());
 }
+
+#[test]
+pub(crate) fn a_chain_resolves_each_hops_own_stored_secret_and_never_the_targets() {
+    use crate::credentials::PasswordStore;
+    use crate::session::auth_prompt::PromptClass;
+    // you -> lb-1 -> lb-2 -> 1c-1, all saved hosts with a stored password.
+    let (app, secrets) = crate::app::tests::test_app_with_secrets(vec![]);
+    let mk = |name: &str, addr: &str, user: &str, jump: Option<&str>| {
+        let mut h = NewHost::launcher(name, addr);
+        h.username = Some(user.into());
+        h.proxy_jump = jump.map(String::from);
+        app.store().create_host(&h).unwrap()
+    };
+    let lb1 = mk("lb-1", "10.0.4.11", "ops", None);
+    let lb2 = mk("lb-2", "10.0.4.12", "ops", None);
+    let target = mk("1c-1", "10.0.4.91", "ops", Some("lb-1,lb-2"));
+    for (host, pw) in [(&lb1, "lb-1-pw"), (&lb2, "lb-2-pw"), (&target, "1c-1-pw")] {
+        secrets
+            .set(&crate::credentials::host_key(host.id), pw)
+            .unwrap();
+    }
+    let mut app = app;
+    app.reload_hosts().unwrap();
+
+    let resolved = app.store().resolve_connection(&target).unwrap();
+    let jump = resolved.proxy_jump.as_deref();
+    let staged = hop_secrets(app.store(), &app.hosts, secrets.as_ref(), jump);
+    let view: Vec<(&str, &str, &str)> = staged
+        .iter()
+        .map(|h| {
+            (
+                h.user.as_deref().unwrap_or(""),
+                h.host.as_str(),
+                h.value.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        view,
+        [
+            ("ops", "10.0.4.11", "lb-1-pw"),
+            ("ops", "10.0.4.12", "lb-2-pw")
+        ]
+    );
+    assert!(staged.iter().all(|h| h.class == PromptClass::Password));
+
+    // Lazy form: nothing is read until a hop asks, and then only that hop's.
+    let creds: Vec<_> = hop_specs(app.store(), &app.hosts, jump.unwrap())
+        .into_iter()
+        .map(|s| {
+            s.lazy(std::sync::Arc::new(crate::app::tests::SharedStore(
+                secrets.clone(),
+            )))
+        })
+        .collect();
+    let lb2_cred = crate::session::hop_auth::find(&creds, "ops@10.0.4.12's password: ").unwrap();
+    assert_eq!(lb2_cred.name, "lb-2");
+    assert_eq!(lb2_cred.host_id, Some(lb2.id));
+    assert_eq!(
+        lb2_cred.secret(PromptClass::Password).unwrap().value(),
+        "lb-2-pw"
+    );
+    // The target is no hop: its prompt names nobody in the chain.
+    assert!(crate::session::hop_auth::find(&creds, "ops@10.0.4.91's password: ").is_none());
+
+    // A hop written as its address is still that host; a raw hop is nobody.
+    let by_address = hop_specs(app.store(), &app.hosts, "ops@10.0.4.11:22,ops@192.0.2.1");
+    assert_eq!(by_address.len(), 1);
+}
+
+#[test]
+pub(crate) fn connecting_through_a_chain_arms_the_session_with_each_hops_own_credential() {
+    // Nothing listens on port 1: the session only has to exist and carry its
+    // hops. ssh is killed when the app drops.
+    let mut app = crate::app::tests::test_app(vec![]);
+    let mut hosts = Vec::new();
+    for (name, jump) in [("lb-1", None), ("lb-2", None), ("1c-1", Some("lb-1,lb-2"))] {
+        let mut h = NewHost::launcher(name, "127.0.0.1");
+        h.port = Some(1);
+        h.username = Some("ops".into());
+        h.proxy_jump = jump.map(String::from);
+        hosts.push(app.store().create_host(&h).unwrap());
+    }
+    app.reload_hosts().unwrap();
+    let entry = HostEntry::from_managed(hosts[2].clone());
+    app.connect_host_entry(entry).unwrap();
+    let session = app.sessions.last().expect("a session was spawned");
+    let names: Vec<&str> = session
+        .auth
+        .as_ref()
+        .expect("an ssh session has the interactive channel")
+        .hops
+        .iter()
+        .map(|h| h.name.as_str())
+        .collect();
+    assert_eq!(names, ["lb-1", "lb-2"]);
+}

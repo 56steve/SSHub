@@ -51,6 +51,9 @@ pub struct BroadcastTask {
     /// uses). `Some` => `BatchMode=no`; `None` => key/agent only (`BatchMode=yes`,
     /// fail fast on a password prompt).
     pub secret: Option<crate::session::PendingSecret>,
+    /// The jump hosts' own stored secrets: each hop's prompt is answered with
+    /// that hop's, never with `secret`. Empty without a ProxyJump.
+    pub hops: Vec<crate::session::hop_auth::HopSecret>,
 }
 
 /// Per-host lifecycle state, folded from [`BroadcastEvent`]s by [`apply_event`].
@@ -112,6 +115,20 @@ pub trait CommandRunner: Send + Sync {
         secret: Option<&crate::session::PendingSecret>,
         cancel: &AtomicBool,
     ) -> Result<(i32, String, String), String>;
+
+    /// [`Self::run`] with the jump hosts' own secrets. A runner that cannot stage
+    /// them ignores them: a hop that asks then fails fast instead of prompting.
+    fn run_with_hops(
+        &self,
+        argv: &[String],
+        command: &str,
+        secret: Option<&crate::session::PendingSecret>,
+        hops: &[crate::session::hop_auth::HopSecret],
+        cancel: &AtomicBool,
+    ) -> Result<(i32, String, String), String> {
+        let _ = hops;
+        self.run(argv, command, secret, cancel)
+    }
 }
 
 /// Real runner: shells out to `ssh` with the same non-interactive option splice
@@ -167,6 +184,17 @@ impl CommandRunner for SshCommandRunner {
         secret: Option<&crate::session::PendingSecret>,
         cancel: &AtomicBool,
     ) -> Result<(i32, String, String), String> {
+        self.run_with_hops(argv, command, secret, &[], cancel)
+    }
+
+    fn run_with_hops(
+        &self,
+        argv: &[String],
+        command: &str,
+        secret: Option<&crate::session::PendingSecret>,
+        hops: &[crate::session::hop_auth::HopSecret],
+        cancel: &AtomicBool,
+    ) -> Result<(i32, String, String), String> {
         if argv.is_empty() {
             return Err("empty ssh argv".to_string());
         }
@@ -180,7 +208,8 @@ impl CommandRunner for SshCommandRunner {
         // session); without one, BatchMode=yes so ssh fails fast instead of
         // blocking on a /dev/tty password prompt (ConnectTimeout only bounds the
         // TCP connect).
-        let batchmode = if secret.is_some() {
+        let askpass = secret.is_some() || !hops.is_empty();
+        let batchmode = if askpass {
             "BatchMode=no"
         } else {
             "BatchMode=yes"
@@ -205,7 +234,7 @@ impl CommandRunner for SshCommandRunner {
         // Kept alive until the child has exited: ssh re-reads it for each hop.
         let mut _config = None;
         if let Some(user_config) = &self.isolated_config {
-            let text = crate::ssh::test_connect::isolated_config(user_config, secret.is_some());
+            let text = crate::ssh::test_connect::isolated_config(user_config, askpass);
             let file = tempfile::Builder::new()
                 .prefix("sshub-test-")
                 .suffix(".conf")
@@ -239,9 +268,13 @@ impl CommandRunner for SshCommandRunner {
         // owner-only temp file removed on drop, so keep it alive until the child
         // has exited (i.e. for the whole poll loop below).
         let mut _askpass = None;
-        if let Some(secret) = secret {
+        if askpass {
             if let Ok(exe) = crate::session::askpass::helper_exe() {
-                if let Ok(guard) = crate::session::askpass::AskpassSecret::new(secret.value()) {
+                let staged = crate::session::askpass::AskpassSecret::staged(
+                    secret.map(crate::session::PendingSecret::value),
+                    hops,
+                );
+                if let Ok(guard) = staged {
                     for (k, v) in guard.env(&exe) {
                         cmd.env(k, v);
                     }
@@ -418,7 +451,13 @@ fn broadcast_worker(
             return;
         }
 
-        let ev = match runner.run(&task.argv, command, task.secret.as_ref(), cancel) {
+        let ev = match runner.run_with_hops(
+            &task.argv,
+            command,
+            task.secret.as_ref(),
+            &task.hops,
+            cancel,
+        ) {
             Ok((exit, stdout, stderr)) => BroadcastEvent::Finished {
                 host_id: task.host_id,
                 exit,
@@ -542,6 +581,7 @@ mod tests {
 
     fn task(id: i64, name: &str) -> BroadcastTask {
         BroadcastTask {
+            hops: Vec::new(),
             host_id: id,
             host_name: name.to_string(),
             argv: vec!["ssh".to_string(), name.to_string()],
@@ -1013,12 +1053,14 @@ mod tests {
         let with_secret = Arc::new(AtomicUsize::new(0));
         let tasks = vec![
             BroadcastTask {
+                hops: Vec::new(),
                 host_id: 1,
                 host_name: "pw-host".into(),
                 argv: vec!["ssh".into(), "pw-host".into()],
                 secret: Some(crate::session::PendingSecret::Password("hunter2".into())),
             },
             BroadcastTask {
+                hops: Vec::new(),
                 host_id: 2,
                 host_name: "key-host".into(),
                 argv: vec!["ssh".into(), "key-host".into()],
@@ -1039,6 +1081,77 @@ mod tests {
             with_secret.load(Ordering::SeqCst),
             1,
             "only the host with a stored secret hands one to the runner"
+        );
+    }
+
+    #[test]
+    fn each_tasks_hop_secrets_reach_the_runner_beside_its_own_secret() {
+        use crate::session::hop_auth::HopSecret;
+        use crate::session::PendingSecret;
+        use std::sync::Mutex;
+
+        let hop = |user: &str, value: &str| HopSecret {
+            user: Some(user.into()),
+            host: "10.0.4.11".into(),
+            key_path: None,
+            class: crate::session::auth_prompt::PromptClass::Password,
+            value: value.into(),
+        };
+        // (target secret, the hop values it came with), per run.
+        type Seen = Vec<(Option<String>, Vec<String>)>;
+        struct Spy(Arc<Mutex<Seen>>);
+        impl CommandRunner for Spy {
+            fn run(
+                &self,
+                _: &[String],
+                _: &str,
+                _: Option<&PendingSecret>,
+                _: &AtomicBool,
+            ) -> Result<(i32, String, String), String> {
+                panic!("a task with hops must go through run_with_hops");
+            }
+            fn run_with_hops(
+                &self,
+                _: &[String],
+                _: &str,
+                secret: Option<&PendingSecret>,
+                hops: &[HopSecret],
+                _: &AtomicBool,
+            ) -> Result<(i32, String, String), String> {
+                self.0.lock().unwrap().push((
+                    secret.map(|s| s.value().to_string()),
+                    hops.iter().map(|h| h.value.clone()).collect(),
+                ));
+                Ok((0, String::new(), String::new()))
+            }
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let task = |id: i64, secret: Option<&str>, hops: Vec<HopSecret>| BroadcastTask {
+            hops,
+            host_id: id,
+            host_name: format!("h{id}"),
+            argv: vec!["ssh".into(), format!("h{id}")],
+            secret: secret.map(|s| PendingSecret::Password(s.into())),
+        };
+        let rx = spawn_broadcast(
+            vec![
+                task(1, Some("target-1"), vec![hop("ops", "hop-pw")]),
+                task(2, None, vec![hop("ops", "other-hop-pw")]),
+            ],
+            "true".into(),
+            1,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Spy(Arc::clone(&seen))),
+        );
+        let _: Vec<_> = rx.iter().collect();
+        let mut seen = seen.lock().unwrap().clone();
+        seen.sort();
+        assert_eq!(
+            seen,
+            [
+                (None, vec!["other-hop-pw".to_string()]),
+                (Some("target-1".to_string()), vec!["hop-pw".to_string()]),
+            ]
         );
     }
 }

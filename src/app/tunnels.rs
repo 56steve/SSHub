@@ -137,8 +137,14 @@ impl App {
                         .store
                         .resolve_connection(h)
                         .unwrap_or_else(|_| crate::store::ResolvedConnection::from_stored(h));
+                    let hops = hop_secrets(
+                        &self.store,
+                        &self.hosts,
+                        self.password_store.as_ref(),
+                        resolved.proxy_jump.as_deref(),
+                    );
                     self.tunnel_manager
-                        .start(&tunnel, h, &resolved, secret.as_ref())
+                        .start(&tunnel, h, &resolved, secret.as_ref(), &hops)
                 }
                 None => Err(anyhow::anyhow!("No host associated with tunnel")),
             };
@@ -584,8 +590,14 @@ impl App {
                         .store
                         .resolve_connection(h)
                         .unwrap_or_else(|_| crate::store::ResolvedConnection::from_stored(h));
+                    let hops = hop_secrets(
+                        &self.store,
+                        &self.hosts,
+                        self.password_store.as_ref(),
+                        resolved.proxy_jump.as_deref(),
+                    );
                     self.tunnel_manager
-                        .start(&tunnel, h, &resolved, secret.as_ref())
+                        .start(&tunnel, h, &resolved, secret.as_ref(), &hops)
                 }
                 None => Err(anyhow::anyhow!("No host associated with tunnel")),
             };
@@ -648,7 +660,17 @@ impl App {
                     (h, resolved)
                 })
             },
-            |host| resolve_pending_secret_for_managed(host, self.password_store.as_ref()).0,
+            |host, resolved| {
+                (
+                    resolve_pending_secret_for_managed(host, self.password_store.as_ref()).0,
+                    hop_secrets(
+                        &store,
+                        &self.hosts,
+                        self.password_store.as_ref(),
+                        resolved.proxy_jump.as_deref(),
+                    ),
+                )
+            },
         );
         crate::tunnel::log_tunnel_reconnect_events(&self.store, &events, &self.tunnels);
         Ok(())

@@ -21,6 +21,9 @@ pub const STEP_RUN_TIMEOUT: Duration = Duration::from_secs(30);
 /// A stored secret to fetch at the moment a step runs.
 pub type SecretSource = Arc<dyn Fn() -> Option<crate::session::PendingSecret> + Send + Sync>;
 
+/// The jump hosts' own stored secrets for a step, fetched when it runs.
+pub type HopsSource = Arc<dyn Fn() -> Vec<crate::session::hop_auth::HopSecret> + Send + Sync>;
+
 /// What to run for one hop.
 #[derive(Clone)]
 pub struct TestStep {
@@ -34,6 +37,9 @@ pub struct TestStep {
     /// touches the keyring before then (or at all, for `y`) and no secret sits
     /// in the run afterwards.
     pub secret: Option<SecretSource>,
+    /// The hops before this step, each with its own stored secret (never the
+    /// step's own): a hop that asks for a password is answered, not left to fail.
+    pub hops: Option<HopsSource>,
     /// The command as shown to the user, e.g. `ssh -J a b true`.
     pub cmd: String,
     /// The short form for a panel row: hop names as written, not addresses.
@@ -198,8 +204,9 @@ pub fn spawn_test(
             send(i, StepState::Running);
             let started = Instant::now();
             let secret = step.secret.as_ref().and_then(|fetch| fetch());
-            let result = runner.run(&step.argv, "true", secret.as_ref(), &cancel);
-            drop(secret);
+            let hops = step.hops.as_ref().map(|fetch| fetch()).unwrap_or_default();
+            let result = runner.run_with_hops(&step.argv, "true", secret.as_ref(), &hops, &cancel);
+            drop((secret, hops));
             let state = match result {
                 Ok((0, _, _)) => StepState::Ok {
                     ms: started.elapsed().as_millis() as u64,
@@ -281,6 +288,7 @@ mod tests {
             host: None,
             argv,
             secret: None,
+            hops: None,
             cmd: String::new(),
             shown: String::new(),
             skip: None,
@@ -455,6 +463,7 @@ mod tests {
             host: None,
             argv: vec!["ssh".into()],
             secret: None,
+            hops: None,
             cmd: String::new(),
             shown: String::new(),
             skip: skip.map(String::from),

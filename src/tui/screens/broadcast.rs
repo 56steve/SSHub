@@ -894,6 +894,7 @@ mod tests {
         use crate::broadcast::BroadcastTask;
 
         let tasks = vec![BroadcastTask {
+            hops: Vec::new(),
             host_id: 1,
             host_name: "web-prod".into(),
             argv: vec!["ssh".into(), "web-prod".into()],
@@ -1209,6 +1210,7 @@ mod tests {
                     host_name: "keeper".into(),
                     argv: vec![],
                     secret: None,
+                    hops: Vec::new(),
                     selected: true,
                 },
                 BroadcastCandidate {
@@ -1216,6 +1218,7 @@ mod tests {
                     host_name: "dropped".into(),
                     argv: vec![],
                     secret: None,
+                    hops: Vec::new(),
                     selected: false,
                 },
             ],

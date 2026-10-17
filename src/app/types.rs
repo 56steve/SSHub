@@ -699,6 +699,9 @@ pub struct BroadcastCandidate {
     /// picked; threaded into the run so password hosts authenticate via
     /// SSH_ASKPASS. `None` => key/agent only.
     pub secret: Option<crate::session::PendingSecret>,
+    /// The jump hosts' own stored secrets, so a hop's prompt is not left to
+    /// fail and never answered with `secret`.
+    pub hops: Vec<crate::session::hop_auth::HopSecret>,
     pub selected: bool, // toggled in edit-targets
 }
 

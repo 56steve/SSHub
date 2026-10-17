@@ -54,6 +54,7 @@ fn make_state(
     let bcast_tasks: Vec<BroadcastTask> = tasks
         .iter()
         .map(|(id, name)| BroadcastTask {
+            hops: Vec::new(),
             host_id: *id,
             host_name: name.to_string(),
             argv: vec!["ssh".to_string(), name.to_string()],
@@ -303,6 +304,7 @@ fn the_broadcast_panel_renders_through_the_active_theme() {
     )));
 
     let tasks = vec![BroadcastTask {
+        hops: Vec::new(),
         host_id: 1,
         host_name: "web-prod".into(),
         argv: vec!["ssh".into(), "web-prod".into()],

@@ -12,6 +12,7 @@ fn fixture(local: bool) -> App {
     let mut app = test_app(vec![]);
     app.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);
     let config = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec![
             "sh".into(),
             "-c".into(),
@@ -45,6 +46,7 @@ fn fixture_capture(path: &std::path::Path, local: bool) -> App {
     let mut app = test_app(vec![]);
     app.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);
     let config = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec![
             "sh".into(),
             "-c".into(),
@@ -604,6 +606,7 @@ fn remote_session_latches_connected_and_records_typed_commands() {
     let mut app = test_app(vec![]);
     app.terminal_area = ratatui::layout::Rect::new(0, 0, 100, 30);
     let config = crate::session::SessionConfig {
+        hops: Vec::new(),
         argv: vec![
             "sh".into(),
             "-c".into(),

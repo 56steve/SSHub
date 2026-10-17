@@ -129,6 +129,7 @@ impl App {
                 _ => session_meta_for_entry(&entry),
             };
             let config = crate::session::SessionConfig {
+                hops: Vec::new(),
                 argv: session_argv.clone(),
                 display_name,
                 meta,
@@ -152,6 +153,15 @@ impl App {
                         auth.identity_id = entry
                             .managed()
                             .and_then(|m| m.identity.as_ref().map(|i| i.id));
+                        // The jump hosts' own saved credentials: a hop that asks
+                        // for its password gets that host's, never this one's.
+                        if let Some(jump) = resolved.as_ref().and_then(|r| r.proxy_jump.as_deref())
+                        {
+                            auth.hops = hop_specs(&self.store, &self.hosts, jump)
+                                .into_iter()
+                                .map(|s| s.lazy(self.password_store.clone()))
+                                .collect();
+                        }
                     }
                     let mut log_path = None;
                     if log_enabled {

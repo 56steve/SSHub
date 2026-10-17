@@ -3274,6 +3274,7 @@ mod tests {
             ("db-old", "root", "10.0.0.13"),
         ] {
             let cfg = SessionConfig {
+                hops: Vec::new(),
                 argv: vec!["true".into()],
                 display_name: name.into(),
                 meta: SessionMeta {
@@ -3355,6 +3356,7 @@ mod tests {
         let mut app = test_app_with_hosts();
         for name in ["alpha", "bravo"] {
             let cfg = crate::session::SessionConfig {
+                hops: Vec::new(),
                 argv: vec!["true".into()],
                 display_name: name.into(),
                 meta: crate::session::SessionMeta::default(),
@@ -3797,6 +3799,7 @@ mod tests {
         use crate::session::{SessionConfig, SessionMeta, SessionPhase};
 
         let cfg = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["true".into()],
             display_name: "web-prod".into(),
             meta: SessionMeta {
@@ -5533,6 +5536,7 @@ mod tests {
         {
             let mut app = test_app_with_hosts();
             let cfg = SessionConfig {
+                hops: Vec::new(),
                 argv: vec!["true".into()],
                 display_name: name.into(),
                 meta: SessionMeta {
@@ -5793,6 +5797,7 @@ mod tests {
     fn failed_connect_shows_x_and_reason() {
         let mut app = test_app_with_hosts();
         let config = crate::session::SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),
@@ -5836,6 +5841,7 @@ mod tests {
     fn connecting_screen_shows_spinner_overlay() {
         let mut app = test_app_with_hosts();
         let config = crate::session::SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sleep".into(), "1".into()],
             display_name: "web-prod".into(),
             meta: crate::session::SessionMeta {
@@ -5860,6 +5866,7 @@ mod tests {
     fn dashboard_shows_open_session_strip() {
         let mut app = test_app_with_hosts();
         let config = crate::session::SessionConfig {
+            hops: Vec::new(),
             argv: vec!["true".into()],
             display_name: "web-prod".into(),
             meta: crate::session::SessionMeta::default(),

@@ -1,7 +1,7 @@
 //! Classification shared by interactive askpass and stored-credential delivery.
 //! Generic challenges deliberately have no credential-storage destination.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PromptClass {
     Password,
     Passphrase,

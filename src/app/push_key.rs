@@ -331,7 +331,16 @@ impl App {
             _ => session_meta_for_entry(entry),
         };
 
+        // The jump hosts' own stored passwords: a hop that asks is answered with
+        // its own, never with this host's.
+        let hops = hop_secrets(
+            &self.store,
+            &self.hosts,
+            self.password_store.as_ref(),
+            resolved.as_ref().and_then(|r| r.proxy_jump.as_deref()),
+        );
         let config = crate::session::SessionConfig {
+            hops,
             argv: ssh_argv,
             display_name: display_name.clone(),
             meta,

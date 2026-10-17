@@ -254,6 +254,19 @@ impl App {
         }
         // `ssh -J bastion-eu,jump-2 db-2 true`: names as written, for panels.
         for (i, step) in steps.iter_mut().enumerate() {
+            // The hops before this step keep their own stored secrets, fetched
+            // when the step runs; the step's own secret is its own.
+            let before = hops_before(&hops[..i.min(hops.len())]);
+            if step.skip.is_none() && !before.is_empty() {
+                let (store, entries, passwords) = (
+                    Arc::clone(&self.store),
+                    self.hosts.clone(),
+                    Arc::clone(&self.password_store),
+                );
+                step.hops = Some(Arc::new(move || {
+                    hop_secrets(&store, &entries, passwords.as_ref(), Some(&before))
+                }));
+            }
             let via: Vec<&str> = hops[..i.min(hops.len())]
                 .iter()
                 .flatten()
@@ -520,6 +533,12 @@ impl App {
     }
 }
 
+/// The saved-host hops of a chain as one ProxyJump string.
+fn hops_before(hops: &[TestHop]) -> String {
+    let names: Vec<String> = hops.iter().flatten().cloned().collect();
+    hops::join(&names)
+}
+
 /// The host's ssh_config sets a ProxyCommand (presence only).
 fn entry_has_proxy_command(entry: &HostEntry) -> bool {
     match entry {
@@ -537,6 +556,7 @@ fn skipped(label: &str, reason: &str) -> TestStep {
         host: None,
         argv: Vec::new(),
         secret: None,
+        hops: None,
         cmd: String::new(),
         shown: String::new(),
         skip: Some(reason.to_string()),
@@ -556,6 +576,7 @@ fn finish(
         shown: String::new(),
         argv,
         secret,
+        hops: None,
         skip: None,
     }
 }

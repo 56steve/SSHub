@@ -8,6 +8,7 @@ pub mod askpass;
 pub mod askpass_channel;
 pub mod auth_prompt;
 pub mod history;
+pub mod hop_auth;
 pub mod interactive_auth;
 pub mod keys;
 pub mod parser;
@@ -77,6 +78,10 @@ pub struct SessionConfig {
     pub key_push_identity: Option<String>,
     /// Actual unique host name (entry.name()).
     pub host_name: String,
+    /// The jump hosts' own secrets, for a session without the interactive
+    /// channel (key push): staged beside `pending_secret`, so a hop's prompt is
+    /// answered with that hop's password and never with the destination's.
+    pub hops: Vec<hop_auth::HopSecret>,
 }
 
 /// Auto-respond once to either a password or passphrase prompt.
@@ -299,10 +304,11 @@ impl Session {
         if let Some(auth) = auth.as_ref() {
             env = auth.channel_env(&askpass::helper_exe()?);
             use_askpass = true;
-        } else if let Some(secret) = config.pending_secret.as_ref() {
+        } else if config.pending_secret.is_some() || !config.hops.is_empty() {
             match askpass::helper_exe() {
                 Ok(exe) => {
-                    if let Ok(guard) = askpass::AskpassSecret::new(secret.value()) {
+                    let secret = config.pending_secret.as_ref().map(PendingSecret::value);
+                    if let Ok(guard) = askpass::AskpassSecret::staged(secret, &config.hops) {
                         env = guard.env(&exe);
                         askpass = Some(guard);
                         use_askpass = true;
@@ -1567,6 +1573,7 @@ mod prompt_tests {
     #[test]
     fn auth_changed_key_parser_requires_unambiguous_exact_target() {
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 30".into()],
             display_name: "offline".into(),
             meta: SessionMeta::default(),
@@ -1604,6 +1611,7 @@ mod prompt_tests {
         // dash on Ubuntu) — the script is POSIX either way, but the spawn
         // must not depend on the runner's PATH.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["/bin/sh".into(), "-c".into(), "stty raw -echo; printf '\\033[5n'; dd bs=1 count=4 2>/dev/null | od -An -tx1; sleep 30".into()],
             display_name: "offline".into(), meta: SessionMeta::default(),
             pending_secret: None, key_push_identity: None, host_name: "offline".into(),
@@ -1648,6 +1656,7 @@ mod prompt_tests {
     #[test]
     fn mosh_running_alone_does_not_latch_connected() {
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 120".into()],
             display_name: "mosh-host".into(),
             meta: SessionMeta::default(),
@@ -1673,6 +1682,7 @@ mod prompt_tests {
         // exit — but the closed channel must not read as cancellation and kill
         // the child on the next drain.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 120".into()],
             display_name: "t".into(),
             meta: SessionMeta::default(),
@@ -1722,6 +1732,7 @@ mod prompt_tests {
         // stdout must land on the PTY grid; stderr must be routed through the
         // side FIFO into debug_log — never onto the grid.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),
@@ -1772,6 +1783,7 @@ mod prompt_tests {
         // Running alone is not post-auth evidence for mosh: history capture
         // must stay gated until trustworthy connected evidence arrives.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "sleep 120".into()],
             display_name: "mosh-host".into(),
             meta: SessionMeta::default(),
@@ -1831,6 +1843,7 @@ mod prompt_tests {
             return;
         }
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),
@@ -1878,6 +1891,7 @@ mod prompt_tests {
             return;
         }
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into()],
             display_name: "local".into(),
             meta: SessionMeta::default(),
@@ -1931,6 +1945,7 @@ mod prompt_tests {
             return;
         }
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),
@@ -1975,6 +1990,7 @@ mod prompt_tests {
         // clipboard is the frame's job (it knows which tab is on screen), so
         // `drain` must leave the queue alone.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),
@@ -2017,6 +2033,7 @@ mod prompt_tests {
         // A remote flushing `ESU BSU` in many tiny reads must not cost one
         // full-grid rasterization per read on the UI thread.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["true".into()],
             display_name: "t".into(),
             meta: SessionMeta::default(),
@@ -2052,6 +2069,7 @@ mod prompt_tests {
               stty sane; printf 'CPR<%s>\r\n' $r"
         );
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), script],
             display_name: "t".into(),
             meta: SessionMeta::default(),
@@ -2124,6 +2142,7 @@ mod prompt_tests {
     /// Build a throwaway session for tests that only need a live `Session`.
     fn scratch_session() -> Session {
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec!["true".into()],
             display_name: "t".into(),
             meta: SessionMeta::default(),
@@ -2148,6 +2167,7 @@ mod prompt_tests {
         let user = std::env::var("USER").unwrap_or_else(|_| "root".into());
         let known = sshd.dir.path().join("known_hosts");
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "ssh".into(),
                 "-v".into(),
@@ -2238,6 +2258,7 @@ mod prompt_tests {
             false,
         );
         let config = SessionConfig {
+            hops: Vec::new(),
             argv,
             display_name: "jump".into(),
             meta: SessionMeta::default(),
@@ -2455,6 +2476,7 @@ mod prompt_tests {
         // with nothing on stdout. The reason must end up in debug_log (so the
         // render layer can show it) and the session must never latch connected.
         let config = SessionConfig {
+            hops: Vec::new(),
             argv: vec![
                 "sh".into(),
                 "-c".into(),

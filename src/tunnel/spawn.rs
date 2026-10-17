@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result};
 
 use crate::secure_fs;
+use crate::session::hop_auth::HopSecret;
 use crate::session::{askpass, PendingSecret};
 use crate::store::{ManagedHost, ResolvedConnection, Tunnel, TunnelType};
 
@@ -143,12 +144,13 @@ pub fn splice_tunnel_ssh_options(args: &mut Vec<String>, has_stored_secret: bool
 pub fn stage_tunnel_askpass(
     cmd: &mut Command,
     secret: Option<&PendingSecret>,
+    hops: &[HopSecret],
 ) -> Result<Option<askpass::AskpassSecret>> {
-    let Some(secret) = secret else {
+    if secret.is_none() && hops.is_empty() {
         return Ok(None);
-    };
+    }
     let exe = askpass::helper_exe()?;
-    let guard = askpass::AskpassSecret::new(secret.value())?;
+    let guard = askpass::AskpassSecret::staged(secret.map(PendingSecret::value), hops)?;
     for (k, v) in guard.env(&exe) {
         cmd.env(k, v);
     }
@@ -280,6 +282,7 @@ pub fn spawn_detached_tunnel(
     host: &ManagedHost,
     resolved: &ResolvedConnection,
     secret: Option<&PendingSecret>,
+    hops: &[HopSecret],
     data_dir: &Path,
 ) -> Result<u32> {
     let pid_dir = ensure_tunnel_pid_dir(data_dir)?;
@@ -296,14 +299,14 @@ pub fn spawn_detached_tunnel(
         anyhow::bail!("local port {} already in use", tunnel.local_port);
     }
 
-    let args = build_tunnel_argv(tunnel, host, resolved, secret.is_some())?;
+    let args = build_tunnel_argv(tunnel, host, resolved, secret.is_some() || !hops.is_empty())?;
     let mut cmd = Command::new(&args[0]);
     cmd.args(&args[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    let staged = stage_tunnel_askpass(&mut cmd, secret)?;
+    let staged = stage_tunnel_askpass(&mut cmd, secret, hops)?;
     if staged.is_some() {
         cmd.env(askpass::READ_ONCE_ENV, "1");
     }
@@ -406,6 +409,7 @@ mod tests {
             &host,
             &ResolvedConnection::from_stored(&host),
             Some(&secret),
+            &[],
             data.path(),
         )
         .unwrap();

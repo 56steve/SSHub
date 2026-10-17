@@ -215,9 +215,19 @@ fn cmd_connect(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
 
     let mut askpass_guard = None;
     let mut extra_env: Vec<(String, String)> = Vec::new();
-    if let Some(secret) = pending_secret.as_ref() {
+    // The jump hosts' own stored passwords, so a hop that asks is answered with
+    // its own, never with the destination's.
+    let hops = crate::app::hop_secrets(
+        &ctx.store,
+        &ctx.hosts,
+        ctx.password_store(),
+        resolved.as_ref().and_then(|r| r.proxy_jump.as_deref()),
+    );
+    if pending_secret.is_some() || !hops.is_empty() {
         if let Ok(exe) = crate::session::askpass::helper_exe() {
-            if let Ok(guard) = AskpassSecret::new(secret.value()) {
+            if let Ok(guard) =
+                AskpassSecret::staged(pending_secret.as_ref().map(|s| s.value()), &hops)
+            {
                 extra_env = guard.env(&exe);
                 askpass_guard = Some(guard);
             }
