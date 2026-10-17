@@ -30,6 +30,21 @@ const _: () = assert!(
 );
 /// Smallest SSH log panel worth drawing: borders plus two rows.
 const MIN_LOG_H: u16 = 4;
+/// Fewest rows the last panel of a stack (Latency / Ping) needs to be drawn.
+const MIN_LAST_H: u16 = 3;
+
+/// Height of a stack's middle panel: its natural `h`, shrunk so the last panel
+/// keeps [`MIN_LAST_H`] rows when the column is short. Falls back to the
+/// natural height (the last panel then drops out) once shrinking would leave
+/// the middle panel without a drawable box of its own.
+pub fn middle_panel_h(h: u16, remaining: u16) -> u16 {
+    let fit = remaining.saturating_sub(PANEL_GAP + MIN_LAST_H);
+    if fit >= MIN_LAST_H {
+        h.min(fit)
+    } else {
+        h.min(remaining)
+    }
+}
 
 /// All screen regions for the dashboard view.
 #[derive(Debug, Clone, Copy)]

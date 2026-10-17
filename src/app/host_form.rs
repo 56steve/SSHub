@@ -284,6 +284,15 @@ impl App {
             return Ok(());
         }
 
+        let user = form.username.trim();
+        if let Some(problem) =
+            crate::ssh::destination_problem(address, (!user.is_empty()).then_some(user))
+        {
+            self.host_notice = Some(problem);
+            self.host_form = Some(form);
+            return Ok(());
+        }
+
         // An emptied port restores inheritance (None): the effective value
         // comes from the group chain, else the global default (22).
         let port: Option<u16> = if form.port.trim().is_empty() {
@@ -605,6 +614,39 @@ impl App {
             if changed == Some(true) {
                 form.dirty = true;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::tests::{host, test_app};
+
+    #[test]
+    fn save_refuses_spaces_and_shell_characters_in_address_and_username() {
+        for (addr, user) in [
+            ("a b.example", ""),
+            ("h;id", ""),
+            ("h$(id)", ""),
+            ("h.example", "ro ot"),
+            ("h.example", "u|x"),
+        ] {
+            let mut app = test_app(vec![("aa", host("aa"))]);
+            app.enter_host_form(None, false).unwrap();
+            let f = app.host_form.as_mut().unwrap();
+            f.name = "new".into();
+            f.address = addr.into();
+            f.username = user.into();
+            app.save_host_form().unwrap();
+            assert!(app.host_form.is_some(), "{addr:?}/{user:?} must stay open");
+            assert!(
+                app.host_notice
+                    .as_deref()
+                    .unwrap()
+                    .contains("not a valid host name"),
+                "{addr:?}/{user:?}: {:?}",
+                app.host_notice
+            );
         }
     }
 }

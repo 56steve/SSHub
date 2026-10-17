@@ -131,6 +131,10 @@ pub fn splice_tunnel_ssh_options(args: &mut Vec<String>, has_stored_secret: bool
         "ServerAliveCountMax=3".to_string(),
         "-o".to_string(),
         "TCPKeepAlive=yes".to_string(),
+        "-o".to_string(),
+        // Without it a failed bind or a refused forward leaves ssh running with
+        // no forward while the tunnel reads "up", and nothing retries it.
+        "ExitOnForwardFailure=yes".to_string(),
     ];
     if has_stored_secret {
         opts.push("-o".to_string());
@@ -141,20 +145,43 @@ pub fn splice_tunnel_ssh_options(args: &mut Vec<String>, has_stored_secret: bool
     }
 }
 
+/// The staged-file guard and the env to give the ssh child.
+type StagedAskpass = (askpass::AskpassSecret, Vec<(String, String)>);
+
+/// Stage the tunnel's secrets and make ssh delete the file itself once it is
+/// connected. A tunnel lives for days; secrets are only ever asked during the
+/// connect, so nothing may stay on disk for its whole life (hop passwords that
+/// were never asked would). `LocalCommand` runs after authentication, hops
+/// included, even with `-N`. Returns the guard and the env for the ssh child.
 pub fn stage_tunnel_askpass(
-    cmd: &mut Command,
+    args: &mut Vec<String>,
     secret: Option<&PendingSecret>,
     hops: &[HopSecret],
-) -> Result<Option<askpass::AskpassSecret>> {
+) -> Result<Option<StagedAskpass>> {
     if secret.is_none() && hops.is_empty() {
         return Ok(None);
     }
     let exe = askpass::helper_exe()?;
-    let guard = askpass::AskpassSecret::staged(secret.map(PendingSecret::value), hops)?;
-    for (k, v) in guard.env(&exe) {
-        cmd.env(k, v);
+    let guard = askpass::AskpassSecret::staged(secret, hops)?;
+    let env = guard.env(&exe);
+    // Quoted for sh; `%` doubled because ssh expands tokens in LocalCommand.
+    let path = guard
+        .path()
+        .to_string_lossy()
+        .replace('\'', "'\\''")
+        .replace('%', "%%");
+    if args.first().map(String::as_str) == Some("ssh") {
+        args.splice(
+            1..1,
+            [
+                "-o".to_string(),
+                "PermitLocalCommand=yes".to_string(),
+                "-o".to_string(),
+                format!("LocalCommand=rm -f -- '{path}'"),
+            ],
+        );
     }
-    Ok(Some(guard))
+    Ok(Some((guard, env)))
 }
 
 /// Ensure `data_dir/tunnels/` exists with owner-only permissions.
@@ -175,6 +202,9 @@ pub fn read_tunnel_pid(path: &Path) -> Result<Option<u32>> {
     }
     let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let pid: u32 = raw
+        .lines()
+        .next()
+        .unwrap_or_default()
         .trim()
         .parse()
         .with_context(|| format!("invalid pid in {}", path.display()))?;
@@ -196,7 +226,12 @@ pub fn write_tunnel_pid(path: &Path, pid: u32) -> Result<()> {
     let mut f = options
         .open(path)
         .with_context(|| format!("create {}", path.display()))?;
-    write!(f, "{pid}")?;
+    // The start time rides on the second line so a recycled pid can be told
+    // from the process that was started (`tunnel_pid_alive`).
+    match process_start(pid) {
+        Some(start) => write!(f, "{pid}\n{start}")?,
+        None => write!(f, "{pid}")?,
+    }
     secure_fs::restrict_file(path);
     Ok(())
 }
@@ -248,6 +283,74 @@ pub fn kill_pid(pid: u32) -> Result<()> {
     }
 }
 
+/// The process's start time as an opaque string, to tell it from a later
+/// process that was given the same pid. Linux: field 22 of `/proc/<pid>/stat`
+/// (clock ticks since boot); elsewhere `ps -o lstart=`. `None` when the
+/// process is gone or the platform cannot tell.
+#[cfg(unix)]
+fn process_start(pid: u32) -> Option<String> {
+    if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // `pid (comm) state ...`: comm may hold spaces and parens, so count
+        // from the last `)`. Field 3 (state) is index 0 there, field 22 is 19.
+        let rest = stat.rsplit_once(')')?.1;
+        return rest.split_whitespace().nth(19).map(String::from);
+    }
+    let out = Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let start = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !start.is_empty()).then_some(start)
+}
+
+#[cfg(not(unix))]
+fn process_start(_pid: u32) -> Option<String> {
+    None
+}
+
+/// Whether `pid` is an `ssh` process (a tunnel is `ssh -N ...`).
+#[cfg(unix)]
+fn process_is_ssh(pid: u32) -> bool {
+    let comm = match fs::read(format!("/proc/{pid}/cmdline")) {
+        Ok(raw) => {
+            String::from_utf8_lossy(raw.split(|b| *b == 0).next().unwrap_or_default()).into_owned()
+        }
+        Err(_) => Command::new("ps")
+            .args(["-o", "comm=", "-p", &pid.to_string()])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default(),
+    };
+    Path::new(&comm).file_name().is_some_and(|n| n == "ssh")
+}
+
+#[cfg(not(unix))]
+fn process_is_ssh(_pid: u32) -> bool {
+    false
+}
+
+/// The pid file's second line: the start time recorded with the pid.
+fn recorded_start(path: &Path) -> Option<String> {
+    let raw = fs::read_to_string(path).ok()?;
+    raw.lines().nth(1).map(|l| l.trim().to_string())
+}
+
+/// The recorded `pid` is still the tunnel's ssh: alive AND the same process
+/// (its start time matches the one written beside the pid), not a stranger
+/// that was handed a recycled pid — which `kill(pid, 0)` cannot tell apart and
+/// a stop would then SIGTERM. A pid file without a start time (written before
+/// they were recorded, or by a platform that cannot read one) falls back to
+/// "is an `ssh` process".
+pub fn tunnel_pid_alive(path: &Path, pid: u32) -> bool {
+    if !is_pid_alive(pid) {
+        return false;
+    }
+    match recorded_start(path) {
+        Some(recorded) => process_start(pid).is_some_and(|now| now == recorded),
+        None => process_is_ssh(pid),
+    }
+}
+
 /// True when `127.0.0.1:port` is already bound (another listener).
 pub fn is_local_port_bound(port: u16) -> bool {
     TcpListener::bind(("127.0.0.1", port)).is_err()
@@ -256,7 +359,7 @@ pub fn is_local_port_bound(port: u16) -> bool {
 pub fn tunnel_runtime_state(tunnel_id: i64, local_port: u16, pid_dir: &Path) -> TunnelRuntimeState {
     let pid_path = tunnel_pid_path(pid_dir, tunnel_id);
     match read_tunnel_pid(&pid_path) {
-        Ok(Some(pid)) if is_pid_alive(pid) => return TunnelRuntimeState::Running,
+        Ok(Some(pid)) if tunnel_pid_alive(&pid_path, pid) => return TunnelRuntimeState::Running,
         Ok(Some(_)) => {
             let _ = remove_tunnel_pid(&pid_path);
         }
@@ -275,8 +378,8 @@ pub fn tunnel_runtime_state(tunnel_id: i64, local_port: u16, pid_dir: &Path) -> 
 /// - The stale-PID and port-bound checks are best-effort with no advisory
 ///   lock, so two near-simultaneous `tunnel start <id>` invocations can race
 ///   between the checks and the PID write and leak one ssh child.
-/// - PID liveness is a bare `kill(pid, 0)` with no start-time/identity check,
-///   so a recycled PID could read as alive (see also `stop_detached_tunnel`).
+/// - A pid file written before start times were recorded is trusted only while
+///   its pid is an `ssh` process (see [`tunnel_pid_alive`]).
 pub fn spawn_detached_tunnel(
     tunnel: &Tunnel,
     host: &ManagedHost,
@@ -289,7 +392,7 @@ pub fn spawn_detached_tunnel(
     let pid_path = tunnel_pid_path(&pid_dir, tunnel.id);
 
     if let Some(old_pid) = read_tunnel_pid(&pid_path)? {
-        if is_pid_alive(old_pid) {
+        if tunnel_pid_alive(&pid_path, old_pid) {
             anyhow::bail!("tunnel {} already running (pid {old_pid})", tunnel.id);
         }
         remove_tunnel_pid(&pid_path)?;
@@ -299,17 +402,18 @@ pub fn spawn_detached_tunnel(
         anyhow::bail!("local port {} already in use", tunnel.local_port);
     }
 
-    let args = build_tunnel_argv(tunnel, host, resolved, secret.is_some() || !hops.is_empty())?;
+    let mut args = build_tunnel_argv(tunnel, host, resolved, secret.is_some() || !hops.is_empty())?;
+    let staged = stage_tunnel_askpass(&mut args, secret, hops)?;
     let mut cmd = Command::new(&args[0]);
     cmd.args(&args[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-
-    let staged = stage_tunnel_askpass(&mut cmd, secret, hops)?;
-    if staged.is_some() {
+    if let Some((_, env)) = &staged {
+        cmd.envs(env.iter().map(|(k, v)| (k, v)));
         cmd.env(askpass::READ_ONCE_ENV, "1");
     }
+    let staged = staged.map(|(guard, _)| guard);
     let child = cmd.spawn().context("spawn tunnel ssh")?;
     let pid = child.id();
     write_tunnel_pid(&pid_path, pid)?;
@@ -329,17 +433,15 @@ pub fn spawn_detached_tunnel(
 
 /// Stop a CLI-detached tunnel via its PID file. Returns true when a live PID was signalled.
 ///
-/// Known limitation: the PID file holds only a bare integer with no start-time
-/// or command identity, so in the rare case the OS recycled the recorded PID to
-/// an unrelated process this would signal that process. A future hardening would
-/// store and verify the process start time (Linux `/proc/<pid>/stat`).
+/// The recorded pid is only signalled when it is still the process that was
+/// started (see [`tunnel_pid_alive`]): a recycled pid belongs to a stranger.
 pub fn stop_detached_tunnel(data_dir: &Path, tunnel_id: i64) -> Result<bool> {
     let pid_dir = ensure_tunnel_pid_dir(data_dir)?;
     let pid_path = tunnel_pid_path(&pid_dir, tunnel_id);
     let Some(pid) = read_tunnel_pid(&pid_path)? else {
         return Ok(false);
     };
-    let was_live = is_pid_alive(pid);
+    let was_live = tunnel_pid_alive(&pid_path, pid);
     if was_live {
         kill_pid(pid)?;
     }
@@ -367,6 +469,17 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|w| w == ["-o", "StrictHostKeyChecking=accept-new"]));
+    }
+
+    #[test]
+    fn a_tunnel_whose_forward_fails_exits_instead_of_reporting_up() {
+        for secret in [false, true] {
+            let mut args = vec!["ssh".into(), "-N".into(), "host".into()];
+            splice_tunnel_ssh_options(&mut args, secret);
+            assert!(args
+                .windows(2)
+                .any(|w| w == ["-o", "ExitOnForwardFailure=yes"]));
+        }
     }
 
     #[test]
@@ -416,11 +529,85 @@ mod tests {
 
         let pid_path = tunnel_pid_path(&ensure_tunnel_pid_dir(data.path()).unwrap(), 7);
         let staged = PathBuf::from(fs::read_to_string(staged_secret_record(&pid_path)).unwrap());
-        assert_eq!(fs::read_to_string(&staged).unwrap(), "s3cr3t\n");
+        assert_eq!(fs::read_to_string(&staged).unwrap(), "s3cr3t\nC\tp\n");
 
         stop_detached_tunnel(data.path(), 7).unwrap();
         assert!(!staged.exists(), "stop must remove the staged secret");
         assert!(!staged_secret_record(&pid_path).exists());
+    }
+
+    #[test]
+    fn a_staged_tunnel_deletes_its_secrets_once_ssh_is_connected() {
+        // LocalCommand runs after authentication: the staged file must not
+        // live as long as the tunnel. ssh hands the value to `sh -c` after
+        // turning `%%` into `%`, which this does by hand.
+        let mut args: Vec<String> = ["ssh", "-N", "-L", "1:h:2", "target"]
+            .map(String::from)
+            .into();
+        let secret = PendingSecret::Password("s3cr3t".into());
+        let (guard, env) = stage_tunnel_askpass(&mut args, Some(&secret), &[])
+            .unwrap()
+            .unwrap();
+        assert!(env.iter().any(|(k, _)| k == "SSH_ASKPASS"));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("target"),
+            "options precede the host"
+        );
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["-o", "PermitLocalCommand=yes"]));
+        let command = args
+            .iter()
+            .find_map(|a| a.strip_prefix("LocalCommand="))
+            .unwrap()
+            .replace("%%", "%");
+        assert!(guard.path().exists());
+        let status = Command::new("sh").args(["-c", &command]).status().unwrap();
+        assert!(status.success());
+        assert!(!guard.path().exists(), "{command}");
+    }
+
+    #[test]
+    fn a_tunnel_stages_hop_references_never_their_secrets() {
+        use crate::credentials::{SecretRef, StoreLocator};
+        use crate::session::auth_prompt::PromptClass;
+        let dir = tempfile::tempdir().unwrap();
+        let store = StoreLocator::File {
+            path: dir.path().join("credentials.json"),
+            prefix: "profile:3:".into(),
+        };
+        store.open().set("host:5", "hop-s3cr3t").unwrap();
+        let hop = HopSecret {
+            user: Some("ops".into()),
+            host: "10.0.4.11".into(),
+            via: "lb-1".into(),
+            key_path: None,
+            class: PromptClass::Password,
+            refs: vec![SecretRef::Key("host:5".into())],
+            store: Some(store),
+        };
+        let mut args: Vec<String> = ["ssh", "-N", "-L", "1:h:2", "target"]
+            .map(String::from)
+            .into();
+        let (guard, _env) = stage_tunnel_askpass(&mut args, None, &[hop])
+            .unwrap()
+            .unwrap();
+        let text = fs::read_to_string(guard.path()).unwrap();
+        assert!(!text.contains("hop-s3cr3t"), "{text}");
+        assert!(text.contains("host:5"), "{text}");
+        // Even with nothing secret staged, ssh's LocalCommand removes the file.
+        let command = args
+            .iter()
+            .find_map(|a| a.strip_prefix("LocalCommand="))
+            .unwrap()
+            .replace("%%", "%");
+        assert!(Command::new("sh")
+            .args(["-c", &command])
+            .status()
+            .unwrap()
+            .success());
+        assert!(!guard.path().exists());
     }
 
     #[test]
@@ -432,6 +619,51 @@ mod tests {
         assert_eq!(read_tunnel_pid(&path).unwrap(), Some(12345));
         remove_tunnel_pid(&path).unwrap();
         assert_eq!(read_tunnel_pid(&path).unwrap(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_recycled_pid_is_neither_alive_nor_killed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = ensure_tunnel_pid_dir(tmp.path()).unwrap();
+        let path = tunnel_pid_path(&dir, 9);
+        // An unrelated process that happens to own the recorded pid.
+        let mut other = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = other.id();
+
+        // Recorded together with its start time: the same process is alive.
+        write_tunnel_pid(&path, pid).unwrap();
+        assert!(tunnel_pid_alive(&path, pid));
+        remove_tunnel_pid(&path).unwrap();
+
+        // The pid was recycled: same number, different start time.
+        fs::write(&path, format!("{pid}\nnot-the-start-time")).unwrap();
+        assert_eq!(read_tunnel_pid(&path).unwrap(), Some(pid));
+        assert!(!tunnel_pid_alive(&path, pid));
+        let free = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        assert!(
+            matches!(
+                tunnel_runtime_state(9, free, &dir),
+                TunnelRuntimeState::Stopped
+            ),
+            "a recycled pid must not read as a running tunnel"
+        );
+        fs::write(&path, format!("{pid}\nnot-the-start-time")).unwrap();
+        assert!(!stop_detached_tunnel(tmp.path(), 9).unwrap());
+        assert!(
+            other.try_wait().unwrap().is_none(),
+            "the stranger was signalled"
+        );
+
+        // A legacy bare-pid file has no start time: only an ssh process counts.
+        fs::write(&path, pid.to_string()).unwrap();
+        assert!(!tunnel_pid_alive(&path, pid));
+        let _ = other.kill();
+        let _ = other.wait();
     }
     #[test]
     fn a_tunnel_through_an_invalid_stored_jump_is_refused_not_run_direct() {
@@ -539,6 +771,8 @@ mod tests {
             "ServerAliveCountMax=3",
             "-o",
             "TCPKeepAlive=yes",
+            "-o",
+            "ExitOnForwardFailure=yes",
             "-N",
             "-L",
             "8080:localhost:80",

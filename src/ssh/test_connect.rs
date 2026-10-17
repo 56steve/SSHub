@@ -108,6 +108,12 @@ pub fn classify_failure(exit: i32, stderr: &str) -> (String, String) {
             "host key changed".into(),
             at.unwrap_or_else(|| last.clone()),
         );
+    } else if lower.contains("permission denied (") {
+        // The server's verdict: `Permission denied (publickey,password).`
+        "auth failed"
+    } else if lower.contains("load key") && lower.contains("permission denied") {
+        // `Load key "k": Permission denied` is a local file problem, not a login.
+        "key unreadable"
     } else if lower.contains("permission denied") {
         "auth failed"
     } else if lower.contains("host key verification failed") {
@@ -127,6 +133,23 @@ pub fn classify_failure(exit: i32, stderr: &str) -> (String, String) {
         return (format!("failed (exit {exit})"), last);
     };
     (reason.into(), last)
+}
+
+/// The server's `Permission denied (publickey,password,…)` list names a method
+/// that needs something typed (`password`, `keyboard-interactive`). Under
+/// `BatchMode=yes` ssh never tries those, so the denial is not a wrong
+/// credential but a login this test cannot perform.
+fn offers_interactive_auth(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.lines().any(|l| {
+        l.split_once("permission denied (")
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .is_some_and(|(methods, _)| {
+                methods
+                    .split(',')
+                    .any(|m| matches!(m.trim(), "password" | "keyboard-interactive"))
+            })
+    })
 }
 
 /// The runner test connect uses: key/agent only unless the step has a stored
@@ -205,14 +228,25 @@ pub fn spawn_test(
             let started = Instant::now();
             let secret = step.secret.as_ref().and_then(|fetch| fetch());
             let hops = step.hops.as_ref().map(|fetch| fetch()).unwrap_or_default();
+            // Same condition as the runner's `BatchMode=no`: without a secret
+            // nothing here can answer a prompt.
+            let batch = secret.is_none() && hops.is_empty();
             let result = runner.run_with_hops(&step.argv, "true", secret.as_ref(), &hops, &cancel);
             drop((secret, hops));
             let state = match result {
-                Ok((0, _, _)) => StepState::Ok {
+                // 255 is ssh's own failure. Any other non-zero status is the
+                // remote command's: the login worked, but a `nologin` /
+                // `ForceCommand` / restricted bastion did not run `true`, and
+                // such a host still forwards for the next hop.
+                Ok((exit, _, _)) if exit == 0 || (0..255).contains(&exit) => StepState::Ok {
                     ms: started.elapsed().as_millis() as u64,
                 },
                 Ok((exit, _, stderr)) => {
-                    let (reason, detail) = classify_failure(exit, &stderr);
+                    let (mut reason, mut detail) = classify_failure(exit, &stderr);
+                    if batch && reason == "auth failed" && offers_interactive_auth(&stderr) {
+                        reason = "needs interactive auth".into();
+                        detail = "asks for a password or code; a test cannot type one (save a secret on it, or use a key)".into();
+                    }
                     StepState::Failed { reason, detail }
                 }
                 Err(e) if e == "cancelled" => StepState::Cancelled,
@@ -437,6 +471,104 @@ mod tests {
             StepState::Failed { reason, .. } => assert_eq!(reason, "timeout"),
             s => panic!("{s:?}"),
         }
+    }
+
+    #[test]
+    fn remote_command_exit_is_a_working_hop_and_unreadable_key_is_not_auth_failed() {
+        struct Fake;
+        impl CommandRunner for Fake {
+            fn run(
+                &self,
+                _: &[String],
+                _: &str,
+                _: Option<&crate::session::PendingSecret>,
+                _: &AtomicBool,
+            ) -> Result<(i32, String, String), String> {
+                // `nologin` / `ForceCommand` bastion: ssh itself succeeded.
+                Ok((1, String::new(), "This account is not available.".into()))
+            }
+        }
+        let step = TestStep {
+            label: "h".into(),
+            host: None,
+            argv: vec!["ssh".into()],
+            secret: None,
+            hops: None,
+            cmd: String::new(),
+            shown: String::new(),
+            skip: None,
+        };
+        let rx = spawn_test(vec![step], Arc::new(Fake), Arc::new(AtomicBool::new(false)));
+        let mut last = StepState::Pending;
+        while let Ok(TestEvent::Step { state, .. }) = rx.recv() {
+            last = state;
+        }
+        assert!(matches!(last, StepState::Ok { .. }), "{last:?}");
+
+        assert_eq!(
+            classify_failure(255, "Load key \"/k\": Permission denied").0,
+            "key unreadable"
+        );
+        assert_eq!(
+            classify_failure(
+                255,
+                "Load key \"/k\": Permission denied\nu@h: Permission denied (publickey)."
+            )
+            .0,
+            "auth failed"
+        );
+    }
+
+    #[test]
+    fn a_hop_that_wants_a_typed_secret_is_not_reported_as_a_wrong_credential() {
+        struct Fake(&'static str);
+        impl CommandRunner for Fake {
+            fn run(
+                &self,
+                _: &[String],
+                _: &str,
+                _: Option<&crate::session::PendingSecret>,
+                _: &AtomicBool,
+            ) -> Result<(i32, String, String), String> {
+                Ok((255, String::new(), self.0.into()))
+            }
+        }
+        let reason_for = |stderr: &'static str, secret: bool| {
+            let step = TestStep {
+                label: "h".into(),
+                host: None,
+                argv: vec!["ssh".into()],
+                secret: secret.then(|| {
+                    Arc::new(|| Some(crate::session::PendingSecret::Password("pw".into()))) as _
+                }),
+                hops: None,
+                cmd: String::new(),
+                shown: String::new(),
+                skip: None,
+            };
+            let rx = spawn_test(
+                vec![step],
+                Arc::new(Fake(stderr)),
+                Arc::new(AtomicBool::new(false)),
+            );
+            let mut last = StepState::Pending;
+            while let Ok(TestEvent::Step { state, .. }) = rx.recv() {
+                last = state;
+            }
+            match last {
+                StepState::Failed { reason, .. } => reason,
+                s => panic!("{s:?}"),
+            }
+        };
+        let pw = "u@h: Permission denied (publickey,password,keyboard-interactive).";
+        assert_eq!(reason_for(pw, false), "needs interactive auth");
+        // With a stored secret the prompt was answered: a wrong one is a failure.
+        assert_eq!(reason_for(pw, true), "auth failed");
+        // Key-only server: the key really was refused.
+        assert_eq!(
+            reason_for("u@h: Permission denied (publickey).", false),
+            "auth failed"
+        );
     }
 
     #[test]

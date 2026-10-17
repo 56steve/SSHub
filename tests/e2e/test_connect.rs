@@ -33,11 +33,7 @@ fn have_ssh() -> bool {
 }
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    super::support::free_port()
 }
 
 fn key(c: char) -> KeyEvent {

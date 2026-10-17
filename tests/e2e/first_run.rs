@@ -28,15 +28,14 @@ fn first_run_empty_shows_help() {
     // Ensure launcher.db does NOT exist yet
     assert!(!data_dir.join("launcher.db").exists());
 
-    // Use env vars to point App::new() at the temp directory
-    std::env::set_var("SSH_LAUNCHER_DATA_DIR", &data_dir);
-    std::env::set_var("SSH_LAUNCHER_SSH_CONFIG", "/dev/null");
+    // Use env vars to point App::new() at the temp directory; the guard
+    // restores them on drop and serializes against other env-mutating tests.
+    let mut env = crate::support::EnvGuard::new();
+    env.set("SSH_LAUNCHER_DATA_DIR", &data_dir)
+        .set("SSH_LAUNCHER_SSH_CONFIG", "/dev/null");
 
     let app = App::new(AppConfig::default()).unwrap();
-
-    // Clean up env vars
-    std::env::remove_var("SSH_LAUNCHER_DATA_DIR");
-    std::env::remove_var("SSH_LAUNCHER_SSH_CONFIG");
+    drop(env);
 
     assert_eq!(
         app.mode,

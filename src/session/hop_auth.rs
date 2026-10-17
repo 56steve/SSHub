@@ -12,11 +12,19 @@
 //! the saved host's address) or `Enter passphrase for key '<path>':`. A prompt
 //! that matches no hop, or more than one, is answered by nobody: it goes to the
 //! user, as before.
+//!
+//! The prompt text is not enough: a hostile hop can make ssh print any
+//! `user@host's password:` it likes. So the asking ssh is bound to the hop by
+//! its command line too: ssh runs a hop as `ssh [-l user] … -W [target]:port
+//! <hop>`, and `<hop>` (the last argument, as `-J` named it) must be the hop
+//! whose credential would answer. A prompt from one hop never gets another's
+//! secret.
 
 use std::sync::Arc;
 
 use super::auth_prompt::PromptClass;
 use super::PendingSecret;
+use crate::credentials::{SecretRef, StoreLocator};
 
 /// Fetches a hop's stored secret of the asked class, when the hop asks.
 pub type Fetch = Arc<dyn Fn(PromptClass) -> Option<PendingSecret> + Send + Sync>;
@@ -31,6 +39,9 @@ pub struct HopCred {
     pub user: Option<String>,
     /// The address ssh prints in the prompt.
     pub host: String,
+    /// The host as `-J` names it (a saved name or an address): the last
+    /// argument of the hop's own ssh process.
+    pub via: String,
     /// Where a remembered password for this hop is saved.
     pub host_id: Option<i64>,
     /// Where a remembered key passphrase is saved.
@@ -41,10 +52,12 @@ pub struct HopCred {
 }
 
 impl HopCred {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         user: Option<String>,
         host: String,
+        via: String,
         host_id: Option<i64>,
         identity_id: Option<i64>,
         key_path: Option<String>,
@@ -54,6 +67,7 @@ impl HopCred {
             name,
             user,
             host,
+            via,
             host_id,
             identity_id,
             key_path,
@@ -67,44 +81,32 @@ impl HopCred {
     }
 }
 
-/// A hop's secret already fetched, for ssh children that read it from a staged
-/// file (tunnels, exec, broadcast, key push).
+/// Where a hop's secret is kept, for ssh children that read it from a staged
+/// file (tunnels, exec, broadcast, key push). Holds a reference, never the
+/// secret: the helper reads the credential store when this hop actually asks.
 #[derive(Clone)]
 pub struct HopSecret {
     pub user: Option<String>,
     pub host: String,
+    /// See [`HopCred::via`].
+    pub via: String,
     pub key_path: Option<String>,
     pub class: PromptClass,
-    pub value: String,
+    /// Store entries to try, in order; the first that holds a secret wins.
+    pub refs: Vec<SecretRef>,
+    /// The store `refs` live in; `None` when no other process can open it, in
+    /// which case this hop is not staged and its prompt is left to the user.
+    pub store: Option<StoreLocator>,
 }
 
 impl std::fmt::Debug for HopSecret {
-    /// The value never reaches a log or a panic message.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HopSecret")
             .field("user", &self.user)
             .field("host", &self.host)
             .field("class", &self.class)
+            .field("refs", &self.refs)
             .finish_non_exhaustive()
-    }
-}
-
-impl HopSecret {
-    /// Every secret `cred` holds, one per prompt class it can answer.
-    pub fn of(cred: &HopCred) -> Vec<HopSecret> {
-        [PromptClass::Password, PromptClass::Passphrase]
-            .into_iter()
-            .filter_map(|class| {
-                let secret = cred.secret(class)?;
-                Some(HopSecret {
-                    user: cred.user.clone(),
-                    host: cred.host.clone(),
-                    key_path: cred.key_path.clone(),
-                    class,
-                    value: secret.value().to_string(),
-                })
-            })
-            .collect()
     }
 }
 
@@ -117,24 +119,23 @@ pub enum Asker<'a> {
     Key(&'a str),
 }
 
-/// Read the asker out of an ssh prompt.
+/// Read the asker out of an ssh prompt. Only ssh's own two prompts count, and
+/// only whole: `user@host's password: ` and `Enter passphrase for key '<path>': `
+/// with nothing before them. A hostile jump host can make ssh show any
+/// keyboard-interactive text, but ssh puts `(user@host) ` in front of it.
 pub fn asker(prompt: &str) -> Option<Asker<'_>> {
-    let lower = prompt.to_ascii_lowercase();
-    if let Some(at) = lower.find("'s password") {
-        // `Warning ... \nroot@10.0.4.11's password: `: the last word before it.
-        let head = &prompt[..at];
-        let word = head.split_whitespace().next_back()?;
-        let word = word.trim_start_matches('(');
-        let (user, host) = word.rsplit_once('@')?;
+    let prompt = prompt.trim_end();
+    if let Some(login) = prompt.strip_suffix("'s password:") {
+        if login.contains(char::is_whitespace) {
+            return None;
+        }
+        let (user, host) = login.rsplit_once('@')?;
         return (!user.is_empty() && !host.is_empty()).then_some(Asker::Login { user, host });
     }
-    if let Some(at) = lower.find("passphrase for key '") {
-        let rest = &prompt[at + "passphrase for key '".len()..];
-        let end = rest.rfind("':")?;
-        let path = &rest[..end];
-        return (!path.is_empty()).then_some(Asker::Key(path));
-    }
-    None
+    let path = prompt
+        .strip_prefix("Enter passphrase for key '")?
+        .strip_suffix("':")?;
+    (!path.is_empty()).then_some(Asker::Key(path))
 }
 
 /// The one hop `prompt` names, `None` when it names none or several.
@@ -147,8 +148,19 @@ pub fn find<'a>(hops: &'a [HopCred], prompt: &str) -> Option<&'a HopCred> {
     )
 }
 
-/// The one staged secret whose hop and class `prompt` names.
-pub fn find_secret<'a>(hops: &'a [HopSecret], prompt: &str) -> Option<&'a HopSecret> {
+/// [`find`], and the hop is the one the asking ssh `pid` is running for. A
+/// prompt naming a hop that this process is not connecting to is a lie.
+pub fn find_for<'a>(hops: &'a [HopCred], prompt: &str, pid: Option<u32>) -> Option<&'a HopCred> {
+    find(hops, prompt).filter(|h| runs_for(pid, &h.via))
+}
+
+/// The one staged secret whose hop and class `prompt` names, asked by the ssh
+/// `pid` that is connecting to that hop.
+pub fn find_secret<'a>(
+    hops: &'a [HopSecret],
+    prompt: &str,
+    pid: Option<u32>,
+) -> Option<&'a HopSecret> {
     let class = PromptClass::classify(prompt);
     let who = asker(prompt)?;
     let same_class: Vec<&HopSecret> = hops.iter().filter(|h| h.class == class).collect();
@@ -159,6 +171,50 @@ pub fn find_secret<'a>(hops: &'a [HopSecret], prompt: &str) -> Option<&'a HopSec
         |h| h.key_path.as_deref(),
     )
     .copied()
+    .filter(|h| runs_for(pid, &h.via))
+}
+
+/// Whether process `pid` is an ssh connecting to `via`. Unknown pid or an
+/// unreadable process: no.
+fn runs_for(pid: Option<u32>, via: &str) -> bool {
+    pid.and_then(target_of_process)
+        .is_some_and(|target| target.eq_ignore_ascii_case(via))
+}
+
+/// Tests ask on behalf of made-up pids: let them say what each one runs for.
+#[cfg(test)]
+static PRETEND: std::sync::Mutex<Vec<(u32, String)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn pretend_target(pid: u32, target: &str) {
+    PRETEND.lock().unwrap().push((pid, target.to_owned()));
+}
+
+/// The host a running ssh connects to: its last command-line argument.
+fn target_of_process(pid: u32) -> Option<String> {
+    #[cfg(test)]
+    if let Some((_, target)) = PRETEND.lock().unwrap().iter().find(|(p, _)| *p == pid) {
+        return Some(target.clone());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let last = raw.split(|b| *b == 0).rfind(|arg| !arg.is_empty())?;
+        Some(String::from_utf8_lossy(last).into_owned())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // A host or user name has no whitespace (validated on the way in), so
+        // `ps`'s space-joined args still end in the host.
+        let out = std::process::Command::new("ps")
+            .args(["-ww", "-o", "args=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next_back()
+            .map(str::to_owned)
+    }
 }
 
 fn unique<'a, T>(
@@ -197,6 +253,7 @@ mod tests {
             name.into(),
             user.map(String::from),
             host.into(),
+            host.into(),
             Some(1),
             None,
             None,
@@ -215,13 +272,26 @@ mod tests {
                 host: "10.0.4.11"
             })
         );
+        // Anything around the prompt makes it not ssh's own: a banner line in
+        // front, or the `(user@host) ` prefix every keyboard-interactive
+        // prompt carries (a server picks that text, so it can name any hop).
         assert_eq!(
             asker("Warning: x\r\njohn@corp.com@10.0.4.12's password: "),
+            None
+        );
+        assert_eq!(asker("(ops@bastion) ops@10.0.4.12's password: "), None);
+        assert_eq!(
+            asker("john@corp.com@10.0.4.12's password: "),
             Some(Asker::Login {
                 user: "john@corp.com",
                 host: "10.0.4.12"
             })
         );
+        assert_eq!(
+            asker("(ops@bastion) Enter passphrase for key '/home/u/.ssh/id': "),
+            None
+        );
+        assert_eq!(asker("Please Enter passphrase for key '/k': "), None);
         assert_eq!(
             asker("Enter passphrase for key '/home/u/.ssh/id_ed25519': "),
             Some(Asker::Key("/home/u/.ssh/id_ed25519"))
@@ -263,10 +333,66 @@ mod tests {
         assert!(h.secret(PromptClass::Password).is_some());
         assert!(h.secret(PromptClass::Passphrase).is_none());
         assert!(h.secret(PromptClass::HostKey).is_none());
-        let staged = HopSecret::of(&h);
-        assert_eq!(staged.len(), 1);
-        assert!(find_secret(&staged, "ops@10.0.4.11's password: ").is_some());
-        assert!(find_secret(&staged, "ops@10.0.4.12's password: ").is_none());
-        assert!(find_secret(&staged, "Enter passphrase for key '/k': ").is_none());
+        let staged = [HopSecret {
+            user: h.user.clone(),
+            host: h.host.clone(),
+            via: h.via.clone(),
+            key_path: h.key_path.clone(),
+            class: PromptClass::Password,
+            refs: vec![SecretRef::Key("host:1".into())],
+            store: None,
+        }];
+        let me = Some(std::process::id());
+        let (_child, pid) = fake_hop_ssh("10.0.4.11");
+        assert!(find_secret(&staged, "ops@10.0.4.11's password: ", Some(pid)).is_some());
+        assert!(find_secret(&staged, "ops@10.0.4.12's password: ", Some(pid)).is_none());
+        assert!(find_secret(&staged, "Enter passphrase for key '/k': ", Some(pid)).is_none());
+        // This test process is not connecting to the hop.
+        assert!(find_secret(&staged, "ops@10.0.4.11's password: ", me).is_none());
+        assert!(find_secret(&staged, "ops@10.0.4.11's password: ", None).is_none());
+    }
+
+    /// A process whose last argument is `host`, like a hop's `ssh … <hop>`.
+    fn fake_hop_ssh(host: &str) -> (ChildGuard, u32) {
+        let child = std::process::Command::new("sh")
+            .args(["-c", "sleep 30 & wait", "-W", host])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        // Between fork and exec the command line is still the test binary's.
+        for _ in 0..500 {
+            if target_of_process(pid).as_deref() == Some(host) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        (ChildGuard(child), pid)
+    }
+
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn a_hostile_hop_cannot_borrow_another_hops_secret() {
+        // Chain bastion -> db-gw. The bastion's ssh shows a prompt that names
+        // db-gw; the text is perfect, but the asking process is the bastion's.
+        let hops = [
+            hop("bastion", Some("ops"), "10.0.4.1"),
+            hop("db-gw", Some("ops"), "10.0.4.12"),
+        ];
+        let (_bastion, bastion_pid) = fake_hop_ssh("10.0.4.1");
+        let (_gw, gw_pid) = fake_hop_ssh("10.0.4.12");
+        let lie = "ops@10.0.4.12's password: ";
+        assert!(find_for(&hops, lie, Some(bastion_pid)).is_none());
+        assert_eq!(
+            find_for(&hops, lie, Some(gw_pid)).map(|h| h.name.as_str()),
+            Some("db-gw")
+        );
+        assert!(find_for(&hops, lie, None).is_none());
     }
 }

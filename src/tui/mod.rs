@@ -124,7 +124,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 /// what it blitted are one animation frame or they are a bug.
 ///
 /// Every other animation still reads its own clock (`render_inner`, the popup
-/// and tab slides, the toasts, the scroll chases). That is sound, and
+/// slides, the toasts, the scroll chases). That is sound, and
 /// deliberately left alone: none of them recomputes geometry that a later paint
 /// pass depends on. This is not a deterministic whole-frame renderer, and the
 /// name does not claim to be one.
@@ -378,6 +378,9 @@ fn fill_reset_pair(buf: &mut Buffer, area: Rect, ground: PtyGround) {
 /// exposed. At the end of the slide they could disagree about whether it was
 /// still playing at all.
 struct FrameComposition {
+    /// The clock this frame was composed at; the dashboard tab slide reads it
+    /// too, so a slide's progress is one value for the whole frame.
+    now: std::time::Instant,
     /// How far the exit slide has carried its snapshot, if one is playing.
     exit_offset: Option<u16>,
     /// How far the enter slide still has to carry the session in, if one is
@@ -442,6 +445,7 @@ impl FrameComposition {
         }
 
         Self {
+            now,
             exit_offset,
             enter_offset,
             tab_slide_progress,
@@ -791,7 +795,7 @@ fn render_inner(frame: &mut Frame, app: &App, composition: &FrameComposition) {
     widgets::footer::render_hrule(frame, rule2, false, theme, PaintRole::TabsSeparator);
 
     // ── Tab body dispatch (with slide animation, #35) ─────────
-    let now = std::time::Instant::now();
+    let now = composition.now;
     let sliding = app
         .tab_switch
         .filter(|s| app.motion_enabled() && now.saturating_duration_since(s.at) < TAB_ANIM);
@@ -1193,6 +1197,23 @@ fn map_footer(app: &App) -> Vec<(String, &'static str)> {
             ("Esc".into(), "close"),
         ];
     }
+    if v.use_picker.is_some() {
+        return vec![
+            ("type".into(), "host"),
+            ("\u{21b5}".into(), "apply"),
+            ("Tab".into(), "replace/append"),
+            ("Esc".into(), "close"),
+        ];
+    }
+    if v.editing {
+        return vec![
+            ("type".into(), "filter"),
+            ("Tab".into(), "complete"),
+            ("\u{21b5}".into(), "keep"),
+            ("Esc".into(), "clear"),
+            help,
+        ];
+    }
     if let Some(run) = app.test_run.as_ref().filter(|r| {
         matches!(&r.owner, crate::app::test_connect::TestOwner::Map(s) if Some(*s) == v.selection())
     }) {
@@ -1208,24 +1229,6 @@ fn map_footer(app: &App) -> Vec<(String, &'static str)> {
                 help,
             ]
         };
-    }
-    if v.use_picker.is_some() {
-        return vec![
-            ("type".into(), "host"),
-            ("\u{21b5}".into(), "apply"),
-            ("Tab".into(), "replace/append"),
-            ("Esc".into(), "close"),
-        ];
-    }
-    if v.editing {
-        return vec![
-            ("type".into(), "filter"),
-            ("Tab".into(), "complete"),
-            ("\u{21b5}".into(), "keep"),
-            ("Esc".into(), "clear"),
-            (key(A::TagFilter), "tags"),
-            help,
-        ];
     }
     match &v.lens {
         Lens::Blast(_) => {
@@ -1245,10 +1248,7 @@ fn map_footer(app: &App) -> Vec<(String, &'static str)> {
             return vec![
                 (key(A::MapTunnelLens), "status lens"),
                 (key(A::MapToggleTunnel), "start/stop"),
-                (
-                    format!("{} ", key(A::TabTunnels)).trim().to_string(),
-                    "tunnels tab",
-                ),
+                (key(A::TabTunnels), "tunnels tab"),
                 ("\u{21b5}".into(), "connect"),
                 help,
             ]
@@ -1277,11 +1277,7 @@ fn map_footer(app: &App) -> Vec<(String, &'static str)> {
             help,
         ];
     }
-    if let Some(MapSel::Cycle(i)) = sel {
-        let first = v.map.hosts[v.map.cycles[i].path[0]].name.clone();
-        // The name is part of the label, so it cannot be a `&'static str`:
-        // the cycle footer is built from its own pieces below.
-        let _ = first;
+    if let Some(MapSel::Cycle(_)) = sel {
         return vec![
             ("\u{21b5}".into(), "edit chain"),
             (key(A::Edit), "edit loop"),
@@ -1293,11 +1289,11 @@ fn map_footer(app: &App) -> Vec<(String, &'static str)> {
     if v.clustered() && matches!(sel, Some(MapSel::Cluster(_) | MapSel::More(_))) {
         return vec![
             (key(A::MapFold), "open/close cluster"),
-            ("\u{2192}".into(), "into cluster"),
+            ("\u{2192}".into(), "first host"),
             (key(A::MapFoldAll), "fold all"),
             (key(A::Search), "reveal"),
             (key(A::MapBlast), "blast"),
-            ("\u{21b5}".into(), "connect"),
+            ("\u{21b5}".into(), "open/close"),
             help,
         ];
     }
@@ -1377,6 +1373,8 @@ fn hop_editor_footer(app: &App) -> Option<Vec<(String, &'static str)>> {
     if form.proxy_jump.trim().is_empty() {
         return Some(vec![
             ("a".into(), "add hop (overrides group)"),
+            ("r".into(), "raw hop"),
+            ("n".into(), "direct"),
             ("t".into(), "test inherited chain"),
             ("Tab".into(), "next field"),
             (save, "save"),
@@ -1386,6 +1384,9 @@ fn hop_editor_footer(app: &App) -> Option<Vec<(String, &'static str)>> {
     Some(vec![
         ("a".into(), "add hop"),
         ("d".into(), "remove"),
+        ("r".into(), "raw hop"),
+        ("n".into(), "direct"),
+        ("X".into(), "inherit"),
         ("t".into(), "test chain"),
         ("Tab".into(), "next field"),
         (save, "save"),
@@ -1451,7 +1452,7 @@ fn footer_keybinds(
         2 => vec![
             ("\u{2191}\u{2193}".into(), "select"),
             ("\u{21b5}".into(), "start/stop"),
-            ("/".into(), "search"),
+            ("/".into(), "filter"),
             ("a".into(), "new tunnel"),
             ("e".into(), "edit"),
             ("d".into(), "delete"),
@@ -1478,7 +1479,7 @@ fn footer_keybinds(
         3 => vec![
             ("\u{2191}\u{2193}\u{2190}\u{2192}".into(), "move"),
             ("[ ]".into(), "columns"),
-            ("/".into(), "search"),
+            ("/".into(), "filter"),
             ("a".into(), "add"),
             ("g".into(), "generate"),
             ("e".into(), "edit"),
@@ -1500,8 +1501,22 @@ fn footer_keybinds(
     };
     if matches!(app.active_tab, 2 | 3) && app.list_filter_editing {
         binds = vec![
-            ("\u{21b5}".into(), "keep filter"),
-            ("Esc".into(), "clear filter"),
+            (
+                screens::map::key_label(
+                    app.config
+                        .keybinds
+                        .primary(crate::config::KeyAction::Connect),
+                ),
+                "keep filter",
+            ),
+            (
+                screens::map::key_label(
+                    app.config
+                        .keybinds
+                        .primary(crate::config::KeyAction::Cancel),
+                ),
+                "clear filter",
+            ),
         ];
     }
     // The host form's hop editor has its own footers (D10, D11, D13).
@@ -1533,7 +1548,14 @@ fn footer_keybinds(
     // Broadcast mode (#3): running panel gets a cancel hint (and a zoom hint
     // once focused); an active wizard step gets next/cancel.
     if app.broadcast.is_some() {
-        binds.push(("x".into(), "cancel"));
+        binds.push((
+            screens::map::key_label(
+                app.config
+                    .keybinds
+                    .primary(crate::config::KeyAction::BroadcastCancel),
+            ),
+            "cancel",
+        ));
         if app.focused_panel == crate::app::PanelId::Broadcast {
             binds.push(("z".into(), "zoom"));
         }
@@ -2001,7 +2023,8 @@ fn render_tab_slide(
     let p = tween::ease_out(tween::progress(sw.at, TAB_ANIM, now));
     // Hosts <-> SFTP picker: the hosts pane widens in place, the rest slides off.
     let hosts_sftp = matches!((sw.from, sw.to), (0, 1) | (1, 0));
-    if hosts_sftp && app.sftp.is_none() && !app.panel_zoomed && app.zoom_anim.is_none() {
+    let zooming = app.zoom_anim.is_some_and(|a| !a.is_done(now));
+    if hosts_sftp && app.sftp.is_none() && !app.panel_zoomed && !zooming {
         render_hosts_sftp_morph(frame, areas, app, if sw.to == 1 { p } else { 1.0 - p });
         return;
     }
@@ -2047,8 +2070,19 @@ fn render_hosts_sftp_morph(
     t: f32,
 ) {
     let body = areas.body;
-    // The dashboard columns at rest, lifted into cells so they can travel.
+    // The dashboard columns at rest, lifted into cells so they can travel. The
+    // rest-layout hosts panel it draws advances the shared scroll state with
+    // the wrong body height; roll that back so the morphing panel below is
+    // the one advance this frame.
+    let scroll = (
+        app.host_scroll_pos.get(),
+        app.host_scroll_at.get(),
+        app.host_scroll_moving.get(),
+    );
     render_hosts_body(frame, areas, app);
+    app.host_scroll_pos.set(scroll.0);
+    app.host_scroll_at.set(scroll.1);
+    app.host_scroll_moving.set(scroll.2);
     let cols = Rect::new(
         areas.col_mid.x,
         body.y,
@@ -2115,7 +2149,12 @@ fn render_hosts_body(frame: &mut Frame, areas: &dashboard_layout::DashboardAreas
     // the plain grid remains.
     if morphing {
         if let Some(anim) = app.zoom_anim {
-            let rect = anim.rect_at(now);
+            // The anim's rects were fixed at key-press; keep them on screen
+            // after a resize or on a terminal shorter than the slot.
+            let rect = anim.rect_at(now).intersection(frame.area());
+            if rect.is_empty() {
+                return;
+            }
             frame.render_widget(Clear, rect);
             render_zoomed_panel(frame, rect, app);
         }
@@ -2138,23 +2177,27 @@ pub fn panel_zoom_source(
     let right = areas.col_right;
     // Each stacked panel's real slot (same heights the stacks lay out), so the
     // morph grows/shrinks in both dimensions from the actual box.
+    // The middle panel of each stack shrinks on short terminals so the last
+    // one stays drawable (`middle_panel_h`); mirror that here.
+    let agent_h = dashboard_layout::middle_panel_h(AGENT_H, stack_h.saturating_sub(HOST_H + gap));
+    let auth_h = dashboard_layout::middle_panel_h(AUTH_H, stack_h.saturating_sub(RECENT_H + gap));
     match panel {
         PanelId::Hosts => areas.col_left,
         PanelId::Detail => Rect::new(mid.x, mid.y, mid.width, HOST_H),
-        PanelId::Agent => Rect::new(mid.x, mid.y + HOST_H + gap, mid.width, AGENT_H),
+        PanelId::Agent => Rect::new(mid.x, mid.y + HOST_H + gap, mid.width, agent_h),
         PanelId::Latency => Rect::new(
             mid.x,
-            mid.y + HOST_H + AGENT_H + 2 * gap,
+            mid.y + HOST_H + agent_h + 2 * gap,
             mid.width,
-            stack_h.saturating_sub(HOST_H + AGENT_H + 2 * gap),
+            stack_h.saturating_sub(HOST_H + agent_h + 2 * gap),
         ),
         PanelId::Recent => Rect::new(right.x, right.y, right.width, RECENT_H),
-        PanelId::Auth => Rect::new(right.x, right.y + RECENT_H + gap, right.width, AUTH_H),
+        PanelId::Auth => Rect::new(right.x, right.y + RECENT_H + gap, right.width, auth_h),
         PanelId::Ping => Rect::new(
             right.x,
-            right.y + RECENT_H + AUTH_H + 2 * gap,
+            right.y + RECENT_H + auth_h + 2 * gap,
             right.width,
-            stack_h.saturating_sub(RECENT_H + AUTH_H + 2 * gap),
+            stack_h.saturating_sub(RECENT_H + auth_h + 2 * gap),
         ),
         // SSH log spans mid+right along the bottom (see render_hosts_body).
         PanelId::SshLog => {
@@ -3060,7 +3103,7 @@ mod tests {
     #[test]
     fn tunnels_and_identities_filter_bar_renders_and_hides_rows() {
         let mut app = test_app_with_hosts();
-        app.identities = ["alpha", "bravo"]
+        app.identities = ["alpha-key", "bravo-key"]
             .iter()
             .enumerate()
             .map(|(i, n)| crate::store::Identity {
@@ -3096,11 +3139,12 @@ mod tests {
             app.snap_tunnel_selection();
             app.snap_identity_selection();
             let buffer = render_to_buffer(&app, 120, 40);
-            assert!(buffer_contains(&buffer, "search: bravo"), "tab {tab} bar");
-            assert!(buffer_contains(&buffer, "bravo"), "tab {tab} kept row");
+            assert!(buffer_contains(&buffer, "filter: bravo"), "tab {tab} bar");
+            // The row itself, not the filter bar's own "bravo".
+            let kept = if tab == 2 { "bravo-web" } else { "bravo-key" };
+            assert!(buffer_contains(&buffer, kept), "tab {tab} kept row");
             assert!(!buffer_contains(&buffer, "alpha"), "tab {tab} hid row");
-            let footer = render_to_buffer(&app, 120, 40);
-            assert!(buffer_contains(&footer, "keep filter"), "tab {tab} footer");
+            assert!(buffer_contains(&buffer, "keep filter"), "tab {tab} footer");
         }
     }
 
@@ -3169,33 +3213,126 @@ mod tests {
     }
 
     #[test]
+    fn short_terminals_still_draw_latency_and_ping_to_the_last_row() {
+        for (w, h) in [(80u16, 24u16), (80, 23), (100, 24), (132, 28), (132, 30)] {
+            let buffer = render_to_buffer(&test_app_with_hosts(), w, h);
+            let areas = dashboard_layout::dashboard_layout(Rect::new(0, 0, w, h));
+            assert!(
+                find_cell(&buffer, "latency").is_some(),
+                "{w}x{h}: Latency box"
+            );
+            assert!(
+                find_cell(&buffer, "ping all hosts").is_some(),
+                "{w}x{h}: Ping box"
+            );
+            let last = areas.body.bottom() - 1;
+            for x in [areas.col_mid.x, areas.col_right.x] {
+                assert_eq!(buffer[(x, last)].symbol(), "└", "{w}x{h}: column at x={x}");
+            }
+        }
+    }
+
+    #[test]
+    fn tab_clicks_land_on_the_tab_drawn_there() {
+        let app = test_app_with_hosts();
+        let labels = ["hosts", "sftp", "tunnels", "identities", "audit", "map"];
+        for width in [80u16, 100, 131, 132, 160] {
+            for profile in [None, Some("alpha")] {
+                let area = Rect::new(0, 0, width, 1);
+                let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        widgets::tab_bar::render_tab_bar(
+                            frame,
+                            area,
+                            1,
+                            "~/.config/sshub",
+                            profile,
+                            None,
+                            app.theme(),
+                        )
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let row: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
+                let mut from = 0;
+                for (i, label) in labels.iter().enumerate() {
+                    let start = from + row[from..].find(label).expect(label);
+                    let (first, last) = (start as u16, (start + label.len() - 1) as u16);
+                    for x in [first, last] {
+                        assert_eq!(
+                            widgets::tab_bar::tab_at(x, area, profile.is_some()),
+                            Some(i),
+                            "{width} cols, profile {profile:?}, '{label}' at x={x}: {row}"
+                        );
+                    }
+                    from = start + label.len();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reversing_a_tab_switch_resumes_from_where_it_stands() {
+        let mut app = test_app_with_hosts();
+        app.config.appearance.disable_animation = false;
+        app.active_tab = 1;
+        app.detect_tab_switch();
+        let mut sw = app.tab_switch.expect("switch armed");
+        sw.at -= TAB_ANIM / 4;
+        app.tab_switch = Some(sw);
+        let before = tween::ease_out(tween::progress(sw.at, TAB_ANIM, std::time::Instant::now()));
+
+        app.active_tab = 0;
+        app.detect_tab_switch();
+        let back = app.tab_switch.expect("reverse armed");
+        let after = tween::ease_out(tween::progress(
+            back.at,
+            TAB_ANIM,
+            std::time::Instant::now(),
+        ));
+        assert_eq!((back.from, back.to), (1, 0));
+        assert!(
+            (before + after - 1.0).abs() < 0.05,
+            "reverse starts at {after}, forward stood at {before}"
+        );
+    }
+
+    #[test]
     fn hosts_to_sftp_morph_keeps_the_hosts_pane_on_the_left_edge() {
         let (w, h) = (132u16, 38u16);
         let areas = dashboard_layout::dashboard_layout_zoomed(Rect::new(0, 0, w, h), 0);
         let picker = dashboard_layout::sftp_picker_rect(areas.body);
-        let at = |from: usize, to: usize, frac: f32| {
+        // `stale_zoom`: a panel zoom that finished earlier must not demote the
+        // morph to the whole-body slide (`zoom_anim` stays set after `z`).
+        let at = |from: usize, to: usize, frac: f32, stale_zoom: bool| {
             let mut app = test_app_with_hosts();
             app.config.appearance.disable_animation = false;
             app.active_tab = to;
+            if stale_zoom {
+                let r = Rect::new(0, 0, 4, 2);
+                app.zoom_anim = Some(tween::SlideAnim::new(r, r, std::time::Duration::ZERO));
+            }
+            let now = std::time::Instant::now();
             app.tab_switch = Some(crate::app::TabSwitch {
                 from,
                 to,
-                at: std::time::Instant::now() - TAB_ANIM.mul_f32(frac),
+                at: now - TAB_ANIM.mul_f32(frac),
             });
-            render_to_buffer(&app, w, h)
+            render_frame_at(&app, w, h, now)
         };
         // Midway either way: the pane's top-left corner never leaves col_left.x,
-        // and its right edge sits strictly between the two resting widths.
-        for (from, to) in [(0, 1), (1, 0)] {
-            let buffer = at(from, to, 0.5);
+        // and its own top-right corner (the first `┐` on the row, the pane being
+        // leftmost) sits strictly between the two resting widths.
+        for (from, to, stale_zoom) in [(0, 1, false), (1, 0, false), (0, 1, true), (1, 0, true)] {
+            let buffer = at(from, to, 0.5, stale_zoom);
             assert_eq!(buffer[(areas.col_left.x, areas.body.y)].symbol(), "┌");
             let right_edge = (areas.col_left.x..picker.right())
-                .rev()
                 .find(|&x| buffer[(x, areas.body.y)].symbol() == "┐")
                 .expect("hosts pane top-right corner");
             assert!(
                 right_edge + 1 > areas.col_left.right() && right_edge + 1 < picker.right(),
-                "{from}->{to}: pane mid-stretch, right edge {right_edge}"
+                "{from}->{to} stale_zoom={stale_zoom}: pane mid-stretch, right edge {right_edge}"
             );
         }
     }
@@ -3911,6 +4048,26 @@ mod tests {
             &buffer_signature(&buffer),
             include_str!("../../tests/fixtures/theme/default-dashboard.buffer"),
         );
+    }
+
+    /// The 132x38 golden says nothing about smaller terminals or the SFTP
+    /// picker tab: draw both at 100x30, 80x24 and a tiny 60x18 (must not panic
+    /// on an unlucky slot) and check the landmarks that must survive.
+    #[test]
+    fn dashboard_and_sftp_picker_draw_at_smaller_sizes() {
+        for (w, h) in [(100, 30), (80, 24), (60, 18)] {
+            let mut app = test_app_with_hosts();
+            let hosts = render_to_buffer(&app, w, h);
+            app.active_tab = 1;
+            let picker = render_to_buffer(&app, w, h);
+            if w < 80 {
+                continue;
+            }
+            assert!(buffer_contains(&hosts, "web-prod"), "hosts tab {w}x{h}");
+            assert!(buffer_contains(&picker, "web-prod"), "picker list {w}x{h}");
+            assert!(buffer_contains(&picker, "Esc back"), "picker hint {w}x{h}");
+            assert!(!buffer_contains(&hosts, "Esc back"), "hosts tab {w}x{h}");
+        }
     }
 
     // ── Theme-driven app background ─────────────────────────

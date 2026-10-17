@@ -220,9 +220,13 @@ mod tests {
             .map(HostEntry::from_managed)
             .collect();
         assert_eq!(entries.len(), 1840);
-        // Size, not speed: a wall-clock bound flakes on a loaded runner.
+        // Coarse bound only (seconds, not the milliseconds this takes): catches
+        // a quadratic blow-up without flaking on a loaded runner.
+        let started = std::time::Instant::now();
         let hosts = collect_hosts(&store, &entries).unwrap();
         let map = crate::map::Map::build(hosts);
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
         assert_eq!(map.hosts.len(), 1840);
         assert!(map.roots.len() > 100);
         // Two out of three hosts jump through one of the 212 hops.

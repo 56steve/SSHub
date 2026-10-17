@@ -21,6 +21,20 @@ const fn row_stride_const() -> u16 {
     CARD_H + 1
 }
 
+/// Rows below the card grid: rule, socket, keys, notice.
+const AGENT_STRIP: u16 = 4;
+
+/// Height of the card grid inside a body `area_height` tall: whole card rows
+/// above the agent strip, or the whole body when not even one row fits. The
+/// renderer and the mouse hit-test both use it.
+pub fn grid_height(area_height: u16) -> u16 {
+    let stride = row_stride_const();
+    match area_height.saturating_sub(AGENT_STRIP) / stride {
+        0 => area_height,
+        rows => rows * stride,
+    }
+}
+
 /// Inner content width of the identities body for a given total width
 /// (mirrors the margin logic in [`render_keys`]).
 pub fn inner_width(total_width: u16) -> u16 {
@@ -132,7 +146,6 @@ pub fn render_keys(frame: &mut Frame, area: Rect, app: &App) {
     // card showed through as borders and key paths spliced onto the panel's text.
     //
     // Rows, bottom up: notice, keys, socket, rule.
-    const AGENT_STRIP: u16 = 4;
     let stride = row_stride_const();
     let available = area.height.saturating_sub(AGENT_STRIP);
     // Whole card rows only. A grid cut mid-card left a sliver of the next row
@@ -242,13 +255,32 @@ pub fn render_keys(frame: &mut Frame, area: Rect, app: &App) {
     // bar takes the same row and wins it while a filter is in play.
     let notice_y = area.y + area.height.saturating_sub(1);
     if app.list_filter_editing || !app.identity_filter.is_empty() {
+        // A kept filter shares the row with the notice instead of hiding it.
+        let notice = app
+            .identity_notice
+            .as_deref()
+            .filter(|_| !app.list_filter_editing);
+        let bar_w = if notice.is_some() {
+            inner_w.min(32)
+        } else {
+            inner_w
+        };
         crate::tui::widgets::filter_bar(
             buf,
-            Rect::new(inner_x, notice_y, inner_w, 1),
+            Rect::new(inner_x, notice_y, bar_w, 1),
             &app.identity_filter,
             app.list_filter_editing,
             theme,
         );
+        if let Some(notice) = notice {
+            let nx = inner_x + bar_w + 2;
+            buf.set_string(
+                nx,
+                notice_y,
+                truncate(notice, (inner_x + inner_w).saturating_sub(nx) as usize),
+                theme.style(StyleRole::IdentitiesNotice),
+            );
+        }
     } else if let Some(notice) = app.identity_notice.as_deref() {
         buf.set_string(
             inner_x,

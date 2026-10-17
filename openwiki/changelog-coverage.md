@@ -17,17 +17,32 @@ treatment. Source references name where the behavior lives today.
 
 | Release / entry | Wiki page(s) | Status | Notes |
 | --- | --- | --- | --- |
-| Unreleased: Split view (#73) | [Sessions & SFTP](workflows/sessions-sftp.md#split-view-and-workspaces-73), [Runtime architecture](architecture/overview.md#the-event-loop-run_terminal_loop) | Covered | `src/app/panes.rs` (`PaneTree`, `Panes::can_split`), `App::pane_views`, `App::new_session_grid`, `KeyAction::Pane*`. |
-| Unreleased: Workspaces (#73) | [Sessions & SFTP](workflows/sessions-sftp.md#split-view-and-workspaces-73), [Data model](architecture/data-model.md#launcherdb-schema-srcstore) | Covered | `src/app/workspaces.rs`, `src/store/workspaces.rs`, schema v20. |
-| Unreleased: Mouse on the dashboard, in forms, dialogs and pickers (#116) | [TUI dashboard](workflows/tui.md#mouse) | Covered | `App::mouse_select`, `App::dashboard_click`, `App::click_at` (`src/app/field_click.rs`), `ClickHit`, `screens::FormBody`, `App::focused_field_text`. |
-| Unreleased: Shrinking the terminal cut off the prompt | [Sessions & SFTP](workflows/sessions-sftp.md#split-view-and-workspaces-73) | Covered | `ParserState::set_size` scrolls rows into history before a shrink. |
-| Unreleased: SFTP search keeps capital letters | [TUI dashboard](workflows/tui.md#tabs) | Covered | `App::dashboard_text_input_active`, `handle_key_dashboard_tab`. |
-| Unreleased: `sshub theme list\|show` read the wrong directory | [Theme internals](architecture/themes.md), [Profiles & themes](workflows/profiles-themes.md#themes), [Headless CLI](workflows/cli.md) | Covered | `profile::locate_config_dir`. |
-| Unreleased: `host edit --set-address` alone, `--clear-remote-command` | [Headless CLI](workflows/cli.md) | Covered | `src/cli/host.rs` edit flag check; flag-level detail lives in `sshub host --help`. |
-| Unreleased: Profile transfer of a host picked the wrong row | [Profiles](architecture/profiles.md#cross-profile-transfers) | Covered | `App::transfer_host_name` takes the selected entry's name, never its label or row number. |
-| Unreleased: Broadcast audit rows no longer store the command | [Broadcast](workflows/broadcast.md#audit), [Headless CLI](workflows/cli.md) | Covered | `src/app/broadcast.rs` audit note; `--via broadcast` in `src/cli/audit.rs`. |
-| Unreleased: Shell completions offer `transfer` | [Headless CLI](workflows/cli.md) | Covered | `src/cli/completions.rs`. |
-| Unreleased: `appearance.show_detail_panel` and `date_format` removed | [Data model](architecture/data-model.md#configuration-srcconfigrs) | Covered | Unknown keys in existing configs still load. |
+| Unreleased: Network map (tab 6) and hop editor (#79), `sshub map --dot` | [TUI dashboard](workflows/tui.md#network-map-tab-6), [Headless CLI](workflows/cli.md), [Hosts, Groups & Identities](domain/hosts-identities.md), [Testing](testing/strategy.md) | Covered | `src/map/` (`build.rs`, `hops.rs`, `filter.rs`, `dot.rs`), `src/app/network_map.rs`, `src/app/hop_editor.rs`; the ssh_config sync records `ProxyCommand` presence. Design: `docs/network-map-design.md`. |
+| Unreleased: Fuzzy filter on Tunnels and Identities tabs | [TUI dashboard](workflows/tui.md#tabs) | Covered | `src/app/tunnels.rs`, `src/app/identities.rs`. |
+| Unreleased: Jump-host passwords answered per hop, never written to the staged file; hop and destination secrets answer only their own prompt kind | [Secrets](security/secrets.md#ssh_askpass), [Session tools](workflows/session-tools.md#interactive-authentication-modal), [Tunnels](workflows/tunnels.md), [Broadcast](workflows/broadcast.md) | Covered | `src/session/hop_auth.rs`, `src/session/askpass.rs`, `src/session/interactive_auth.rs`; staged file holds references, the helper reads the credential store when a hop asks. |
+| Unreleased: ProxyJump hop hardening (shell-active user refused; hops only in SSHub get `user@address:port`; `export` refuses command-running ssh_config) | [Secrets](security/secrets.md#input-safety), [Hosts, Groups & Identities](domain/hosts-identities.md), [Headless CLI](workflows/cli.md) | Covered | `src/map/hops.rs` (`jump_is_valid`), `src/ssh/export.rs`; oracle test in [Testing](testing/strategy.md#oracle-tests). |
+| Unreleased: Hosts dashboard layout (no empty strip under the SSH log, hosts↔SFTP morph) | [TUI dashboard](workflows/tui.md), [Runtime architecture](architecture/overview.md) | Covered | `src/tui/dashboard_layout.rs` (`PANEL_GAP`). |
+| Unreleased: Broadcast and OS detection drop the stored `remote_command` | [Broadcast](workflows/broadcast.md), [Headless CLI](workflows/cli.md) | Covered | `src/broadcast/mod.rs`; output per host capped at 1 MiB. |
+| Unreleased: Session ssh log on a separate channel; paste drops control bytes; stderr FIFO in a private dir | [Sessions & SFTP](workflows/sessions-sftp.md), [Secrets](security/secrets.md) | Covered | `src/session/mod.rs`, `src/session/askpass_channel.rs`. |
+| Unreleased: Tunnel pid files carry the process start time; `ExitOnForwardFailure=yes` | [Tunnels](workflows/tunnels.md) | Covered | `src/tunnel/spawn.rs`. |
+| Unreleased: `hosts` and `identities` ids never reused (schema v21) | [Data model](architecture/data-model.md#launcherdb-schema-srcstore) | Covered | `src/store/migrate.rs` (`SCHEMA_VERSION = 21`, `AUTOINCREMENT`). |
+| Unreleased: Credential file lock and fsync; moving hosts to another profile purges source secrets | [Secrets](security/secrets.md#credential-store-srccredentialsrs), [Profiles](architecture/profiles.md#cross-profile-transfers), [Data model](architecture/data-model.md) | Covered | `src/credentials.rs`, `src/store/transfer.rs`; `tests/transfer_secrets.rs`. |
+| Unreleased: Host address/user validation; command history skips more secret-bearing commands; smaller hardening (0600 keys, `ssh-add -d --`, mosh key paths) | [Secrets](security/secrets.md#input-safety), [Session tools](workflows/session-tools.md) | Covered | `src/command_safety.rs`, `src/ssh/host.rs` (`safe_ssh_target`), `src/secure_fs.rs`. |
+| Unreleased: UI fixes (compact tab-bar clicks, mouse after zoom, host filter across fields, short-terminal panels, Ctrl+H in filter, audit `via` with group jump, test connect `needs interactive auth`) | [TUI dashboard](workflows/tui.md), [Headless CLI](workflows/cli.md) | Covered | Regression fixes, no separate behavior. |
+| 0.18.2: Audit and tunnels tab clicks land on the right row | [TUI dashboard](workflows/tui.md#mouse) | Covered | Click mapping fix; no new behavior. |
+| 0.18.1: `Shift+U` update of an npm install uses the running copy's prefix | [Integrations](integrations/external-terminals.md#release-check-and-update-srcupdaters-srcappupdaters) | Covered | `src/update.rs`. |
+| 0.18.0: Split view (#73) | [Sessions & SFTP](workflows/sessions-sftp.md#split-view-and-workspaces-73), [Runtime architecture](architecture/overview.md#the-event-loop-run_terminal_loop) | Covered | `src/app/panes.rs` (`PaneTree`, `Panes::can_split`), `App::pane_views`, `App::new_session_grid`, `KeyAction::Pane*`. |
+| 0.18.0: Workspaces (#73) | [Sessions & SFTP](workflows/sessions-sftp.md#split-view-and-workspaces-73), [Data model](architecture/data-model.md#launcherdb-schema-srcstore) | Covered | `src/app/workspaces.rs`, `src/store/workspaces.rs`, schema v20. |
+| 0.18.0: Mouse on the dashboard, in forms, dialogs and pickers (#116) | [TUI dashboard](workflows/tui.md#mouse) | Covered | `src/app/mouse.rs`, `src/app/field_click.rs`. |
+| 0.18.0: New README GIFs and screenshots | [Integrations](integrations/external-terminals.md#demo-pipeline-demo) | Covered | `demo/record.py`. |
+| 0.18.0: Shrinking the terminal cut off the prompt | [Sessions & SFTP](workflows/sessions-sftp.md#split-view-and-workspaces-73) | Covered | `ParserState::set_size` scrolls rows into history before a shrink. |
+| 0.18.0: SFTP search keeps capital letters | [TUI dashboard](workflows/tui.md#tabs) | Covered | `App::dashboard_text_input_active`, `handle_key_dashboard_tab`. |
+| 0.18.0: `sshub theme list\|show` read the wrong directory | [Theme internals](architecture/themes.md), [Profiles & themes](workflows/profiles-themes.md#themes), [Headless CLI](workflows/cli.md) | Covered | `profile::locate_config_dir`. |
+| 0.18.0: `host edit --set-address` alone, `--clear-remote-command` | [Headless CLI](workflows/cli.md) | Covered | `src/cli/host.rs` edit flag check; flag-level detail lives in `sshub host --help`. |
+| 0.18.0: Profile transfer of a host picked the wrong row | [Profiles](architecture/profiles.md#cross-profile-transfers) | Covered | `App::transfer_host_name` takes the selected entry's name, never its label or row number. |
+| 0.18.0: Broadcast audit rows no longer store the command | [Broadcast](workflows/broadcast.md#audit), [Headless CLI](workflows/cli.md) | Covered | `src/app/broadcast.rs` audit note; `--via broadcast` in `src/cli/audit.rs`. |
+| 0.18.0: Shell completions offer `transfer`; help text caught up | [Headless CLI](workflows/cli.md), [TUI dashboard](workflows/tui.md) | Covered | `src/cli/completions.rs`. |
+| 0.18.0: `appearance.show_detail_panel` and `date_format` removed | [Data model](architecture/data-model.md#configuration-srcconfigrs) | Covered | Unknown keys in existing configs still load. |
 | 0.17.7: Update notice and `Shift+U` install per channel | [Integrations](integrations/external-terminals.md#release-check-and-update-srcupdaters-srcappupdaters), [TUI dashboard](workflows/tui.md), [Runtime architecture](architecture/overview.md) | Covered | `src/update.rs` (`spawn_check`, `install_channel`, `install`), `src/app/update.rs`, `[updates] check`. |
 | 0.17.7: Error popup title | [TUI dashboard](workflows/tui.md) | Covered | `AppMode::Notice`; title wording is renderer detail. |
 | 0.17.6: DEC Special Graphics line drawing | [Sessions & SFTP](workflows/sessions-sftp.md) | Covered | `src/session/parser.rs` `XtermCompat`. |
@@ -111,7 +126,7 @@ treatment. Source references name where the behavior lives today.
 
 ## Last audit
 
-- `gitHead`: `0ffbc22` (v0.17.7)
-- `auditedAt`: `2026-10-12`
+- `gitHead`: `fde89d1` (v0.18.2 plus the `[Unreleased]` section)
+- `auditedAt`: `2026-10-17`
 - `method`: manual refresh, every fact checked against `src/`
 - `unresolved`: 0.11.0 remaining regression fixes; 0.4.0 relicensing history

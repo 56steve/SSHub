@@ -44,6 +44,10 @@ pub struct FormBody {
     /// Each line with the field it shows, by position in the form's `ALL`.
     rows: Vec<(Line<'static>, Option<usize>)>,
     wrap: Option<Wrap>,
+    /// A row (index into `rows`) that must stay on screen when the form is
+    /// taller than its popup: the bottom of an open picker or raw-hop box,
+    /// which take input and must not fall off the edge.
+    keep_visible: Option<usize>,
 }
 
 impl FormBody {
@@ -58,7 +62,43 @@ impl FormBody {
         if let Some(wrap) = wrap {
             para = para.wrap(wrap);
         }
-        Self { para, rows, wrap }
+        Self {
+            para,
+            rows,
+            wrap,
+            keep_visible: None,
+        }
+    }
+
+    /// Scroll the form, if it overflows, so row `row` is the last one drawn.
+    pub fn keep_visible(mut self, row: Option<usize>) -> Self {
+        self.keep_visible = row;
+        self
+    }
+
+    /// Drawn height of `line` at `width`.
+    fn height_of(&self, line: &Line<'static>, width: u16) -> u16 {
+        match self.wrap {
+            Some(wrap) => Paragraph::new(line.clone())
+                .wrap(wrap)
+                .line_count(width)
+                .max(1) as u16,
+            None => 1,
+        }
+    }
+
+    /// Rows scrolled off the top of `inner` so `keep_visible` ends in view.
+    fn scroll(&self, inner: Rect) -> u16 {
+        let Some(row) = self.keep_visible else {
+            return 0;
+        };
+        let end: u16 = self
+            .rows
+            .iter()
+            .take(row + 1)
+            .map(|(l, _)| self.height_of(l, inner.width))
+            .sum();
+        end.saturating_sub(inner.height)
     }
 
     /// Record each field's drawn rows of `area` (where the form is drawn,
@@ -68,17 +108,17 @@ impl FormBody {
         let inner = area.inner(Margin::new(1, 1));
         let mut map = app.click_map.borrow_mut();
         let mut y = inner.y;
+        let mut skip = self.scroll(inner);
         for (line, field) in &self.rows {
             if y >= inner.bottom() {
                 break;
             }
-            let height = match self.wrap {
-                Some(wrap) => Paragraph::new(line.clone())
-                    .wrap(wrap)
-                    .line_count(inner.width)
-                    .max(1) as u16,
-                None => 1,
-            };
+            let height = self.height_of(line, inner.width);
+            // Scrolled off the top: not on screen, not clickable.
+            if skip > 0 {
+                skip = skip.saturating_sub(height);
+                continue;
+            }
             if let Some(index) = *field {
                 let graphemes: Vec<_> = line.styled_graphemes(Style::default()).collect();
                 let chrome: usize = line
@@ -166,6 +206,7 @@ impl FormBody {
 
 impl Widget for FormBody {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        self.para.render(area, buf);
+        let scroll = self.scroll(area.inner(Margin::new(1, 1)));
+        self.para.scroll((scroll, 0)).render(area, buf);
     }
 }

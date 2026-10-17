@@ -2,6 +2,17 @@ pub mod mremoteng;
 pub mod putty;
 pub mod termius_csv;
 
+/// Refuse a row whose address or login is outside the host-name allowlist
+/// before it is stored: an imported file is somebody else's text, and the
+/// destination reaches an ssh argv and, behind a ProxyJump on OpenSSH < 9.6,
+/// a shell. Counted in `skipped_invalid` by every importer.
+pub(crate) fn check_destination(address: &str, username: Option<&str>) -> anyhow::Result<()> {
+    match crate::ssh::destination_problem(address, username) {
+        Some(problem) => Err(anyhow::anyhow!(problem)),
+        None => Ok(()),
+    }
+}
+
 /// Result of a third-party host import (mRemoteNG, PuTTY). Kept lean: these
 /// importers only create hosts (no identities/passwords), so unlike
 /// [`termius_csv::CsvImportReport`] there are no credential counters.

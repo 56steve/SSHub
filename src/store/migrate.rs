@@ -3,7 +3,7 @@ use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const SCHEMA_VERSION: i64 = 20;
+const SCHEMA_VERSION: i64 = 21;
 
 /// Name of the reserved, auto-created "Favorites" group. Membership in it is the
 /// source of truth for a host's favourite status.
@@ -241,6 +241,10 @@ pub(crate) fn run_migrations(conn: &Connection, launcher_path: &Path) -> Result<
 
     if current < 20 {
         migrate_v19_to_v20(conn)?;
+    }
+
+    if current < 21 {
+        migrate_v20_to_v21(conn)?;
     }
 
     // Runs last so all columns it writes to (e.g. environment) already exist.
@@ -829,6 +833,94 @@ fn migrate_v19_to_v20(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// `hosts` and `identities` used plain `INTEGER PRIMARY KEY`, so SQLite reused
+/// the id of a deleted top row for the next insert — and the next host or
+/// identity silently adopted the keyring secret (`host:<id>` / `identity:<id>`)
+/// the deleted one left behind. `AUTOINCREMENT` never hands an id out twice.
+///
+/// SQLite cannot add it in place, so the tables are rebuilt. Same hazard as the
+/// v16 rebuild: `DROP TABLE` runs an implicit DELETE that fires the children's
+/// `ON DELETE CASCADE` / `SET NULL`, so child rows are copied out and put back
+/// (ids are preserved, so they still match). The copy inserts explicit ids,
+/// which seeds `sqlite_sequence` with each table's current maximum.
+fn migrate_v20_to_v21(conn: &Connection) -> Result<()> {
+    if !has_autoincrement(conn, "identities")? {
+        conn.execute_batch(
+            "CREATE TEMP TABLE identities_rebuild_hosts AS
+                 SELECT id, identity_id FROM hosts WHERE identity_id IS NOT NULL;
+             CREATE TEMP TABLE identities_rebuild_groups AS
+                 SELECT id, default_identity_id FROM host_groups
+                 WHERE default_identity_id IS NOT NULL;",
+        )?;
+        rebuild_with_autoincrement(conn, "identities")?;
+        conn.execute_batch(
+            "UPDATE hosts SET identity_id =
+                 (SELECT identity_id FROM identities_rebuild_hosts r WHERE r.id = hosts.id)
+             WHERE id IN (SELECT id FROM identities_rebuild_hosts);
+             UPDATE host_groups SET default_identity_id =
+                 (SELECT default_identity_id FROM identities_rebuild_groups r
+                  WHERE r.id = host_groups.id)
+             WHERE id IN (SELECT id FROM identities_rebuild_groups);
+             DROP TABLE identities_rebuild_hosts;
+             DROP TABLE identities_rebuild_groups;",
+        )?;
+    }
+    if !has_autoincrement(conn, "hosts")? {
+        conn.execute_batch(
+            "CREATE TEMP TABLE hosts_rebuild_memberships AS
+                 SELECT * FROM host_group_memberships;
+             CREATE TEMP TABLE hosts_rebuild_tunnels AS SELECT * FROM tunnels;
+             CREATE TEMP TABLE hosts_rebuild_history AS SELECT * FROM command_history;",
+        )?;
+        rebuild_with_autoincrement(conn, "hosts")?;
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO host_group_memberships
+                 SELECT * FROM hosts_rebuild_memberships;
+             INSERT OR IGNORE INTO tunnels SELECT * FROM hosts_rebuild_tunnels;
+             INSERT OR IGNORE INTO command_history SELECT * FROM hosts_rebuild_history;
+             DROP TABLE hosts_rebuild_memberships;
+             DROP TABLE hosts_rebuild_tunnels;
+             DROP TABLE hosts_rebuild_history;",
+        )?;
+    }
+    Ok(())
+}
+
+fn table_sql(conn: &Connection, table: &str) -> Result<String> {
+    Ok(conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        params![table],
+        |row| row.get(0),
+    )?)
+}
+
+fn has_autoincrement(conn: &Connection, table: &str) -> Result<bool> {
+    Ok(table_sql(conn, table)?
+        .to_ascii_uppercase()
+        .contains("AUTOINCREMENT"))
+}
+
+/// Recreate `table` from its own stored DDL with `AUTOINCREMENT` on the first
+/// `INTEGER PRIMARY KEY` (the `id` column of every table passed here), copying
+/// all rows. Deriving the DDL keeps every column added by earlier `ALTER`s.
+fn rebuild_with_autoincrement(conn: &Connection, table: &str) -> Result<()> {
+    let sql = table_sql(conn, table)?;
+    let body = &sql[sql.find('(').context("table DDL has no column list")?..];
+    let ddl = body.replacen(
+        "INTEGER PRIMARY KEY",
+        "INTEGER PRIMARY KEY AUTOINCREMENT",
+        1,
+    );
+    anyhow::ensure!(ddl != body, "{table} has no INTEGER PRIMARY KEY to rebuild");
+    conn.execute_batch(&format!(
+        "CREATE TABLE {table}_new {ddl};
+         INSERT INTO {table}_new SELECT * FROM {table};
+         DROP TABLE {table};
+         ALTER TABLE {table}_new RENAME TO {table};"
+    ))?;
+    Ok(())
+}
+
 pub(crate) fn now_ts() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1129,6 +1221,63 @@ INSERT INTO host_groups (name, sort_order, reserved, created_at)
         );
     }
 
+    /// v21 rebuilds `hosts` and `identities` with AUTOINCREMENT. The rebuild
+    /// must keep every row and every child link (the DROP cascades), and a
+    /// deleted top id must never come back — a reused id adopts the keyring
+    /// secret (`host:<id>`) the deleted row left behind.
+    #[test]
+    fn migration_v21_autoincrement_keeps_links_and_never_reuses_ids() {
+        let dir = temp_dir();
+        let db_path = dir.path().join("launcher.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(V15_FROZEN_SCHEMA).unwrap();
+        conn.execute_batch(
+            "INSERT INTO identities (name, created_at) VALUES ('id1', 1), ('id2', 1);
+             UPDATE host_groups SET default_identity_id =
+                 (SELECT id FROM identities WHERE name = 'id2');
+             INSERT INTO hosts (name, address, port, group_id, identity_id,
+                                forward_agent, transport, created_at, updated_at)
+             VALUES ('a', '10.0.0.1', 22, (SELECT id FROM host_groups), 1, 0, 'ssh', 1, 1),
+                    ('b', '10.0.0.2', 22, (SELECT id FROM host_groups), 2, 0, 'ssh', 1, 1);
+             INSERT INTO host_group_memberships (host_id, group_id)
+                 SELECT id, group_id FROM hosts;
+             INSERT INTO tunnels (host_id, tunnel_type, local_port, remote_host,
+                                  remote_port, created_at, updated_at)
+                 VALUES (2, 'L', 8080, 'localhost', 80, 1, 1);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let m = Connection::open(&db_path).unwrap();
+        run_migrations(&m, &db_path).unwrap();
+        let one = |sql: &str| -> i64 { m.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(one("SELECT COUNT(*) FROM hosts"), 2);
+        assert_eq!(one("SELECT identity_id FROM hosts WHERE name = 'b'"), 2);
+        assert_eq!(one("SELECT identity_id FROM hosts WHERE name = 'a'"), 1);
+        assert_eq!(one("SELECT default_identity_id FROM host_groups"), 2);
+        assert_eq!(one("SELECT COUNT(*) FROM host_group_memberships"), 2);
+        assert_eq!(one("SELECT host_id FROM tunnels"), 2);
+        assert!(has_autoincrement(&m, "hosts").unwrap());
+        assert!(has_autoincrement(&m, "identities").unwrap());
+
+        // The top ids are 2 and 2: delete them, the next rows must get 3.
+        m.execute_batch("DELETE FROM hosts WHERE id = 2; DELETE FROM identities WHERE id = 2;")
+            .unwrap();
+        m.execute_batch(
+            "INSERT INTO hosts (name, address, created_at, updated_at) VALUES ('c', 'x', 1, 1);
+             INSERT INTO identities (name, created_at) VALUES ('id3', 1);",
+        )
+        .unwrap();
+        assert_eq!(one("SELECT id FROM hosts WHERE name = 'c'"), 3);
+        assert_eq!(one("SELECT id FROM identities WHERE name = 'id3'"), 3);
+
+        // Idempotent: a re-run over the rebuilt tables changes nothing.
+        m.execute_batch("DELETE FROM schema_version; INSERT INTO schema_version VALUES (20);")
+            .unwrap();
+        run_migrations(&m, &db_path).unwrap();
+        assert_eq!(one("SELECT COUNT(*) FROM hosts"), 2);
+    }
+
     /// A database v0.17.0 already emptied gets its groups back on upgrade.
     #[test]
     fn migration_v17_reseeds_memberships_wiped_by_v16() {
@@ -1217,7 +1366,7 @@ INSERT INTO host_groups (name, sort_order, reserved, created_at)
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!((version, workspaces, hosts), (20, 0, 1));
+        assert_eq!((version, workspaces, hosts), (21, 0, 1));
         let snapshots: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
             .flatten()

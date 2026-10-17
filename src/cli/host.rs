@@ -225,9 +225,7 @@ fn cmd_connect(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
     );
     if pending_secret.is_some() || !hops.is_empty() {
         if let Ok(exe) = crate::session::askpass::helper_exe() {
-            if let Ok(guard) =
-                AskpassSecret::staged(pending_secret.as_ref().map(|s| s.value()), &hops)
-            {
+            if let Ok(guard) = AskpassSecret::staged(pending_secret.as_ref(), &hops) {
                 extra_env = guard.env(&exe);
                 askpass_guard = Some(guard);
             }
@@ -316,6 +314,19 @@ fn refuse_bad_jump(jump: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// An address or login outside the host-name allowlist is never stored: it
+/// would reach an ssh argv or a `ProxyJump` helper shell.
+fn refuse_bad_destination(address: &str, username: Option<&str>) -> Result<()> {
+    // A leading `-` has its own, more precise refusal in the store.
+    if address.starts_with('-') || username.is_some_and(|u| u.starts_with('-')) {
+        return Ok(());
+    }
+    if let Some(problem) = crate::ssh::destination_problem(address, username) {
+        bail!("{problem}");
+    }
+    Ok(())
+}
+
 fn cmd_add(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
     let spec = HostAddSpec::parse(args)?;
     let unique_name = ctx.store.unique_host_name(&spec.name, None)?;
@@ -331,6 +342,7 @@ fn cmd_add(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
         .map(|i| i.id);
 
     refuse_bad_jump(spec.proxy_jump.as_deref())?;
+    refuse_bad_destination(&spec.address, spec.username.as_deref())?;
     let group_ids = resolve_group_ids(ctx, &spec.groups)?;
 
     let created = ctx.store.create_host(&NewHost {
@@ -405,6 +417,15 @@ fn cmd_edit(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
 
     if managed.source == HostSource::SshConfig && patch.changes_connection_fields() {
         bail!("connection fields are read-only for ssh_config hosts");
+    }
+
+    if patch.set_address.is_some() || patch.set_username.is_some() {
+        let address = patch.set_address.as_deref().unwrap_or(&managed.address);
+        let username = match &patch.set_username {
+            Some(v) => v.as_deref(),
+            None => managed.username.as_deref(),
+        };
+        refuse_bad_destination(address, username)?;
     }
 
     let mut update = HostUpdate::default();

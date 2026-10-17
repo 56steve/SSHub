@@ -141,9 +141,7 @@ pub fn run(ctx: &mut CliContext, args: &[String]) -> Result<i32> {
     let mut extra_env: Vec<(String, String)> = Vec::new();
     if pending_secret.is_some() || !hops.is_empty() {
         if let Ok(exe) = crate::session::askpass::helper_exe() {
-            if let Ok(guard) =
-                AskpassSecret::staged(pending_secret.as_ref().map(|s| s.value()), &hops)
-            {
+            if let Ok(guard) = AskpassSecret::staged(pending_secret.as_ref(), &hops) {
                 extra_env = guard.env(&exe);
                 askpass_guard = Some(guard);
             }

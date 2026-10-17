@@ -21,7 +21,11 @@ Triggers: pushes to `main`, `master`, `development`, and every pull request.
   Exempt: `main`, `master`, `development`, `HEAD`, `openwiki/update`.
 - **test**: matrix `ubuntu-latest`, `macos-latest`; `cargo build --all-targets`,
   `cargo test` (default features, so vendored OpenSSL). Linux installs
-  `libdbus-1-dev` and `pkg-config` for the keyring backend.
+  `libdbus-1-dev` and `pkg-config` for the keyring backend, plus
+  `openssh-server` and `graphviz`; macOS installs `graphviz` with brew. The
+  oracle tests run a real `sshd` on loopback and feed `map --dot` to Graphviz;
+  with `CI` set they **fail** when a tool is missing instead of skipping (see
+  [testing](../testing/strategy.md#oracle-tests)).
 - **lint**: ubuntu; `cargo fmt --check` and
   `cargo clippy --all-targets -- -D warnings`.
 
@@ -44,9 +48,9 @@ write`.
 
 ## `openwiki-update.yml`: wiki bot
 
-Trigger: **`workflow_dispatch` only** (there is no schedule; the file also
-declares a leftover `scan_mode` input copied from the Strix workflow that
-nothing uses). Installs the `openwiki` npm CLI on Node 22 and runs
+Trigger: **`workflow_dispatch` only**, with no inputs and no schedule (the PR
+body still says "scheduled", a leftover). Installs the unpinned `openwiki` npm
+CLI on Node 22 and runs
 `openwiki code --update --print "<audit prompt>"` with
 `OPENWIKI_PROVIDER=openrouter`, `OPENWIKI_MODEL_ID=z-ai/glm-5.3-flash`,
 `OPENROUTER_API_KEY` and optional LangSmith tracing (`LANGSMITH_API_KEY`). The

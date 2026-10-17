@@ -36,7 +36,12 @@ pub fn render_right_stack(frame: &mut Frame, area: Rect, app: &App) {
 
     // ── Panel 2: Auth events ────────────────────────────
     let remaining = area.y + area.height - y;
-    let auth_area = Rect::new(area.x, y, w, AUTH_H.min(remaining));
+    let auth_area = Rect::new(
+        area.x,
+        y,
+        w,
+        crate::tui::dashboard_layout::middle_panel_h(AUTH_H, remaining),
+    );
     render_auth_panel(buf, auth_area, app);
     y += auth_area.height + crate::tui::dashboard_layout::PANEL_GAP;
 

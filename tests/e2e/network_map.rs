@@ -589,9 +589,11 @@ fn y_shell_quotes_every_word_of_the_copied_command() {
         .collect();
     assert_eq!(words.first().map(String::as_str), Some("ssh"), "{line}");
     assert!(words.contains(&"-J".to_string()) && words.contains(&"10.0.0.1".to_string()));
+    // A destination ssh would run through a shell is refused before it is
+    // ever copied: the line carries a dead placeholder, never the text.
     assert_eq!(
         words.last().unwrap(),
-        &format!("o'brien@{address}"),
+        "refused-invalid-destination.invalid",
         "the target is one word: {words:?}"
     );
     assert!(

@@ -84,13 +84,26 @@ impl App {
         };
         let session = &mut self.sessions[index];
         let changed_key = session.phase.is_terminal() && session.host_key_changed();
+        // What `A` would delete, shown before it can be pressed: the lookup
+        // name and the file ssh itself named, never text from a server banner.
+        let repair = if changed_key {
+            match session.changed_key_target() {
+                Some((spec, path)) => {
+                    format!("\nA removes the entry for {spec}\nfrom {}", path.display())
+                }
+                None => "\nThe known_hosts entry cannot be identified safely: repair it by hand."
+                    .to_string(),
+            }
+        } else {
+            String::new()
+        };
         let auth = session
             .auth
             .as_mut()
             .expect("candidate has authentication state");
         let prompt = if changed_key {
             auth.changed_key_shown = true;
-            "WARNING: the server identity changed. This may be an attack. Verify the new fingerprint independently before removing the old key and reconnecting.".into()
+            format!("WARNING: the server identity changed. This may be an attack. Verify the new fingerprint independently before removing the old key and reconnecting.\n{repair}")
         } else {
             auth.request
                 .as_ref()
@@ -1048,7 +1061,12 @@ mod tests {
         let config = SessionConfig {
             hops: Vec::new(),
             argv: vec!["sh".into(), "-c".into(), "printf 'WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\\nOffending ED25519 key in %s:1\\nHost key for [alias]:2222 has changed and you have requested strict checking.\\n' \"$1\" >&2; sleep 30".into(), "fixture".into(), keys.to_string_lossy().into_owned()],
-            display_name: "Ad-hoc label".into(), meta: SessionMeta::default(),
+            display_name: "Ad-hoc label".into(),
+            meta: SessionMeta {
+                address: Some("alias".into()),
+                port: Some(2222),
+                ..SessionMeta::default()
+            },
             pending_secret: None, key_push_identity: None, host_name: "original-adhoc-target".into(),
         };
         let mut session = Session::spawn(config, (24, 100), None).unwrap();
@@ -1066,6 +1084,10 @@ mod tests {
         ];
         app.poll_authentication();
         assert!(app.auth_modal.as_ref().unwrap().changed_key);
+        // The modal names exactly what `A` will delete, and from which file.
+        let shown = &app.auth_modal.as_ref().unwrap().prompt;
+        assert!(shown.contains("[alias]:2222"), "{shown}");
+        assert!(shown.contains(&keys.display().to_string()), "{shown}");
         for code in [KeyCode::Enter, KeyCode::Char('a')] {
             app.handle_key(KeyEvent::new(code, KeyModifiers::empty()))
                 .unwrap();

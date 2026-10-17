@@ -286,6 +286,15 @@ fn run_transfer(
     for blocked in &result.blocked {
         println!("  blocked: {blocked}");
     }
+    if !result.deleted_host_ids.is_empty() || !result.deleted_identity_ids.is_empty() {
+        let failures = result.purge_source_secrets(ctx.password_store());
+        if !failures.is_empty() {
+            eprintln!(
+                "warning: {}",
+                crate::store::transfer::secret_purge_warning(&failures)
+            );
+        }
+    }
     ctx.reload_hosts()?;
     Ok(0)
 }

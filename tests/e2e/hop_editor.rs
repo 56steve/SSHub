@@ -161,14 +161,8 @@ fn route_reuse_replaces_every_hop() {
 fn hop_that_would_loop_is_refused() {
     let mut app = app(None);
     edit(&mut app, "bastion-eu");
-    // db-1 depends on bastion-eu: as a hop of bastion-eu it would loop.
-    press(&mut app, 'a');
-    typed(&mut app, "db-1");
-    app.handle_key(key(KeyCode::Enter)).unwrap();
-    assert_eq!(jump(&app), "");
-    assert!(screen(&app).contains("would loop"));
-    // The host itself too.
-    app.handle_key(key(KeyCode::Esc)).unwrap();
+    // A launcher hop is expanded to `user@addr`, so db-1 (which jumps through
+    // bastion-eu) is no loop as a hop of bastion-eu; the host itself is.
     press(&mut app, 'a');
     typed(&mut app, "bastion-eu");
     app.handle_key(key(KeyCode::Enter)).unwrap();
@@ -291,13 +285,17 @@ fn a_hostile_hop_is_refused_in_the_test_result_and_the_form_not_called_ok() {
     assert!(text.contains("invalid hop"), "{text}");
     assert!(!text.contains("stays in a$IFS"), "{text}");
     press(&mut app, 't');
-    for _ in 0..200 {
+    for _ in 0..1000 {
         app.poll_test_run();
         if app.test_run.as_ref().is_some_and(|r| !r.running()) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    assert!(
+        app.test_run.as_ref().is_some_and(|r| !r.running()),
+        "the test run did not finish"
+    );
     let text = screen(&app);
     assert!(text.contains("refused: invalid hop"), "{text}");
     assert!(

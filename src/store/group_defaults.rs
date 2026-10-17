@@ -51,9 +51,10 @@ pub struct ResolvedConnection {
     /// host (one `ssh` cannot look up in `~/.ssh/config`) is expanded to
     /// `user@address:port`. Display, export and the form keep `proxy_jump`.
     pub jump_argv: Option<String>,
-    /// Set when `proxy_jump` is not valid hops (so `jump_argv` is `None`): a
-    /// caller that runs ssh must refuse with this message. Connecting without
-    /// the jump would bypass the bastion the user configured.
+    /// Set when the connection must be refused (so `jump_argv` may be `None`):
+    /// `proxy_jump` is not valid hops, or the destination is outside the
+    /// allowlist. A caller that runs ssh must refuse with this message;
+    /// connecting without the jump would bypass the bastion the user configured.
     pub jump_error: Option<String>,
     pub transport: SessionTransport,
     pub forward_agent: bool,
@@ -120,7 +121,7 @@ impl ResolvedConnection {
     /// display-only paths use when they cannot resolve (connect paths use
     /// [`LauncherStore::resolve_connection`]).
     pub fn from_stored(host: &ManagedHost) -> Self {
-        Self {
+        let mut out = Self {
             identity_id: host.identity_id,
             identity: host.identity.clone(),
             username: host.username.clone(),
@@ -140,7 +141,26 @@ impl ResolvedConnection {
             }),
             transport: host.transport.unwrap_or_default(),
             forward_agent: host.forward_agent.unwrap_or(false),
+        };
+        out.jump_error = out
+            .jump_error
+            .take()
+            .or_else(|| out.destination_problem(host));
+        out
+    }
+
+    /// Why `host`'s destination (its address and effective login, the
+    /// identity's included) must not reach ssh, if it must not. ssh_config rows
+    /// connect by alias and never put their stored address on a command line.
+    pub fn destination_problem(&self, host: &ManagedHost) -> Option<String> {
+        if host.source != crate::store::HostSource::Launcher {
+            return None;
         }
+        let user = self
+            .username
+            .as_deref()
+            .or_else(|| self.identity.as_ref().and_then(|i| i.username.as_deref()));
+        crate::ssh::destination_problem(&host.address, user)
     }
 }
 
@@ -243,6 +263,11 @@ impl LauncherStore {
     /// Resolve the effective connection values for `host`.
     pub fn resolve_connection(&self, host: &ManagedHost) -> Result<ResolvedConnection> {
         let mut out = self.resolve_fields(host)?;
+        // Every connect, tunnel, broadcast, SFTP, key-push and export path
+        // resolves here, so the destination allowlist refuses once for all.
+        if let Some(problem) = out.destination_problem(host) {
+            anyhow::bail!("{}: {problem}", host.name);
+        }
         // A host (a bastion in a group whose default jump is that bastion) must
         // not be its own hop: ssh would dial itself, and the map draws a loop.
         if let Some(jump) = out.proxy_jump.as_deref() {
@@ -300,6 +325,10 @@ impl LauncherStore {
         if let Some(f) = host.forward_agent {
             out.forward_agent = f;
         }
+        out.jump_error = out
+            .jump_error
+            .take()
+            .or_else(|| out.destination_problem(host));
         Ok(out)
     }
 
@@ -922,5 +951,47 @@ mod tests {
         nh.proxy_jump = Some("other".into());
         let db = store.create_host(&nh).unwrap();
         assert!(store.resolve_connection(&db).is_ok());
+    }
+
+    #[test]
+    fn a_destination_outside_the_allowlist_is_refused_even_through_a_jump() {
+        // OpenSSH < 9.6 expands the destination into `sh -c "ssh -W '[%h]:%p' ..."`.
+        let store = memory();
+        store
+            .create_host(&NewHost::launcher("bastion", "10.0.0.1"))
+            .unwrap();
+        for (addr, user) in [
+            ("x';touch /tmp/p;'y", None),
+            ("10.0.0.2", Some("a$IFS-oProxyCommand=touch\\$IFS/x")),
+        ] {
+            let mut nh = NewHost::launcher("victim", addr);
+            nh.username = user.map(String::from);
+            nh.proxy_jump = Some("bastion".into());
+            let victim = store.create_host(&nh).unwrap();
+            let err = store.resolve_connection(&victim).unwrap_err().to_string();
+            assert!(err.contains("refusing to hand it to ssh"), "{err}");
+            // The display/fallback path refuses through `jump_error`.
+            assert!(ResolvedConnection::from_stored(&victim)
+                .jump_error
+                .is_some());
+            store.delete_host(victim.id).unwrap();
+        }
+        // A login that only the identity supplies counts too.
+        let identity = store
+            .create_identity(&crate::store::NewIdentity {
+                name: "bad".into(),
+                username: Some("a b".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut nh = NewHost::launcher("viaid", "10.0.0.3");
+        nh.identity_id = Some(identity.id);
+        let viaid = store.create_host(&nh).unwrap();
+        assert!(store.resolve_connection(&viaid).is_err());
+        // A sane destination is untouched.
+        let ok = store
+            .create_host(&NewHost::launcher("ok", "db-1.example.com"))
+            .unwrap();
+        assert!(store.resolve_connection(&ok).unwrap().jump_error.is_none());
     }
 }

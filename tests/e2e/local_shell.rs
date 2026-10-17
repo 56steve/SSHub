@@ -19,12 +19,12 @@ impl HostResolver for EmptyResolver {
     }
 }
 
-fn fresh_app() -> App {
+fn fresh_app() -> (App, crate::support::EnvGuard) {
     // Pin the shell so the spawn never depends on the ambient $SHELL pointing
-    // at a real binary (open_local_shell reads it at call time). Both tests in
-    // this file set the same value, so parallel execution is harmless, and no
-    // other e2e test reads SHELL.
-    std::env::set_var("SHELL", "/bin/sh");
+    // at a real binary (open_local_shell reads it at call time). The guard is
+    // returned so the pin holds for the whole test, serialized and restored.
+    let mut env = crate::support::EnvGuard::new();
+    env.set("SHELL", "/bin/sh");
     let store = Arc::new(LauncherStore::open_in_memory().unwrap());
     let mut app = App::new_with_deps(
         AppConfig::default(),
@@ -36,7 +36,7 @@ fn fresh_app() -> App {
         },
     );
     app.reload_hosts().unwrap();
-    app
+    (app, env)
 }
 
 /// The default `Ctrl+Shift+T` binding parses to `Char('t')` with
@@ -55,7 +55,7 @@ fn ctrl_shift_t() -> KeyEvent {
 /// view — identical lifecycle to an ssh tab.
 #[test]
 fn ctrl_shift_t_opens_local_shell_tab() {
-    let mut app = fresh_app();
+    let (mut app, _env) = fresh_app();
     assert!(app.sessions.is_empty());
     assert!(app.active_session.is_none());
 
@@ -74,7 +74,7 @@ fn ctrl_shift_t_opens_local_shell_tab() {
 /// rather than replacing the first, matching the multi-tab ssh behaviour.
 #[test]
 fn ctrl_shift_t_opens_additional_local_shell_from_session() {
-    let mut app = fresh_app();
+    let (mut app, _env) = fresh_app();
     app.handle_key(ctrl_shift_t()).unwrap();
     assert_eq!(app.sessions.len(), 1);
 
@@ -90,7 +90,7 @@ fn ctrl_shift_t_opens_additional_local_shell_from_session() {
 /// `AppMode::Normal`).
 #[test]
 fn closing_last_local_shell_returns_to_dashboard() {
-    let mut app = fresh_app();
+    let (mut app, _env) = fresh_app();
     app.handle_key(ctrl_shift_t()).unwrap();
     assert_eq!(app.sessions.len(), 1);
     assert_eq!(app.active_session, Some(0));
@@ -106,7 +106,7 @@ fn closing_last_local_shell_returns_to_dashboard() {
 /// falls back onto the remaining tab rather than dropping to the dashboard.
 #[test]
 fn closing_one_of_two_local_shells_keeps_a_tab() {
-    let mut app = fresh_app();
+    let (mut app, _env) = fresh_app();
     app.handle_key(ctrl_shift_t()).unwrap();
     app.handle_key(ctrl_shift_t()).unwrap();
     assert_eq!(app.sessions.len(), 2);
@@ -126,7 +126,7 @@ fn closing_one_of_two_local_shells_keeps_a_tab() {
 /// session alive (tab still present), matching ssh detach behaviour.
 #[test]
 fn detach_local_shell_keeps_session_alive() {
-    let mut app = fresh_app();
+    let (mut app, _env) = fresh_app();
     app.handle_key(ctrl_shift_t()).unwrap();
     assert_eq!(app.sessions.len(), 1);
 

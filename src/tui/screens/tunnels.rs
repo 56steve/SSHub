@@ -162,7 +162,7 @@ pub fn render_tunnels(frame: &mut Frame, area: Rect, app: &App) {
 /// The selected tunnel's status and failure detail, when the tab shows that
 /// detail on its own line above the table.
 fn selected_detail(app: &App) -> Option<(&str, &str)> {
-    let tunnel = app.tunnels.get(app.tunnel_selected)?;
+    let tunnel = app.selected_tunnel()?;
     let status = app.tunnel_manager.status(tunnel.id);
     if !matches!(status, "gave_up" | "error" | "reconnecting") {
         return None;

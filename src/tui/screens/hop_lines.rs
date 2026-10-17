@@ -80,13 +80,15 @@ pub fn line_count(h: &HopSection, theme: &ResolvedTheme, width: u16) -> u16 {
 }
 
 /// Push the hop section as lines (no field index: a click there does nothing).
-/// `width` is the form's inner width.
+/// `width` is the form's inner width. Returns the index in `lines` of the last
+/// row of the open picker (or raw-hop box), which must stay on screen.
 pub fn push_hop_lines(
     lines: &mut Vec<(Line<'static>, Option<usize>)>,
     h: &HopSection,
     theme: &ResolvedTheme,
     width: u16,
-) {
+) -> Option<usize> {
+    let mut input_end = None;
     let help = theme.style(StyleRole::FormHelp);
     let value = theme.style(StyleRole::FormValue);
     let focus = theme.style(StyleRole::FocusIndicator);
@@ -94,8 +96,11 @@ pub fn push_hop_lines(
     let dim = theme.style(StyleRole::TextDim);
     let err = Style::default().fg(theme.color(crate::theme::catalog::ColorRole::StatusError));
     let ok = Style::default().fg(theme.color(crate::theme::catalog::ColorRole::StatusSuccess));
+    let base = lines.len();
+    let pushed = std::cell::Cell::new(0usize);
     let mut push = |text: String, style: Style| {
         lines.push((Line::from(Span::styled(text, style)), None));
+        pushed.set(pushed.get() + 1);
     };
 
     // Boxes keep clear of the form's own right edge (it wraps wider lines).
@@ -152,6 +157,7 @@ pub fn push_hop_lines(
             None => push(bx.row(" user@host:port   \u{21b5} add   Esc cancel"), help),
         }
         push(bx.bottom(""), muted);
+        input_end = Some(base + pushed.get() - 1);
     }
 
     // ---- picker
@@ -188,6 +194,7 @@ pub fn push_hop_lines(
             push(bx.row(&format!(" {}", p.preview)), muted);
         }
         push(bx.bottom("\u{21b5} add  End raw hop  Esc close"), help);
+        input_end = Some(base + pushed.get() - 1);
     }
 
     // ---- test result
@@ -273,4 +280,5 @@ pub fn push_hop_lines(
     if let Some(n) = &h.notice {
         push(format!("{}{n}", " ".repeat(INDENT)), err);
     }
+    input_end
 }

@@ -461,3 +461,43 @@ pub(crate) fn tunnels_tab_slash_filters_and_selection_follows_view() {
     type_str(&mut app, "/5432");
     assert_eq!(app.tunnel_view(), vec![0]);
 }
+
+#[test]
+pub(crate) fn no_match_filter_leaves_tunnel_actions_inert() {
+    let mut app = test_app(vec![("web", host("web"))]);
+    app.active_tab = 2;
+    app.tunnels = vec![tunnel(1, "db", 5432), tunnel(2, "web", 8080)];
+    app.handle_key(key_char('/')).unwrap();
+    type_str(&mut app, "zzzz");
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    assert!(app.tunnel_view().is_empty());
+    assert!(app.selected_tunnel().is_none());
+
+    app.handle_key(key_char('d')).unwrap();
+    assert!(app.pending_delete.is_none(), "delete must not open");
+    assert_eq!(app.mode, AppMode::Normal);
+    app.handle_key(key_char('e')).unwrap();
+    assert!(app.tunnel_form.is_none(), "edit must not open");
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    assert!(app.tunnel_notice.is_none(), "toggle must not act");
+}
+
+#[test]
+pub(crate) fn no_match_filter_leaves_identity_actions_inert() {
+    let mut app = test_app(vec![("web", host("web"))]);
+    app.active_tab = 3;
+    app.identities = vec![
+        ident(1, "work", "/k/id_work"),
+        ident(2, "home", "/k/id_home"),
+    ];
+    app.handle_key(key_char('/')).unwrap();
+    type_str(&mut app, "zzzz");
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    assert!(app.selected_identity().is_none());
+
+    app.handle_key(key_char('d')).unwrap();
+    assert!(app.pending_delete.is_none(), "delete must not open");
+    app.handle_key(key_char('e')).unwrap();
+    assert!(app.identity_form.is_none(), "edit must not open");
+    assert_eq!(app.mode, AppMode::Normal);
+}

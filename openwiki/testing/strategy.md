@@ -10,27 +10,32 @@ tags: [testing, e2e, fixtures, oracle-tests, quality]
 
 `just test` runs `cargo test --no-default-features` (every target), then the
 `smoke`, `e2e` and `config_load` targets again by name. [CI](../operations/ci-cd.md)
-runs plain `cargo test` on ubuntu and macOS with default features. The tree has
-about 1,680 `#[test]` functions.
+runs plain `cargo test` on ubuntu and macOS with default features, after
+installing `sshd` and Graphviz so the oracle tests cannot skip (see below). The
+tree has about 1,900 `#[test]` functions.
 
 | Level | Command | Location | Mechanism |
 |---|---|---|---|
-| Unit | `cargo test --lib` | inline `#[cfg(test)]` modules across `src/`, plus `src/app/tests/` (19 modules) | `test_app` / `test_store` helpers in `src/app/tests/mod.rs`: HashMap-backed `MockResolver`, `LauncherStore::open_in_memory()`, in-memory `MemoryPasswordStore`; key events fed to `App::handle_key` |
+| Unit | `cargo test --lib` | inline `#[cfg(test)]` modules across `src/` (also `src/map/tests.rs`), plus `src/app/tests/` (23 modules) | `test_app` / `test_store` helpers in `src/app/tests/mod.rs`: HashMap-backed `MockResolver`, `LauncherStore::open_in_memory()`, in-memory `MemoryPasswordStore`; key events fed to `App::handle_key` |
 | Smoke | `cargo test --test smoke` | `tests/smoke/binary_starts.rs` with `cli_commands`, `resolver`, `run_app_quit`, `theme_public_api` | `assert_cmd` drives the real binary: `--help`, `--dry-run`, headless quit via `SSHUB_AUTO_QUIT`, CLI commands; `theme_public_api` uses the theme API from outside the crate |
-| E2E | `cargo test --test e2e` | `tests/e2e/` (22 scenario modules) | Build `App` with `App::new_with_deps(AppDeps { .. })` and inject `crossterm` `KeyEvent`s; assert on `app.mode` and store contents (a few modules, e.g. `broadcast`, `theme_picker`, also render to a `TestBackend`) |
+| E2E | `cargo test --test e2e` | `tests/e2e/` (26 scenario modules) | Build `App` with `App::new_with_deps(AppDeps { .. })` and inject `crossterm` `KeyEvent`s; assert on `app.mode` and store contents (a few modules, e.g. `broadcast`, `theme_picker`, `network_map`, `hop_editor`, `map_mockups`, also render to a `TestBackend`) |
 | Config | `cargo test --test config_load` | `tests/smoke/config_load.rs` | Fixture `config.toml` creation and loading |
-| Transfer | `cargo test --test transfer_engine` / `--test transfer_cli` | `tests/transfer_engine.rs`, `tests/transfer_cli.rs` (auto-discovered targets) | Contract tests for `store::transfer` and the `cli::transfer` plan/args layer |
+| Transfer | `cargo test --test transfer_engine` / `--test transfer_cli` / `--test transfer_secrets` | `tests/transfer_engine.rs`, `tests/transfer_cli.rs`, `tests/transfer_secrets.rs` (auto-discovered targets) | Contract tests for `store::transfer`, the `cli::transfer` plan/args layer, and that a move purges the source credential store (a copy deletes nothing, failures are reported) via an in-memory `PasswordStore` |
 
-`src/app/tests/` modules: broadcast, cert_agent, ghost, host_crud, host_detail,
-host_form, identity_group, keybind, log_browser, misc, profile_manager,
-session, sftp, snippets, suggestions, tags, theme_picker,
-transfer_plan_confirm, transport.
+`src/app/tests/` modules: broadcast, cert_agent, field_click, ghost, host_crud,
+host_detail, host_form, identity_group, keybind, keybind_conflicts, log_browser,
+misc, panes, profile_manager, session, sftp, snippets, suggestions, tags,
+theme_picker, transfer_plan_confirm, transport, workspaces.
 
 E2E modules: adhoc_connect, broadcast, config_reload, connect_managed,
-first_run, group_crud, host_crud, host_detail, host_sort, hybrid_compat,
-import_export, keychain, local_shell, metadata_persist, quick_connect,
-search_and_navigate, session_switcher, snippet_crud, ssh_config_sync,
-termius_import, theme_picker, tunnel_form.
+first_run, group_crud, hop_editor, host_crud, host_detail, host_sort,
+hybrid_compat, import_export, keychain, local_shell, map_mockups,
+metadata_persist, network_map, quick_connect, search_and_navigate,
+session_switcher, snippet_crud, ssh_config_sync, termius_import, test_connect,
+theme_picker, tunnel_form. `map_mockups` renders every network-map state and
+checks the key rows of each against `docs/network-map/mockups/D*.txt`;
+`test_connect` drives the map's `t` action against real `ssh` and loopback
+sockets.
 
 Rendering is tested with ratatui's `TestBackend` inside `src/tui/` and the
 screen modules (new overlays need a render smoke test, per AGENTS.md). The
@@ -43,28 +48,46 @@ hot path allocation-free; `src/test_support.rs` holds shared render fixtures.
 ## Oracle tests
 
 Code that re-implements what an external tool knows must be tested against that
-tool ([docs/oracle-tests.md](../../docs/oracle-tests.md)). Each one skips, not
-fails, when the tool is missing:
+tool ([docs/oracle-tests.md](../../docs/oracle-tests.md)). A missing tool skips
+the test locally but **fails it when `CI` is set**: `tool_missing` in
+`src/test_support.rs` and `tests/support/mod.rs` asserts `CI` is unset, so a
+runner without `sshd`, `ssh`, `ssh-keygen` or Graphviz `dot` cannot turn the
+oracles into silent no-ops (hence the apt/brew install steps in `ci.yml`).
 
 - `ssh/resolver.rs::listed_aliases_round_trip_through_real_ssh`: every listed
   alias must resolve with the real `ssh -G`.
 - `known_hosts.rs`: assertions derived from real `ssh-keygen -F` / `-R`.
-- `ssh/cert.rs` and `src/app/tests/cert_agent.rs`: certificates made and read
-  with the real `ssh-keygen`.
-- `session/mod.rs`: a key-auth **tempdir `sshd`** on a free 127.0.0.1 port
-  (`tempdir_sshd`) backs `real_ssh_master_latches_connected_through_drain` and a
-  ProxyJump test proving a jump host's authentication never marks the session
-  connected.
+- `ssh/cert.rs`, `src/app/tests/cert_agent.rs`, `sftp/transport.rs`
+  (`entries_are_readable_by_ssh_keygen`) and `tests/e2e/keychain.rs`: keys,
+  certificates and known_hosts entries made and read with the real
+  `ssh-keygen`.
+- `ssh/host.rs`, `cli/exec.rs`, `tunnel/spawn.rs`, `app/test_connect.rs`: argv
+  and option-injection guards checked against real `ssh` (e.g. an option-like
+  address, a shell-active ProxyJump hop user, `a_config_remote_command_does_not_defeat_the_ad_hoc_command`).
+- `map/hops.rs`, `map/build.rs`, `map/tests.rs`: the hop-token grammar and the
+  ProxyJump chain rule compared with real `ssh -J` / `ssh -G`; `map/dot.rs`
+  pipes `map --dot` through Graphviz `dot -Tsvg`.
+- **Tempdir `sshd`** (`test_support::tempdir_sshd`, a key-auth sshd on a free
+  127.0.0.1 port with its own host/user keys and `known_hosts`;
+  `tempdir_sshd_asking_for_a_password` refuses every password): backs
+  `session/mod.rs` (`real_ssh_master_latches_connected_through_drain`,
+  `proxyjump_hop_authenticating_never_reads_as_connected`),
+  `ssh/test_connect.rs` (reason mapping) and `session/interactive_auth.rs`
+  (which hop asks, and what each prompt is answered with; needs `python3` too).
 
 Still missing per that doc: an `ssh/export.rs` round trip through `ssh -G`, and
 real (not agent-authored) PuTTY, mRemoteNG and Termius export files.
 
 ## Fixtures & support (`tests/support/`, `tests/fixtures/`)
 
-- `tests/support/mod.rs` (included with `#[path = "../support/mod.rs"]`) only
-  provides `FixtureResolver` (`fixture_resolver.rs`): a `HostResolver` reading
+- `tests/support/mod.rs` (included with `#[path = "../support/mod.rs"]`):
+  `FixtureResolver` (`fixture_resolver.rs`), a `HostResolver` reading
   `tests/fixtures/ssh_config` (dev-local, staging-app, prod-db-01) with canned
-  `ssh -G` output from `tests/fixtures/ssh_g/<alias>.txt`.
+  `ssh -G` output from `tests/fixtures/ssh_g/<alias>.txt`; plus `tool_missing`,
+  `have_ssh`, `isolate_home` (once-per-binary scratch `HOME` and
+  `SSHUB_SSH_CONFIG`), `EnvGuard` (takes the one env lock, restores variables
+  on drop; not reentrant with `isolate_home`) and `free_port` (never hands the
+  same port out twice).
 - `tests/fixtures/config.toml`: a minimal `[appearance]` table.
 - `tests/fixtures/theme/default-dashboard.buffer`: the golden dashboard.
 
@@ -98,4 +121,7 @@ why the never-executed list matters more than the percentage.
 - CLI: `tests/smoke/cli_commands.rs` (see [CLI](../workflows/cli.md)).
 - Sessions/SFTP: `src/app/tests/session.rs`, `src/app/tests/sftp.rs`, inline
   tests in `src/session/`; keep SFTP logic in the pure `src/sftp/model.rs`.
+- Network map / hop editor: `src/map/tests.rs` (pure map logic),
+  `tests/e2e/network_map.rs`, `hop_editor.rs`, `map_mockups.rs`; keep a
+  mockup's key rows in `docs/network-map/mockups/` in step with the screen.
 - Anything that parses an external tool's output: an oracle test.

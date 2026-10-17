@@ -118,6 +118,7 @@ impl App {
         if let Some(pos) = self.identities.iter().position(|i| i.name == identity_name) {
             self.identity_selected = pos;
         }
+        self.snap_identity_selection();
         Ok(())
     }
 

@@ -149,6 +149,7 @@ mod host_detail;
 mod host_form;
 mod identity_group;
 mod keybind;
+mod keybind_conflicts;
 mod log_browser;
 mod misc;
 mod panes;
