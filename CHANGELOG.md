@@ -4,6 +4,12 @@ All notable changes to SSHub are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **SFTP false "host key changed"** - the SFTP tab negotiated a different host key
+  type (ECDSA) than the one in `known_hosts` (ed25519) and reported a MITM. It now
+  asks the server for the key types already recorded for that host.
+
 ## [0.19.0] - 2026-10-17
 
 ### Added
