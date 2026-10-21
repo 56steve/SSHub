@@ -4,6 +4,8 @@ All notable changes to SSHub are documented in this file.
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-10-21
+
 ### Fixed
 
 - **SFTP false "host key changed"** - the SFTP tab negotiated a different host key
